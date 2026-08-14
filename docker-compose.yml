@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: reselling-saas-db
+    environment:
+      POSTGRES_DB: reselling_saas
+      POSTGRES_USER: reselling_user
+      POSTGRES_PASSWORD: reselling_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reselling_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - reselling-network
+
+  # Next.js Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reselling-saas-app
+    environment:
+      DATABASE_URL: postgresql://reselling_user:reselling_password@postgres:5432/reselling_saas
+      NEXTAUTH_SECRET: dev-secret-key-change-in-production
+      NEXTAUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - reselling-network
+    command: npm run dev
+
+  # Redis Cache (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: reselling-saas-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - reselling-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  reselling-network:
+    driver: bridge
