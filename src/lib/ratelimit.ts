@@ -27,6 +27,7 @@ const DEFAULT_CONFIGS = {
   upload: { points: 50, duration: 3600 }, // 50 per hour
   stripe: { points: 50, duration: 3600 }, // 50 per hour
   fulfillment: { points: 100, duration: 3600 }, // 100 per hour
+  emailVerification: { points: 3, duration: 3600 }, // 3 per hour
 } as const;
 
 type LimitType = keyof typeof DEFAULT_CONFIGS;
@@ -201,6 +202,10 @@ export class RateLimiterService {
 
   async checkFulfillment(workspaceId: string): Promise<RateLimitResult> {
     return this.check(workspaceId, 'fulfillment');
+  }
+
+  async checkEmailVerification(userId: string): Promise<RateLimitResult> {
+    return this.check(userId, 'emailVerification');
   }
 
   static getClientIP(request: Request): string {

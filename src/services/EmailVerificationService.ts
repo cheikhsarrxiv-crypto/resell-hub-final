@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import prisma from '@/lib/prisma';
 import { EmailService } from './EmailService';
+import { rateLimiter } from '@/lib/ratelimit';
 
 /**
  * Email Verification Service
@@ -182,24 +183,15 @@ export class EmailVerificationService {
     email: string
   ): Promise<VerificationTokenResult> {
     try {
-      // Rate limit check (max 3 per hour)
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-      const recentAttempts = await prisma.emailVerificationToken.findFirst({
-        where: {
-          userId,
-          createdAt: { gte: oneHourAgo },
-        },
-      });
+      // Rate limit check (max 3 per hour). This must NOT be based on counting
+      // EmailVerificationToken rows: createVerificationToken() upserts a
+      // single row per user (userId is @unique), so a DB-row count can never
+      // exceed 1 and would never actually block anything. Use the app's
+      // regular request-count rate limiter instead, which tracks attempts
+      // independently of that row's state.
+      const rateLimitResult = await rateLimiter.checkEmailVerification(userId);
 
-      // Count how many tokens were created in last hour
-      const tokenCount = await prisma.emailVerificationToken.count({
-        where: {
-          userId,
-          createdAt: { gte: oneHourAgo },
-        },
-      });
-
-      if (tokenCount >= 3) {
+      if (!rateLimitResult.success) {
         console.warn(
           `[EmailVerification] Rate limit exceeded for user: ${userId}`
         );

@@ -125,7 +125,7 @@ describe.skipIf(!dbAvailable)('Email verification — real PostgreSQL', () => {
     expect(stillUnverified!.emailVerified).toBe(false);
   });
 
-  it('resendVerificationEmail rate limit behavior (documents actual behavior against real DB)', async () => {
+  it('resendVerificationEmail allows exactly 3 resends per hour, then blocks the 4th', async () => {
     const user = await createTestUser();
 
     const first = await EmailVerificationService.resendVerificationEmail(user.id, user.email);
@@ -136,15 +136,54 @@ describe.skipIf(!dbAvailable)('Email verification — real PostgreSQL', () => {
     expect(first.success).toBe(true);
     expect(second.success).toBe(true);
     expect(third.success).toBe(true);
+    expect(fourth.success).toBe(false);
+    expect(fourth.message).toMatch(/too many/i);
+  });
 
-    // NOTE: createVerificationToken() upserts a single row keyed on userId
-    // (@unique), so repeated resends update the SAME row instead of adding
-    // new ones. The rate limit counts rows created in the last hour
-    // (prisma.emailVerificationToken.count(...)), which can therefore never
-    // exceed 1 for a given user — this assertion documents that the 4th
-    // call currently still succeeds rather than asserting the intended
-    // "blocked after 3" behavior, so a false test doesn't hide a real gap.
-    expect(fourth.success).toBe(true);
+  it('cannot bypass the limit via the EmailVerificationToken upsert: the DB row is overwritten on every resend, yet the 4th is still blocked', async () => {
+    const user = await createTestUser();
+
+    await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+    const afterFirst = await prisma.emailVerificationToken.findUnique({ where: { userId: user.id } });
+
+    await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+    const afterSecond = await prisma.emailVerificationToken.findUnique({ where: { userId: user.id } });
+
+    // Confirms the upsert really does overwrite the same row each time
+    // (only one row ever exists, with a fresh hash/expiry) — proving the
+    // rate limit can no longer rely on counting rows, and that the fix
+    // holds despite that.
+    expect(afterSecond!.id).toBe(afterFirst!.id);
+    expect(afterSecond!.hashedToken).not.toBe(afterFirst!.hashedToken);
+    expect(await prisma.emailVerificationToken.count({ where: { userId: user.id } })).toBe(1);
+
+    await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+    const fourth = await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+
+    expect(fourth.success).toBe(false);
+  });
+
+  it('allows a new resend once the 1-hour window has elapsed', async () => {
+    // Only fake Date (used by the rate limiter's window check) so the real
+    // Postgres client's own internal timers keep working normally.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const user = await createTestUser();
+
+      await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+      await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+      await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+      const blocked = await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+      expect(blocked.success).toBe(false);
+
+      // Advance past the 1-hour rate-limit window.
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1000);
+
+      const afterWindow = await EmailVerificationService.resendVerificationEmail(user.id, user.email);
+      expect(afterWindow.success).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('signup flow: creating a verification token right after user creation produces a real, usable token', async () => {
