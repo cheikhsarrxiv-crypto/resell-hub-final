@@ -70,6 +70,23 @@ export class EmailService {
   }
 
   /**
+   * Send email verification link
+   */
+  static async sendVerificationEmail(
+    email: string,
+    verificationUrl: string
+  ): Promise<EmailResult> {
+    return this.send({
+      to: email,
+      subject: 'Verify your ADKSY email address',
+      template: 'verification',
+      variables: {
+        verificationUrl,
+      },
+    });
+  }
+
+  /**
    * Send welcome email
    */
   static async sendWelcomeEmail(
@@ -442,6 +459,12 @@ export class EmailService {
    */
   private static getEmailTemplate(template: string): string {
     const templates: Record<string, string> = {
+      verification: `
+<h1>Verify your email address</h1>
+<p>Thanks for signing up for ADKSY. Please confirm your email address to activate your account.</p>
+<p><a href="{{verificationUrl}}">Verify my email</a></p>
+<p>This link expires in 24 hours. If you didn't create an ADKSY account, you can ignore this email.</p>
+      `,
       welcome: `
 <h1>Welcome to ADKSY</h1>
 <p>Hi {{userName}},</p>

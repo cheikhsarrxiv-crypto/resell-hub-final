@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import prisma from '@/lib/prisma';
+import { EmailService } from './EmailService';
 
 /**
  * Email Verification Service
@@ -62,6 +63,19 @@ export class EmailVerificationService {
       });
 
       console.log(`[EmailVerification] Token created for user: ${userId}`);
+
+      // Send the verification email (does not fail token creation on send error —
+      // the token is already persisted and can still be resent).
+      const appUrl = process.env.NEXTAUTH_URL || 'http://localhost:3000';
+      const verificationUrl = `${appUrl}/verify-email?token=${token}&userId=${userId}`;
+      const emailResult = await EmailService.sendVerificationEmail(email, verificationUrl);
+
+      if (!emailResult.success) {
+        console.error(
+          `[EmailVerification] Failed to send verification email to ${email}:`,
+          emailResult.error
+        );
+      }
 
       return {
         success: true,

@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { signUpSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
 import { rateLimiter, RateLimiterService } from '@/lib/ratelimit';
+import { EmailVerificationService } from '@/services/EmailVerificationService';
 
 export async function POST(request: NextRequest) {
   try {
@@ -90,6 +91,9 @@ export async function POST(request: NextRequest) {
         country: user.country || 'FR',
       },
     });
+
+    // Send email verification link (best-effort — signup already succeeded)
+    await EmailVerificationService.createVerificationToken(user.id, user.email);
 
     return NextResponse.json(
       {

@@ -12,15 +12,24 @@ const protectedApiRoutes = [
   '/api/marketplaces',
 ];
 
+// Routes an authenticated-but-unverified user must still be able to reach
+// (the verify page and /api/email/verify are fully public above, since the
+// emailed link may be opened before any login).
+const emailVerificationExemptRoutes = ['/api/email/resend-verification'];
+
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const session = await auth();
 
-  // Public routes
+  // Public routes — reachable with no session at all. /verify-email and
+  // /api/email/verify must be here (not just exempt below): the emailed
+  // link can be opened before the user ever logs in.
   if (
     pathname === '/' ||
     pathname === '/login' ||
     pathname === '/signup' ||
+    pathname === '/verify-email' ||
+    pathname === '/api/email/verify' ||
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/pricing') ||
     pathname.startsWith('/_next')
@@ -40,6 +49,26 @@ export async function middleware(request: NextRequest) {
     }
     // Pages: redirect to login
     return NextResponse.redirect(new URL('/login', request.url));
+  }
+
+  // Require a verified email for everything else. A fresh DB read (not a
+  // value cached in the JWT) so verifying from another tab/device takes
+  // effect on the very next request instead of waiting for a new login.
+  if (!emailVerificationExemptRoutes.includes(pathname)) {
+    const user = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { emailVerified: true },
+    });
+
+    if (!user?.emailVerified) {
+      if (pathname.startsWith('/api')) {
+        return NextResponse.json(
+          { error: 'Email verification required' },
+          { status: 403 }
+        );
+      }
+      return NextResponse.redirect(new URL('/verify-email', request.url));
+    }
   }
 
   // API routes: Verify workspace ownership
