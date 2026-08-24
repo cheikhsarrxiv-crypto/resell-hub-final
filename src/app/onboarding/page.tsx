@@ -56,7 +56,7 @@ export default function OnboardingPage() {
     }
   };
 
-  const saveStep = async (stepData: any) => {
+  const saveStep = async (step: number, stepData: any) => {
     if (!workspaceId) return;
 
     setSaving(true);
@@ -65,8 +65,8 @@ export default function OnboardingPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          step: onboarding!.currentStep,
           ...stepData,
+          step,
         }),
       });
 
@@ -122,9 +122,10 @@ export default function OnboardingPage() {
   const CurrentStepComponent = steps[currentStep - 1]?.component;
 
   const goToNextStep = async (stepData: any) => {
-    await saveStep(stepData);
+    const nextStep = Math.min(currentStep + 1, 7);
+    await saveStep(nextStep, stepData);
     if (currentStep < 7) {
-      // Le step sera automatiquement mis à jour après savegarde
+      // Le step est désormais avancé côté serveur
       // On recharge pour rafraîchir l'UI
       await fetchOnboarding();
     } else {
