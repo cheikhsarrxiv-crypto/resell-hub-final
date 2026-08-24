@@ -19,9 +19,7 @@ export class AdminMetricsService {
    * Get total workspaces count
    */
   static async getTotalWorkspaces(): Promise<number> {
-    return prisma.workspace.count({
-      where: { deletedAt: null },
-    });
+    return prisma.workspace.count();
   }
 
   /**
@@ -126,10 +124,10 @@ export class AdminMetricsService {
       where: {
         status: { in: ['completed', 'shipped', 'accepted'] },
       },
-      select: { price: true },
+      select: { totalPrice: true },
     });
 
-    return orders.reduce((total: any, order: any) => total + order.price, 0);
+    return orders.reduce((total: any, order: any) => total + order.totalPrice, 0);
   }
 
   /**
@@ -200,10 +198,10 @@ export class AdminMetricsService {
           status: 'completed',
         },
       },
-      select: { price: true },
+      select: { totalPrice: true },
     });
 
-    return orders.reduce((total: any, order: any) => total + order.price, 0);
+    return orders.reduce((total: any, order: any) => total + order.totalPrice, 0);
   }
 
   /**
@@ -229,18 +227,23 @@ export class AdminMetricsService {
         status: { in: ['completed', 'shipped', 'accepted'] },
       },
       select: {
-        price: true,
-        product: {
+        totalPrice: true,
+        items: {
           select: {
-            purchasePrice: true,
-            fulfillmentCost: true,
+            product: {
+              select: {
+                purchasePrice: true,
+                fulfillmentCost: true,
+              },
+            },
           },
         },
       },
     });
 
     return orders.reduce((total: any, order: any) => {
-      const profit = order.price - (order.product?.purchasePrice || 0) - (order.product?.fulfillmentCost || 0);
+      const product = order.items[0]?.product;
+      const profit = order.totalPrice - (product?.purchasePrice || 0) - (product?.fulfillmentCost || 0);
       return total + Math.max(0, profit);
     }, 0);
   }
@@ -279,7 +282,7 @@ export class AdminMetricsService {
       orderBy: { createdAt: 'desc' },
       take: limit,
       include: {
-        product: { select: { title: true } },
+        items: { include: { product: { select: { title: true } } } },
         workspace: { select: { name: true } },
       },
     });
@@ -291,28 +294,31 @@ export class AdminMetricsService {
   static async getTopProducts(limit: number = 5): Promise<any[]> {
     const orders = await prisma.order.findMany({
       select: {
-        productId: true,
-        price: true,
-        product: { select: { title: true } },
+        totalPrice: true,
+        items: {
+          select: { productId: true, product: { select: { title: true } } },
+        },
       },
       where: {
         status: { in: ['completed', 'shipped'] },
       },
     });
 
-    // Group by product
+    // Group by product (first item of each order)
     const grouped = new Map<string, { title: string; revenue: number; count: number }>();
     for (const order of orders) {
-      const key = order.productId;
+      const item = order.items[0];
+      if (!item) continue;
+      const key = item.productId;
       if (!grouped.has(key)) {
         grouped.set(key, {
-          title: order.product?.title || 'Unknown',
+          title: item.product?.title || 'Unknown',
           revenue: 0,
           count: 0,
         });
       }
       const entry = grouped.get(key)!;
-      entry.revenue += order.price;
+      entry.revenue += order.totalPrice;
       entry.count += 1;
     }
 
@@ -348,14 +354,14 @@ export class AdminMetricsService {
     ]);
 
     const orderRevenue = await prisma.order.aggregate({
-      _sum: { price: true },
+      _sum: { totalPrice: true },
       where: { workspace: { id: workspaceId } },
     });
 
     return {
       products,
       orders,
-      revenue: orderRevenue._sum.price || 0,
+      revenue: orderRevenue._sum.totalPrice || 0,
       subscriptionStatus: subscription?.status || 'none',
     };
   }

@@ -50,28 +50,39 @@ export class OrdersSyncService {
           // Map status
           const mappedStatus = StatusMapper.mapToResellHub(marketplace, order.status)
 
-          // Upsert order (idempotent)
-          await prisma.order.upsert({
-            where: {
-              externalId: order.externalOrderId,
-            },
-            update: {
-              status: mappedStatus,
-              buyerEmail: order.buyerEmail,
-              totalPrice: order.totalPrice,
-              updatedAt: new Date(),
-            },
-            create: {
-              workspaceId,
-              externalId: order.externalOrderId,
-              externalOrderId: order.externalOrderId,
-              buyerId: order.buyerId,
-              buyerEmail: order.buyerEmail,
-              totalPrice: order.totalPrice,
-              status: mappedStatus,
-              marketplace,
-            },
+          // Upsert order (idempotent) — externalOrderId isn't a unique key in the schema, look it up manually
+          const existing = await prisma.order.findFirst({
+            where: { workspaceId, externalOrderId: order.externalOrderId },
           })
+
+          if (existing) {
+            await prisma.order.update({
+              where: { id: existing.id },
+              data: {
+                status: mappedStatus,
+                customerEmail: order.buyerEmail || '',
+                totalPrice: order.totalPrice,
+                updatedAt: new Date(),
+              },
+            })
+          } else {
+            await prisma.order.create({
+              data: {
+                workspaceId,
+                externalOrderId: order.externalOrderId,
+                customerId: order.buyerId,
+                customerName: order.buyerName,
+                customerEmail: order.buyerEmail || '',
+                totalPrice: order.totalPrice,
+                estimatedProfit: 0,
+                shippingAddress: order.shippingAddress?.street1 || '',
+                shippingCity: order.shippingAddress?.city || '',
+                shippingPostalCode: order.shippingAddress?.postalCode || '',
+                shippingCountry: order.shippingAddress?.country || '',
+                status: mappedStatus,
+              },
+            })
+          }
 
           processed++
         } catch (error) {

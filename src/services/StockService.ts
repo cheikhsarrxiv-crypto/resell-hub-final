@@ -60,7 +60,7 @@ export class StockService {
       return {
         success: reservation.success,
         message: reservation.message,
-        newQuantity: reservation.new_quantity,
+        newQuantity: reservation.newQuantity,
       };
     } catch (error) {
       console.error('[StockService] Reservation error:', error);

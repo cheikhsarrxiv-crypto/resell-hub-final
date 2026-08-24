@@ -23,7 +23,7 @@ export default async function IntegrationsPage() {
     include: {
       marketplace: true,
       syncLogs: {
-        orderBy: { createdAt: 'desc' },
+        orderBy: { startedAt: 'desc' },
         take: 1,
       },
     },

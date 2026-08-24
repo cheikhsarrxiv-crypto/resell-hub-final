@@ -12,21 +12,35 @@ datasource db {
 
 // USERS & AUTH
 model User {
-  id        String    @id @default(cuid())
-  email     String    @unique
-  password  String
-  name      String
-  phone     String?
-  country   String?   @default("FR")
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id            String    @id @default(cuid())
+  email         String    @unique
+  password      String
+  name          String
+  phone         String?
+  country       String?   @default("FR")
+  emailVerified Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
 
-  workspaces    Workspace[]
-  apiKeys       ApiKey[]
-  notifications Notification[]
+  workspaces             Workspace[]
+  apiKeys                ApiKey[]
+  notifications          Notification[]
+  emailVerificationToken EmailVerificationToken?
 
   @@index([email])
+}
+
+model EmailVerificationToken {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  hashedToken String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Workspace {

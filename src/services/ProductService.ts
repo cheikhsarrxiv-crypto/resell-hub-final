@@ -34,6 +34,7 @@ export class ProductService {
       const product = await prisma.product.create({
         data: {
           ...data,
+          description: data.description || '',
           sku,
           workspaceId,
         },
@@ -92,13 +93,16 @@ export class ProductService {
     workspaceId: string,
     data: UpdateProductInput
   ) {
+    const existing = await prisma.product.findFirst({
+      where: { id: productId, workspaceId },
+    });
+
+    if (!existing) {
+      throw new Error('Product not found');
+    }
+
     const product = await prisma.product.update({
-      where: {
-        id_workspaceId: {
-          id: productId,
-          workspaceId,
-        },
-      },
+      where: { id: productId },
       data,
       include: {
         images: { orderBy: { order: 'asc' } },
@@ -125,13 +129,16 @@ export class ProductService {
   }
 
   static async deleteProduct(productId: string, workspaceId: string) {
+    const existing = await prisma.product.findFirst({
+      where: { id: productId, workspaceId },
+    });
+
+    if (!existing) {
+      throw new Error('Product not found');
+    }
+
     return prisma.product.update({
-      where: {
-        id_workspaceId: {
-          id: productId,
-          workspaceId,
-        },
-      },
+      where: { id: productId },
       data: {
         deletedAt: new Date(),
       },

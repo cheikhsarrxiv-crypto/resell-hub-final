@@ -87,7 +87,7 @@ export async function POST(request: NextRequest) {
         slug: user.email.split('@')[0].toLowerCase().replace(/\./g, '-'),
         userId: user.id,
         subscriptionId: subscription.id,
-        country: user.country,
+        country: user.country || 'FR',
       },
     });
 

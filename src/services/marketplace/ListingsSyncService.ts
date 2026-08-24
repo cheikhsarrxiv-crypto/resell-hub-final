@@ -48,30 +48,38 @@ export class ListingsSyncService {
 
       for (const listing of listings) {
         try {
-          // Upsert listing
-          await prisma.listing.upsert({
-            where: {
-              externalId: listing.externalId || listing.id,
-            },
-            update: {
-              title: listing.title,
-              description: listing.description,
-              price: listing.price,
-              quantity: listing.quantity,
-              syncStatus: 'synced',
-              updatedAt: new Date(),
-            },
-            create: {
-              productId: `ebay-${listing.id}`,
-              workspaceId,
-              title: listing.title,
-              description: listing.description,
-              price: listing.price,
-              quantity: listing.quantity,
-              externalId: listing.externalId || listing.id,
-              syncStatus: 'synced',
-            },
+          // Upsert listing (externalId isn't a unique key in the schema, so look it up manually)
+          const externalId = listing.externalId || listing.id
+          const existing = await prisma.listing.findFirst({
+            where: { workspaceId, externalId },
           })
+
+          if (existing) {
+            await prisma.listing.update({
+              where: { id: existing.id },
+              data: {
+                title: listing.title,
+                description: listing.description || '',
+                price: listing.price,
+                quantity: listing.quantity,
+                syncStatus: 'synced',
+                updatedAt: new Date(),
+              },
+            })
+          } else {
+            await prisma.listing.create({
+              data: {
+                productId: `ebay-${listing.id}`,
+                workspaceId,
+                title: listing.title,
+                description: listing.description || '',
+                price: listing.price,
+                quantity: listing.quantity,
+                externalId,
+                syncStatus: 'synced',
+              },
+            })
+          }
 
           processed++
         } catch (error) {

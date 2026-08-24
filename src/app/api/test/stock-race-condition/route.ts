@@ -21,19 +21,21 @@ export async function POST(request: NextRequest) {
     const { action } = await request.json();
 
     if (action === 'setup') {
-      // Create test workspace and product
+      // Create test user and workspace
+      const testUser = await prisma.user.create({
+        data: {
+          email: `test-stock-${Date.now()}@example.com`,
+          name: 'Stock Tester',
+          password: 'test-only-not-used-for-login',
+        },
+      });
+
       const workspace = await prisma.workspace.create({
         data: {
           name: 'Stock Race Test',
+          slug: `stock-race-test-${Date.now()}`,
           country: 'US',
-          users: {
-            create: [
-              {
-                email: 'test-stock@example.com',
-                name: 'Stock Tester',
-              },
-            ],
-          },
+          userId: testUser.id,
         },
       });
 
