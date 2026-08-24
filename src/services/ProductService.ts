@@ -236,32 +236,33 @@ export class ProductService {
   }
 
   static async reserveInventory(productId: string, workspaceId: string, quantity: number) {
-    const inventory = await prisma.inventory.findUnique({
+    // Atomic conditional decrement: the availability check (available >= quantity)
+    // and the decrement happen in the SAME SQL UPDATE statement. PostgreSQL takes a
+    // row-level lock for the row it matches, so under concurrent calls the second
+    // transaction re-evaluates the WHERE clause against the first transaction's
+    // committed result instead of a stale read — this is what makes it race-free,
+    // unlike a separate findUnique() check followed by a decrement.
+    const result = await prisma.inventory.updateMany({
       where: {
-        productId_workspaceId: {
-          productId,
-          workspaceId,
-        },
+        productId,
+        workspaceId,
+        available: { gte: quantity },
+      },
+      data: {
+        available: { decrement: quantity },
+        reserved: { increment: quantity },
       },
     });
 
-    if (!inventory || inventory.available < quantity) {
+    if (result.count === 0) {
       throw new Error('Insufficient inventory');
     }
 
-    return prisma.inventory.update({
+    return prisma.inventory.findUnique({
       where: {
         productId_workspaceId: {
           productId,
           workspaceId,
-        },
-      },
-      data: {
-        available: {
-          decrement: quantity,
-        },
-        reserved: {
-          increment: quantity,
         },
       },
     });
