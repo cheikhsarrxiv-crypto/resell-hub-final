@@ -153,9 +153,20 @@ export class RateLimiterService {
   private backend: InMemoryRateLimiter | UpstashRateLimiter;
 
   constructor() {
-    const backendType = process.env.RATE_LIMIT_BACKEND || 'memory';
+    const backendType = process.env.RATE_LIMIT_BACKEND;
+    const hasUpstashCredentials = Boolean(
+      process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+    );
 
-    if (backendType === 'upstash') {
+    // Use Upstash whenever it's explicitly requested, or automatically
+    // whenever its credentials are present (e.g. Vercel's Upstash
+    // integration injects them without anyone also having to remember to
+    // set RATE_LIMIT_BACKEND=upstash). RATE_LIMIT_BACKEND=memory still
+    // forces in-memory, for local dev even if those vars leak into env.
+    const useUpstash =
+      backendType === 'upstash' || (backendType !== 'memory' && hasUpstashCredentials);
+
+    if (useUpstash) {
       try {
         this.backend = new UpstashRateLimiter();
         console.log('[RateLimiter] Using Upstash Redis');
@@ -166,7 +177,11 @@ export class RateLimiterService {
     } else {
       this.backend = new InMemoryRateLimiter();
       if (process.env.NODE_ENV === 'production') {
-        console.warn('[RateLimiter] In-memory in production');
+        console.warn(
+          '[RateLimiter] In-memory in production — set UPSTASH_REDIS_REST_URL ' +
+          'and UPSTASH_REDIS_REST_TOKEN to enable distributed rate limiting ' +
+          '(required on Vercel: each serverless instance has its own memory).'
+        );
       }
     }
   }

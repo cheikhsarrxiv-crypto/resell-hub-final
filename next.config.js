@@ -13,6 +13,9 @@ const nextConfig = {
   },
   experimental: {
     appDir: true,
+    // Required on Next.js 14.2 for src/instrumentation.ts (register()) to
+    // run — that's what actually calls initializeSentry() on boot.
+    instrumentationHook: true,
   },
 };
 

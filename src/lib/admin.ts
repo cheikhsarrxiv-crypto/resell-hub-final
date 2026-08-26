@@ -2,12 +2,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 
 /**
- * Liste des emails admins (à remplacer par une vraie DB)
+ * Admin emails come only from ADMIN_EMAIL (comma-separated for multiple
+ * admins) — never hardcoded. An unset ADMIN_EMAIL means no one is admin
+ * (fail closed), instead of falling back to a guessable placeholder list
+ * that anyone could self-register as.
  */
-const ADMIN_EMAILS = [
-  'admin@resellhub.local',
-  'admin@reselling.local',
-];
+export function getAdminEmails(): string[] {
+  return (process.env.ADMIN_EMAIL || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * True if `email` is reserved for an admin account, whether or not that
+ * account has been created yet. Used by signup to stop anyone else from
+ * registering it and inheriting admin access via the email match below.
+ */
+export function isReservedAdminEmail(email: string): boolean {
+  return getAdminEmails().includes(email.trim().toLowerCase());
+}
 
 /**
  * Vérifie si l'utilisateur est admin
@@ -15,8 +29,13 @@ const ADMIN_EMAILS = [
 export async function verifyAdmin(request: NextRequest) {
   try {
     const session = await auth();
+    const adminEmails = getAdminEmails();
 
-    if (!session?.user?.email || !ADMIN_EMAILS.includes(session.user.email)) {
+    if (
+      !session?.user?.email ||
+      adminEmails.length === 0 ||
+      !adminEmails.includes(session.user.email.trim().toLowerCase())
+    ) {
       return {
         isAdmin: false,
         error: NextResponse.json(

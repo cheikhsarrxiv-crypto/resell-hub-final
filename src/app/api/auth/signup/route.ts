@@ -4,6 +4,7 @@ import { signUpSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
 import { rateLimiter, RateLimiterService } from '@/lib/ratelimit';
 import { EmailVerificationService } from '@/services/EmailVerificationService';
+import { isReservedAdminEmail } from '@/lib/admin';
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,6 +37,17 @@ export async function POST(request: NextRequest) {
     if (!result.success) {
       return NextResponse.json(
         { error: 'Invalid input', details: result.error.errors },
+        { status: 400 }
+      );
+    }
+
+    // SECURITY: Block self-registration of the reserved admin email(s) —
+    // otherwise anyone could sign up as ADMIN_EMAIL and inherit admin
+    // access. Same error/status as an existing account so the response
+    // doesn't reveal that this particular email is the reserved one.
+    if (isReservedAdminEmail(result.data.email)) {
+      return NextResponse.json(
+        { error: 'User already exists' },
         { status: 400 }
       );
     }
