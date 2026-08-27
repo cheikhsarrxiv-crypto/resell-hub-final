@@ -43,10 +43,39 @@ export class StripeService {
       // SECURITY: Verify workspace exists and is accessible
       const workspace = await prisma.workspace.findUnique({
         where: { id: data.workspaceId },
+        include: { subscription: true },
       });
 
       if (!workspace) {
         throw new Error('Workspace not found');
+      }
+
+      // BILLING INTEGRITY: Refuse to open a second Checkout Session while a
+      // real Stripe subscription still exists in any non-terminal state —
+      // going through Checkout again would create a second real Stripe
+      // subscription (double billing) rather than changing the existing
+      // one. handleSubscriptionCreated/Updated copy Stripe's
+      // subscription.status verbatim, so this can be any of Stripe's real
+      // values: "incomplete", "trialing", "active", "past_due", "unpaid",
+      // "paused" all still represent a real, currently-open Stripe
+      // subscription — a "past_due" one in particular is NOT cancelled by
+      // handlePaymentFailed, it only marks the row past_due, so it must
+      // block too. Only "canceled" and "incomplete_expired" are terminal:
+      // the subscription is genuinely dead (no billing, no way to reach
+      // "active" again), so a brand-new Checkout must be allowed. A
+      // workspace with no subscription, or one whose stripeSubscriptionId
+      // is unset (e.g. the Free plan, which never goes through Stripe), is
+      // unaffected either way. Managing/changing an existing non-terminal
+      // subscription goes through the customer portal instead.
+      const TERMINAL_SUBSCRIPTION_STATUSES = new Set(['canceled', 'incomplete_expired']);
+
+      if (
+        workspace.subscription?.stripeSubscriptionId &&
+        !TERMINAL_SUBSCRIPTION_STATUSES.has(workspace.subscription.status)
+      ) {
+        throw new Error(
+          'Workspace already has an active subscription. Use the billing portal to manage it.'
+        );
       }
 
       // Get or create Stripe customer (IDEMPOTENT)
@@ -86,6 +115,17 @@ export class StripeService {
           workspaceId: data.workspaceId,
           planId: data.planId,
           planName: plan.name,
+        },
+        // Checkout Session metadata (above) is NOT copied to the Subscription
+        // it creates — it must be set here explicitly, or the
+        // customer.subscription.* webhooks (which read subscription.metadata)
+        // never see workspaceId/planId at all.
+        subscription_data: {
+          metadata: {
+            workspaceId: data.workspaceId,
+            planId: data.planId,
+            planName: plan.name,
+          },
         },
       });
 
@@ -337,7 +377,15 @@ export class StripeService {
    */
   static async handlePaymentFailed(invoice: Stripe.Invoice) {
     try {
-      const workspaceId = invoice.metadata?.workspaceId;
+      // For subscription invoices, Stripe snapshots the subscription's
+      // metadata onto invoice.parent.subscription_details.metadata at
+      // finalization time — the invoice's own top-level `metadata` (below,
+      // kept as a fallback) is never set anywhere in this app and is a
+      // different field entirely. See
+      // node_modules/stripe/cjs/resources/Invoices.d.ts (Parent.SubscriptionDetails).
+      const workspaceId =
+        invoice.parent?.subscription_details?.metadata?.workspaceId ||
+        invoice.metadata?.workspaceId;
 
       if (!workspaceId) {
         console.log('[StripeService] Payment failed webhook without workspaceId');

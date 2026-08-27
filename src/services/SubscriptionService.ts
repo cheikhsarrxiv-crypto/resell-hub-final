@@ -154,50 +154,12 @@ export class SubscriptionService {
     }
   }
 
-  /**
-   * Change plan (mock for now - Stripe integration in Phase 2.5)
-   */
-  static async changePlan(workspaceId: string, planId: string) {
-    try {
-      // Verify plan exists
-      const plan = await prisma.plan.findUnique({
-        where: { id: planId },
-      });
-
-      if (!plan) {
-        throw new Error('Plan not found');
-      }
-
-      // Get or create subscription
-      let workspace = await prisma.workspace.findUnique({
-        where: { id: workspaceId },
-      });
-
-      if (!workspace?.subscriptionId) {
-        // Create new subscription
-        const subscription = await prisma.subscription.create({
-          data: {
-            planId,
-            status: 'active',
-          },
-        });
-
-        await prisma.workspace.update({
-          where: { id: workspaceId },
-          data: { subscriptionId: subscription.id },
-        });
-
-        return subscription;
-      } else {
-        // Update existing subscription
-        return await prisma.subscription.update({
-          where: { id: workspace.subscriptionId },
-          data: { planId },
-        });
-      }
-    } catch (error) {
-      console.error('[SubscriptionService] Error changing plan:', error);
-      throw error;
-    }
-  }
+  // NOTE: There is intentionally no changePlan()/direct plan-write method
+  // here. Upgrading to a paid plan must go through Stripe Checkout
+  // (StripeService.createCheckoutSession + the customer.subscription.*
+  // webhooks); downgrading/cancelling goes through the Stripe customer
+  // portal (StripeService.createPortalSession), which triggers
+  // handleSubscriptionDeleted on cancellation. A prior version of this
+  // method let a client set subscription.planId directly with no payment
+  // — removed as a real payment-bypass vulnerability.
 }

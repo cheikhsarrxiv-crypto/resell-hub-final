@@ -28,30 +28,13 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/**
- * POST /api/subscriptions/change-plan
- * Change to a different plan
- */
-export async function POST(request: NextRequest) {
-  try {
-    const workspaceId = await getVerifiedWorkspaceId(request);
-    const { planId } = await request.json();
-
-    if (!planId) {
-      return NextResponse.json(
-        { error: 'Plan ID required' },
-        { status: 400 }
-      );
-    }
-
-    const subscription = await SubscriptionService.changePlan(workspaceId, planId);
-
-    return NextResponse.json({
-      success: true,
-      message: 'Plan changed successfully',
-      subscription,
-    });
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+// There is intentionally no POST handler here. Plan changes are never a
+// direct database write initiated by the client: upgrading to a paid plan
+// goes through POST /api/stripe/checkout, downgrading/cancelling goes
+// through POST /api/stripe/portal (Stripe customer portal), and the
+// resulting plan/status changes are applied server-side by the
+// customer.subscription.* webhooks in /api/stripe/webhooks. A prior
+// version of this route let a client set any planId directly with no
+// payment — removed as a real payment-bypass vulnerability. A request to
+// this path with POST now gets Next.js's standard 405, matching a route
+// file that doesn't export that method.

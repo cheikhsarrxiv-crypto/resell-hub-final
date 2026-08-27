@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import { getAuthSession } from '@/lib/api-auth';
 import { StripeService } from '@/services/StripeService';
+import { rateLimiter } from '@/lib/ratelimit';
 
 /**
  * POST /api/stripe/checkout
@@ -22,6 +23,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'User not authenticated or email missing' },
         { status: 401 }
+      );
+    }
+
+    const rateLimitResult = await rateLimiter.checkStripe(session.user.id);
+    if (!rateLimitResult.success) {
+      return NextResponse.json(
+        {
+          error: 'Too many checkout attempts. Please try again later.',
+          retryAfter: Math.ceil((rateLimitResult.resetAt.getTime() - Date.now()) / 1000),
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': Math.ceil(
+              (rateLimitResult.resetAt.getTime() - Date.now()) / 1000
+            ).toString(),
+          },
+        }
       );
     }
 
@@ -52,6 +71,20 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('[Checkout] Error:', error);
+
+    // Already subscribed: point the client at the billing portal instead
+    // of a generic 500.
+    if (error instanceof Error && error.message.includes('already has an active subscription')) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          alreadySubscribed: true,
+          portalUrl: '/api/stripe/portal',
+        },
+        { status: 409 }
+      );
+    }
+
     return errorResponse(error);
   }
 }

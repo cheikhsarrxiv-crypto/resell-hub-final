@@ -69,6 +69,11 @@ export default function SubscriptionPage() {
       if (data.success && data.url) {
         // Redirect to Stripe checkout
         window.location.href = data.url;
+      } else if (data.alreadySubscribed) {
+        // Already have an active subscription — changing plans happens in
+        // the billing portal, not through a second Checkout Session.
+        alert('You already have an active subscription. Opening the billing portal to change your plan.');
+        await openPortal();
       } else {
         alert('Failed to start checkout. Make sure Stripe is configured.');
       }
