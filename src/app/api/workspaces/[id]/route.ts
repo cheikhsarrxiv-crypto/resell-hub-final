@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import prisma from '@/lib/prisma';
 
+// This route reads the authenticated session (via headers()/cookies()
+// under the hood), so it must never be statically rendered or cached —
+// each response is specific to the requesting user.
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/workspaces/[id]
  */

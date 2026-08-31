@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { adminRoute } from '@/lib/admin';
 import { AdminMetricsService } from '@/services/AdminMetricsService';
 
+// This route reads the authenticated session (via headers()/cookies()
+// under the hood), so it must never be statically rendered or cached —
+// each response is specific to the requesting user.
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/admin/metrics
  * Get all admin dashboard metrics

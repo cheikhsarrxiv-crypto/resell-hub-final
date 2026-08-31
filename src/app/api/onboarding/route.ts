@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import { OnboardingService } from '@/services/OnboardingService';
 
+// This route reads the authenticated session (via headers()/cookies()
+// under the hood), so it must never be statically rendered or cached —
+// each response is specific to the requesting user.
+export const dynamic = 'force-dynamic';
+
 /**
  * GET /api/onboarding
  * Récupère la progression du onboarding

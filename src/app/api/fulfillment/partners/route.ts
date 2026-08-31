@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { FulfillmentService } from '@/services/FulfillmentService';
 
+// This route reads the authenticated session (via headers()/cookies()
+// under the hood), so it must never be statically rendered or cached —
+// each response is specific to the requesting user.
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
