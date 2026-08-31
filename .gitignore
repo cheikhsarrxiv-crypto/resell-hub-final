@@ -13,6 +13,9 @@ node_modules
 # Production
 /build
 
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Misc
 .DS_Store
 *.pem
