@@ -1,17 +1,26 @@
 import { CreateListingInput, UpdateListingInput } from '@/lib/validations';
 import { prisma } from '@/lib/prisma';
 import { AdapterFactory } from './marketplace/AdapterFactory';
+import { MarketplaceConnectionService } from './marketplace/MarketplaceConnectionService';
+import { SubscriptionService } from './SubscriptionService';
 import { Marketplace } from '@/types/marketplace';
 import MarketplaceAdapter from './marketplace/MarketplaceAdapter';
 
-/**
- * Get a configured marketplace adapter for a given marketplace name.
- * Reads OAuth credentials from environment variables per marketplace.
- */
-function getAdapterForMarketplace(marketplaceName: string): MarketplaceAdapter {
-  const normalized = marketplaceName.toUpperCase() as Marketplace;
+interface MarketplaceOAuthConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  sandboxMode: boolean;
+}
 
-  const configByMarketplace: Record<string, { clientId: string; clientSecret: string; redirectUri: string; sandboxMode: boolean }> = {
+/**
+ * Read OAuth credentials from environment variables for a given
+ * marketplace name (as stored on Marketplace.name, e.g. "ebay").
+ */
+function getMarketplaceConfig(marketplaceName: string): { normalized: Marketplace; config: MarketplaceOAuthConfig } {
+  const upper = marketplaceName.toUpperCase();
+
+  const configByMarketplace: Record<string, MarketplaceOAuthConfig> = {
     EBAY: {
       clientId: process.env.EBAY_CLIENT_ID || '',
       clientSecret: process.env.EBAY_CLIENT_SECRET || '',
@@ -38,13 +47,44 @@ function getAdapterForMarketplace(marketplaceName: string): MarketplaceAdapter {
     },
   };
 
-  const config = configByMarketplace[normalized];
+  const config = configByMarketplace[upper];
 
   if (!config) {
     throw new Error(`Unsupported marketplace: ${marketplaceName}`);
   }
 
-  return AdapterFactory.createAdapter(normalized, config);
+  // AdapterFactory and MarketplaceConnectionService key off the Marketplace
+  // enum's actual runtime values, which are lowercase (Marketplace.EBAY ===
+  // 'ebay', matching Marketplace.name in the DB) — not the uppercase keys
+  // used only internally above for the config lookup table. Using the
+  // uppercase form here made AdapterFactory.createAdapter's switch always
+  // miss and throw "Unsupported marketplace", for every marketplace.
+  const normalized = marketplaceName.toLowerCase() as Marketplace;
+
+  return { normalized, config };
+}
+
+/**
+ * Get a marketplace adapter with the workspace's real, decrypted OAuth
+ * access token already loaded onto it (fetching/refreshing it via
+ * MarketplaceConnectionService, same as ListingsSyncService does for
+ * imports). Without this, adapter.createListing() always throws "Access
+ * token required" even for a fully-connected eBay/Etsy account, because
+ * a freshly-constructed adapter has no token of its own.
+ */
+async function getAuthenticatedAdapter(
+  workspaceId: string,
+  marketplaceName: string
+): Promise<MarketplaceAdapter> {
+  const { normalized, config } = getMarketplaceConfig(marketplaceName);
+
+  const connectionService = new MarketplaceConnectionService(config);
+  const accessToken = await connectionService.getAccessToken(workspaceId, normalized);
+
+  const adapter = AdapterFactory.createAdapter(normalized, config);
+  (adapter as any).setAccessToken(accessToken);
+
+  return adapter;
 }
 
 export class ListingService {
@@ -66,20 +106,10 @@ export class ListingService {
         throw new Error('Product not found');
       }
 
-      // Check listing limits
-      const workspace = await prisma.workspace.findUnique({
-        where: { id: workspaceId },
-        include: { subscription: { include: { plan: true } } },
-      });
-
-      if (workspace?.subscription?.plan) {
-        const listingCount = await prisma.listing.count({
-          where: { workspaceId },
-        });
-
-        if (listingCount >= workspace.subscription.plan.maxListings) {
-          throw new Error('Listing limit reached for your plan');
-        }
+      // Check listing limits. Falls back to the free plan's real limits
+      // when there is no active subscription, instead of skipping the check.
+      if (await SubscriptionService.isLimitReached(workspaceId, 'listings')) {
+        throw new Error('Listing limit reached for your plan');
       }
 
       // Create listings for each marketplace
@@ -98,10 +128,10 @@ export class ListingService {
           throw new Error(`Marketplace not connected: ${marketplaceId}`);
         }
 
-        // Get adapter
-        const adapter = getAdapterForMarketplace(connection.marketplace.name);
-
         try {
+          // Get adapter with the workspace's real OAuth access token loaded
+          const adapter = await getAuthenticatedAdapter(workspaceId, connection.marketplace.name);
+
           // Publish to marketplace
           const listingResponse = await adapter.createListing({
             title: data.title,
@@ -255,7 +285,7 @@ export class ListingService {
 
     // Update on marketplace
     if (listing.connection && listing.externalId) {
-      const adapter = getAdapterForMarketplace(listing.connection.marketplace.name);
+      const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
       try {
         await adapter.updateListing(listing.externalId, {
@@ -299,7 +329,7 @@ export class ListingService {
 
     // Delete from marketplace
     if (listing.connection && listing.externalId) {
-      const adapter = getAdapterForMarketplace(listing.connection.marketplace.name);
+      const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
       try {
         await adapter.deleteListing(listing.externalId);
@@ -338,7 +368,7 @@ export class ListingService {
 
     for (const listing of listings) {
       if (listing.connection && listing.externalId) {
-        const adapter = getAdapterForMarketplace(listing.connection.marketplace.name);
+        const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
           await adapter.updateInventory(listing.externalId, quantity);
@@ -398,7 +428,7 @@ export class ListingService {
 
       // Try to delist from marketplace
       if (listing.connection && listing.externalId) {
-        const adapter = getAdapterForMarketplace(listing.connection.marketplace.name);
+        const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
           await adapter.updateInventory(listing.externalId, 0);

@@ -1,6 +1,7 @@
 import { CreateOrderInput } from '@/lib/validations';
 import { prisma } from '@/lib/prisma';
 import { ProductService } from './ProductService';
+import { SubscriptionService } from './SubscriptionService';
 
 export class OrderService {
   static async createOrder(workspaceId: string, data: CreateOrderInput) {
@@ -23,20 +24,10 @@ export class OrderService {
         throw new Error('Listing not found');
       }
 
-      // Check order limit
-      const workspace = await prisma.workspace.findUnique({
-        where: { id: workspaceId },
-        include: { subscription: { include: { plan: true } } },
-      });
-
-      if (workspace?.subscription?.plan) {
-        const orderCount = await prisma.order.count({
-          where: { workspaceId },
-        });
-
-        if (orderCount >= workspace.subscription.plan.maxOrders) {
-          throw new Error('Order limit reached for your plan');
-        }
+      // Check order limit. Falls back to the free plan's real limits when
+      // there is no active subscription, instead of skipping the check.
+      if (await SubscriptionService.isLimitReached(workspaceId, 'orders')) {
+        throw new Error('Order limit reached for your plan');
       }
 
       // Reserve inventory

@@ -1,5 +1,6 @@
 import { CreateProductInput, UpdateProductInput } from '@/lib/validations';
 import { prisma } from '@/lib/prisma';
+import { SubscriptionService } from './SubscriptionService';
 
 export class ProductService {
   static async createProduct(workspaceId: string, data: CreateProductInput) {
@@ -13,17 +14,12 @@ export class ProductService {
         throw new Error('Workspace not found');
       }
 
-      // Check plan limits
-      const subscription = await prisma.subscription.findUnique({
-        where: { id: workspace.subscriptionId || '' },
-        include: { plan: true },
-      });
-
-      const productCount = await prisma.product.count({
-        where: { workspaceId },
-      });
-
-      if (subscription?.plan && productCount >= subscription.plan.maxProducts) {
+      // Check plan limits. SubscriptionService.isLimitReached() falls back
+      // to the free plan's real limits when the workspace has no active
+      // subscription (or a canceled one with no plan attached) — a
+      // workspace in that state must be capped at the free tier, not
+      // treated as unlimited.
+      if (await SubscriptionService.isLimitReached(workspaceId, 'products')) {
         throw new Error('Product limit reached for your plan');
       }
 

@@ -16,6 +16,7 @@ import {
   ShoppingBag,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { signOutAction } from '@/app/actions/auth';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -95,11 +96,7 @@ export function DashboardLayout({
 
         {/* Logout */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-200 bg-white">
-          <form
-            action="/api/auth/signout"
-            method="POST"
-            className="w-full"
-          >
+          <form action={signOutAction} className="w-full">
             <button
               type="submit"
               className="w-full flex items-center px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"

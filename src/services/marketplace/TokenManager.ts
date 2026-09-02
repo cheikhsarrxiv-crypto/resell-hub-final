@@ -52,6 +52,16 @@ export class TokenManager {
   /**
    * Encrypt token for storage in database
    * REAL IMPLEMENTATION: AES-256-GCM encryption
+   *
+   * The random IV is embedded in `encrypted` itself
+   * (`<iv>:<ciphertext>:<authTag>`, all hex) because the DB only has a
+   * single column (MarketplaceConnection.encryptedOauthToken /
+   * encryptedRefreshToken) to persist this into — there is nowhere else
+   * to store a per-encryption IV. `iv` is still returned for callers that
+   * want it, but decryptToken() no longer depends on being passed it
+   * separately (see decryptToken below: a previous version reconstructed
+   * a fake IV from the connection's id, which could never match the real
+   * random IV used here, so every decrypt after storage silently failed).
    */
   encryptToken(token: string, workspaceId: string): EncryptedToken {
     const iv = crypto.randomBytes(16)
@@ -64,20 +74,24 @@ export class TokenManager {
     encrypted += cipher.final('hex')
 
     const authTag = cipher.getAuthTag()
+    const ivHex = iv.toString('hex')
 
     return {
-      encrypted: `${encrypted}:${authTag.toString('hex')}`,
-      iv: iv.toString('hex'),
+      encrypted: `${ivHex}:${encrypted}:${authTag.toString('hex')}`,
+      iv: ivHex,
     }
   }
 
   /**
    * Decrypt token from database
    * REAL IMPLEMENTATION: AES-256-GCM decryption
+   *
+   * Only `encrypted` is required — the IV is parsed out of it (see
+   * encryptToken above), not taken from `encryptedData.iv`.
    */
-  decryptToken(encryptedData: EncryptedToken, workspaceId: string): string {
-    const iv = Buffer.from(encryptedData.iv, 'hex')
-    const [encrypted, authTagHex] = encryptedData.encrypted.split(':')
+  decryptToken(encryptedData: { encrypted: string }, workspaceId: string): string {
+    const [ivHex, encrypted, authTagHex] = encryptedData.encrypted.split(':')
+    const iv = Buffer.from(ivHex, 'hex')
     const authTag = Buffer.from(authTagHex, 'hex')
 
     const decipher = crypto.createDecipheriv('aes-256-gcm', this.encryptionKey, iv)

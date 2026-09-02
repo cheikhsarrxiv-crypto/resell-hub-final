@@ -16,6 +16,7 @@
 
 import { auth } from '@/auth'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
+import { SubscriptionService } from '@/services/SubscriptionService'
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -107,6 +108,23 @@ export async function GET(
     const codeVerifier = req.cookies.get(pkceCookieName)?.value
 
     const service = new MarketplaceConnectionService(getConnectionConfig(marketplace))
+
+    // Enforce the plan's marketplace-connection limit — but only for a
+    // brand new connection. handleOAuthCallback() below upserts, so
+    // reconnecting/refreshing an existing connection to this same
+    // marketplace must stay allowed even at the limit; it doesn't add to
+    // the count.
+    const existingConnection = await service.getConnection(workspaceId, marketplace)
+    if (!existingConnection && (await SubscriptionService.isLimitReached(workspaceId, 'marketplaces'))) {
+      return NextResponse.redirect(
+        new URL(
+          `/dashboard/settings/integrations?status=error&error=${encodeURIComponent(
+            'Marketplace connection limit reached for your plan'
+          )}`,
+          req.url
+        )
+      )
+    }
 
     // Real code -> token exchange + encrypted storage (workspace-scoped)
     await service.handleOAuthCallback(workspaceId, marketplace, code, state, codeVerifier)

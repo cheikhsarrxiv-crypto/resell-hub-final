@@ -14,6 +14,8 @@ export async function verifyWorkspaceAccess(workspaceId: string): Promise<string
       throw new Error('Unauthorized');
     }
 
+    await requireVerifiedEmail(session.user.id);
+
     // Verify ownership
     const workspace = await prisma.workspace.findFirst({
       where: {
@@ -55,6 +57,10 @@ export function errorResponse(error: unknown, statusCode: number = 500): NextRes
     return NextResponse.json({ error: message }, { status: 401 });
   }
 
+  if (message === 'Email verification required') {
+    return NextResponse.json({ error: message }, { status: 403 });
+  }
+
   if (message.includes('not found')) {
     return NextResponse.json({ error: message }, { status: 404 });
   }
@@ -76,7 +82,28 @@ export async function requireAuth() {
     throw new Error('Unauthorized');
   }
 
+  await requireVerifiedEmail(session.user.id);
+
   return session.user.id;
+}
+
+/**
+ * Email verification used to be enforced in middleware.ts via a direct
+ * Prisma call — moved here (Node.js runtime, where Prisma actually works)
+ * after middleware was split to be Edge-Runtime-safe (see
+ * middleware.ts). A fresh DB read (not a value cached in the JWT) so
+ * verifying from another tab/device takes effect on the very next
+ * request instead of waiting for a new login.
+ */
+export async function requireVerifiedEmail(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { emailVerified: true },
+  });
+
+  if (!user?.emailVerified) {
+    throw new Error('Email verification required');
+  }
 }
 
 /**

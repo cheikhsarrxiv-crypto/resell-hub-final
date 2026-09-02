@@ -1,21 +1,28 @@
-import { auth } from '@/auth';
-import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import NextAuth from 'next-auth';
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { authConfig } from '@/auth.config';
 
-// Protected API routes that need ownership verification
-const protectedApiRoutes = [
-  '/api/products',
-  '/api/orders',
-  '/api/fulfillment',
-  '/api/analytics',
-  '/api/listings',
-  '/api/marketplaces',
-];
+// A separate, Edge-safe NextAuth instance — NOT the one exported from
+// src/auth.ts. That file imports the Credentials provider (bcryptjs,
+// Node-only APIs) and its jwt callback calls Prisma; both crash the Edge
+// Runtime middleware is required to run in on Next.js 14
+// (MIDDLEWARE_INVOCATION_FAILED). This instance only decodes/reads the
+// already-issued JWT session cookie — no bcrypt, no Prisma.
+const { auth } = NextAuth(authConfig);
 
 // Routes an authenticated-but-unverified user must still be able to reach
 // (the verify page and /api/email/verify are fully public above, since the
 // emailed link may be opened before any login).
-const emailVerificationExemptRoutes = ['/api/email/resend-verification'];
+// NOTE: email-verification and workspace-ownership enforcement used to
+// live here too, via direct Prisma calls — removed for the same Edge
+// Runtime reason. They now live server-side (Node.js runtime, where
+// Prisma actually works): workspace ownership was already independently
+// re-checked in every protected API route via
+// getVerifiedWorkspaceId/verifyWorkspaceAccess (src/lib/security.ts), so
+// removing it here is not a regression. Email verification is now
+// enforced in src/lib/security.ts's requireAuth()/verifyWorkspaceAccess()
+// for API routes, and in src/app/dashboard/layout.tsx for pages.
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
@@ -49,61 +56,6 @@ export async function middleware(request: NextRequest) {
     }
     // Pages: redirect to login
     return NextResponse.redirect(new URL('/login', request.url));
-  }
-
-  // Require a verified email for everything else. A fresh DB read (not a
-  // value cached in the JWT) so verifying from another tab/device takes
-  // effect on the very next request instead of waiting for a new login.
-  if (!emailVerificationExemptRoutes.includes(pathname)) {
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { emailVerified: true },
-    });
-
-    if (!user?.emailVerified) {
-      if (pathname.startsWith('/api')) {
-        return NextResponse.json(
-          { error: 'Email verification required' },
-          { status: 403 }
-        );
-      }
-      return NextResponse.redirect(new URL('/verify-email', request.url));
-    }
-  }
-
-  // API routes: Verify workspace ownership
-  if (pathname.startsWith('/api')) {
-    const workspaceId = request.nextUrl.searchParams.get('workspaceId');
-
-    // Check if workspace ownership is needed
-    const needsOwnershipCheck = protectedApiRoutes.some(route =>
-      pathname.startsWith(route)
-    );
-
-    if (needsOwnershipCheck && workspaceId) {
-      try {
-        // Verify user owns this workspace
-        const workspace = await prisma.workspace.findFirst({
-          where: {
-            id: workspaceId,
-            userId: session.user.id,
-          },
-        });
-
-        if (!workspace) {
-          return NextResponse.json(
-            { error: 'Workspace not found or access denied' },
-            { status: 403 }
-          );
-        }
-      } catch (error) {
-        console.error('Middleware error:', error);
-        return NextResponse.json(
-          { error: 'Internal server error' },
-          { status: 500 }
-        );
-      }
-    }
   }
 
   return NextResponse.next();

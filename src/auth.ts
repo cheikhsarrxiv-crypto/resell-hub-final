@@ -3,17 +3,17 @@ import Credentials from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { loginSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
+import { rateLimiter } from '@/lib/ratelimit';
+import { authConfig as baseAuthConfig } from '@/auth.config';
 
+// Full config — Node.js runtime only (API routes, server components).
+// Never import this file from middleware.ts: the Credentials provider
+// pulls in bcryptjs, and the jwt callback below calls Prisma, neither of
+// which can run in the Edge Runtime middleware is stuck with on Next.js
+// 14. middleware.ts uses its own lightweight NextAuth(authConfig)
+// instance built from src/auth.config.ts instead.
 export const authConfig: NextAuthConfig = {
-  // ✅ Utiliser UNIQUEMENT JWT, pas PrismaAdapter
-  session: {
-    strategy: 'jwt',
-    maxAge: 30 * 24 * 60 * 60, // 30 days
-  },
-  pages: {
-    signIn: '/login',
-    error: '/auth/error',
-  },
+  ...baseAuthConfig,
   providers: [
     Credentials({
       credentials: {
@@ -29,6 +29,16 @@ export const authConfig: NextAuthConfig = {
           const result = loginSchema.safeParse(credentials);
 
           if (!result.success) {
+            return null;
+          }
+
+          // Brute-force protection: signup already rate-limits by IP, but
+          // login had no limit at all — an attacker could try unlimited
+          // passwords against one email. Same generic failure (null) as
+          // every other rejection path below, so this never reveals
+          // whether the limit or the password was the actual reason.
+          const rateLimitResult = await rateLimiter.checkLogin(result.data.email);
+          if (!rateLimitResult.success) {
             return null;
           }
 
@@ -62,6 +72,7 @@ export const authConfig: NextAuthConfig = {
     }),
   ],
   callbacks: {
+    ...baseAuthConfig.callbacks,
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
@@ -81,20 +92,6 @@ export const authConfig: NextAuthConfig = {
         token.workspaceId = workspace?.id;
       }
       return token;
-    },
-    async session({ session, token }) {
-      if (session.user) {
-        session.user.id = token.id as string;
-        session.user.email = token.email as string;
-        session.user.name = token.name as string;
-        session.user.workspaceId = token.workspaceId as string | undefined;
-      }
-      return session;
-    },
-    async redirect({ url, baseUrl }) {
-      if (url.startsWith('/')) return `${baseUrl}${url}`;
-      if (new URL(url).origin === baseUrl) return url;
-      return baseUrl;
     },
   },
   events: {

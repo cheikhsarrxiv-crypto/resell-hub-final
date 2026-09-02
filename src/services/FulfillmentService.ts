@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import { SubscriptionService } from './SubscriptionService';
 
 export class FulfillmentService {
   /**
@@ -10,6 +11,12 @@ export class FulfillmentService {
     partnerId: string
   ) {
     try {
+      // Fulfillment is a paid-plan feature (Pro/Business) — gate the
+      // actual creation point server-side, not just its UI visibility.
+      if (!(await SubscriptionService.hasFeature(workspaceId, 'fulfillmentEnabled'))) {
+        throw new Error('Fulfillment is not included in your current plan');
+      }
+
       // Get order with details
       const order = await prisma.order.findFirst({
         where: { id: orderId, workspaceId },

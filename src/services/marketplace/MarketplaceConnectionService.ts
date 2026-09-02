@@ -188,10 +188,7 @@ export class MarketplaceConnectionService {
 
       try {
         const decrypted = this.tokenManager.decryptToken(
-          {
-            encrypted: connection.encryptedRefreshToken,
-            iv: connection.id, // Use connection ID as salt (not ideal but works)
-          },
+          { encrypted: connection.encryptedRefreshToken },
           workspaceId
         )
 
@@ -236,10 +233,7 @@ export class MarketplaceConnectionService {
     }
 
     return this.tokenManager.decryptToken(
-      {
-        encrypted: connection.encryptedOauthToken,
-        iv: connection.id,
-      },
+      { encrypted: connection.encryptedOauthToken },
       workspaceId
     )
   }

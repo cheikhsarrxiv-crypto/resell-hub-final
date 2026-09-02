@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { Button } from '@/components/UI/Button';
 import { Card, CardContent } from '@/components/UI/Card';
 import { Plus, ArrowRight } from 'lucide-react';
+import { signOutAction } from '@/app/actions/auth';
 
 export default function WorkspacePage() {
   const router = useRouter();
@@ -89,9 +90,11 @@ export default function WorkspacePage() {
         )}
 
         <div className="mt-8">
-          <Link href="/api/auth/signout" className="text-blue-600 hover:text-blue-700">
-            Sign out
-          </Link>
+          <form action={signOutAction}>
+            <button type="submit" className="text-blue-600 hover:text-blue-700">
+              Sign out
+            </button>
+          </form>
         </div>
       </div>
     </div>

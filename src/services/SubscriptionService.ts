@@ -114,10 +114,13 @@ export class SubscriptionService {
       const limitKey = `max${resource.charAt(0).toUpperCase() + resource.slice(1)}` as keyof typeof limits;
       const limit = limits[limitKey] as number;
 
-      if (limit === 0) {
-        return false; // No limit
-      }
-
+      // A limit of 0 means the plan allows none of this resource at all
+      // (e.g. no subscription -> the free-tier fallback in getPlanLimits())
+      // — it must block, not be read as "no limit". No real plan in this
+      // app currently uses 0 to mean "unlimited" (Enterprise uses a large
+      // finite number instead), so there is no unlimited case to special-case
+      // here; count >= limit below handles every real value correctly,
+      // including 0 (count >= 0 is always true, so it blocks immediately).
       let count = 0;
 
       switch (resource) {
