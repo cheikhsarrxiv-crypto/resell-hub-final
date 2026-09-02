@@ -3,6 +3,14 @@ import { auth } from '@/auth';
 import prisma from '@/lib/prisma';
 import { DashboardLayout } from '@/components/Layout/DashboardLayout';
 
+// Pinned explicitly: Prisma Client threw "not configured to run in Edge
+// Runtime" from this route's compiled function on Vercel despite it
+// genuinely executing in a Node.js Lambda (confirmed via the /var/task/
+// stack trace path) — a known Prisma/Next.js false-positive in its
+// runtime auto-detection. Declaring this removes any ambiguity for
+// Vercel's function classifier.
+export const runtime = 'nodejs';
+
 /**
  * Server-side auth + email-verification gate for the whole /dashboard
  * tree. This used to be enforced in middleware.ts via direct Prisma

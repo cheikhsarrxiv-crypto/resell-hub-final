@@ -3,6 +3,12 @@ import { auth } from '@/auth';
 import prisma from '@/lib/prisma';
 import { DashboardLayout } from '@/components/Layout/DashboardLayout';
 
+// See src/app/dashboard/layout.tsx for why this is pinned explicitly
+// (Prisma's Edge Runtime false-positive on Vercel). This is a separate
+// top-level route tree, not nested under /dashboard, so it needs its
+// own declaration rather than inheriting one.
+export const runtime = 'nodejs';
+
 /**
  * Same server-side auth + email-verification gate as
  * /dashboard/layout.tsx — see that file for why this moved out of
