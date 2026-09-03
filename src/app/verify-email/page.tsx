@@ -152,9 +152,19 @@ function VerifyEmailContent() {
 
           <div className="mt-6 pt-6 border-t border-gray-200">
             <p className="text-gray-600 text-sm">
-              <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
+              {/* Plain <a>, not <Link>: for a still-unverified, already
+                  logged-in user this hits a real two-hop server redirect
+                  (middleware sends /login -> /dashboard since a session
+                  exists, then dashboard/layout.tsx sends -> /verify-email
+                  since the email isn't verified yet). A real full page
+                  load resolves that chain correctly (verified via curl -L
+                  end to end), but Next.js's App Router client-side
+                  navigation can get stuck on a blank page across a
+                  same-navigation double redirect — a plain anchor forces
+                  a full reload and sidesteps it. */}
+              <a href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
                 Back to login
-              </Link>
+              </a>
             </p>
           </div>
         </div>
