@@ -1,4 +1,5 @@
 import { NotificationService } from './NotificationService';
+import { getAppUrl } from '@/lib/env';
 
 /**
  * Email provider types
@@ -99,7 +100,7 @@ export class EmailService {
       template: 'welcome',
       variables: {
         userName,
-        appUrl: process.env.NEXTAUTH_URL || 'http://localhost:3000',
+        appUrl: getAppUrl(),
       },
     });
   }
@@ -121,7 +122,7 @@ export class EmailService {
         orderId,
         productTitle,
         price,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -141,7 +142,7 @@ export class EmailService {
       variables: {
         orderId,
         productTitle,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -161,7 +162,7 @@ export class EmailService {
       variables: {
         orderId,
         productTitle,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -183,7 +184,7 @@ export class EmailService {
         orderId,
         productTitle,
         trackingNumber,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -205,7 +206,7 @@ export class EmailService {
         orderId,
         trackingNumber,
         trackingUrl,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -225,7 +226,7 @@ export class EmailService {
       variables: {
         orderId,
         errorMessage,
-        dashboardUrl: `${process.env.NEXTAUTH_URL}/orders/${orderId}`,
+        dashboardUrl: `${getAppUrl()}/orders/${orderId}`,
       },
     });
   }
@@ -245,7 +246,7 @@ export class EmailService {
       variables: {
         amount,
         orderId,
-        billingUrl: `${process.env.NEXTAUTH_URL}/subscription`,
+        billingUrl: `${getAppUrl()}/subscription`,
       },
     });
   }
@@ -265,7 +266,7 @@ export class EmailService {
       variables: {
         planName,
         price,
-        subscriptionUrl: `${process.env.NEXTAUTH_URL}/subscription`,
+        subscriptionUrl: `${getAppUrl()}/subscription`,
       },
     });
   }
@@ -284,7 +285,7 @@ export class EmailService {
       variables: {
         planName,
         downgradedTo: 'Free',
-        subscriptionUrl: `${process.env.NEXTAUTH_URL}/subscription`,
+        subscriptionUrl: `${getAppUrl()}/subscription`,
       },
     });
   }
