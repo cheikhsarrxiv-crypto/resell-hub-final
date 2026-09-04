@@ -404,6 +404,21 @@ export class EmailService {
   /**
    * Send via Resend
    */
+  private static isResendErrorResponse(error: unknown): error is {
+    message: string;
+    statusCode: number | null;
+    name: string;
+  } {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'message' in error &&
+      'name' in error &&
+      typeof (error as { message: unknown }).message === 'string' &&
+      typeof (error as { name: unknown }).name === 'string'
+    );
+  }
+
   private static async sendViaResend(
     content: EmailContent
   ): Promise<EmailResult> {
@@ -429,7 +444,29 @@ export class EmailService {
         messageId: result.data?.id,
       };
     } catch (error) {
-      console.error('[EmailService] Resend error:', error);
+      // Resend's SDK throws its ErrorResponse shape (message/statusCode/name)
+      // as a plain object, not an Error instance — `error instanceof Error`
+      // is false for it, so the real detail was previously discarded in
+      // favor of a generic 'Resend error' string. Log/return only these
+      // three fields explicitly (never the raw error object, which could
+      // in principle carry more than intended) — no key or other secret
+      // is ever part of this shape.
+      if (this.isResendErrorResponse(error)) {
+        console.error('[EmailService] Resend error:', {
+          message: error.message,
+          statusCode: error.statusCode,
+          name: error.name,
+        });
+        return {
+          success: false,
+          error: error.message,
+        };
+      }
+
+      console.error(
+        '[EmailService] Resend error:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Resend error',
