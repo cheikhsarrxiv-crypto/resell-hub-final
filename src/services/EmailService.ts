@@ -30,7 +30,7 @@ export interface EmailResult {
  */
 export class EmailService {
   private static provider: EmailProvider = (
-    process.env.EMAIL_PROVIDER || 'none'
+    process.env.EMAIL_PROVIDER?.trim().toLowerCase() || 'none'
   ) as EmailProvider;
   private static fromEmail =
     process.env.EMAIL_FROM || 'noreply@adksy.local';
