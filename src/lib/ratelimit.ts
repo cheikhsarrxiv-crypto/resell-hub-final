@@ -103,7 +103,13 @@ class UpstashRateLimiter {
         },
         body: JSON.stringify([
           ['INCR', redisKey],
-          ['EXPIRE', redisKey, config.duration],
+          // NX: only set the TTL when the key has none yet (i.e. on the
+          // first request of a window). Without NX, this EXPIRE re-runs on
+          // every call — including ones that already fail the limit — and
+          // keeps pushing the TTL back, so a key under sustained traffic
+          // never expires and the counter never resets: a fixed window
+          // that in practice never re-opens.
+          ['EXPIRE', redisKey, config.duration, 'NX'],
           ['TTL', redisKey],
         ]),
       });
