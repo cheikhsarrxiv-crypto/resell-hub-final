@@ -256,7 +256,8 @@ export class EbayAdapter extends MarketplaceAdapter {
 
       const sku = createResponse.sku || inventoryBody.sku
 
-      // Step 2: Publish the listing
+      // Step 2: Create the offer (still unpublished/draft on eBay's side
+      // until the offer is explicitly published in step 3 below)
       const offerBody = {
         sku: sku,
         marketplaceId: 'EBAY_FR',
@@ -269,11 +270,28 @@ export class EbayAdapter extends MarketplaceAdapter {
         },
       }
 
-      await this.callEbayApi(
+      const offerResponse = await this.callEbayApi(
         'POST',
         '/sell/inventory/v1/offer',
         this.accessToken,
         offerBody
+      )
+
+      const offerId = offerResponse.offerId
+      if (!offerId) {
+        throw {
+          status: 502,
+          message: 'eBay did not return an offerId for the created offer; the listing was not published',
+        }
+      }
+
+      // Step 3: Publish the offer. Without this call the offer remains in
+      // eBay's unpublished/draft state and is never visible to buyers,
+      // even though steps 1-2 above succeeded.
+      const publishResponse = await this.callEbayApi(
+        'POST',
+        `/sell/inventory/v1/offer/${offerId}/publish`,
+        this.accessToken
       )
 
       return {
@@ -283,7 +301,7 @@ export class EbayAdapter extends MarketplaceAdapter {
         description: listing.description,
         price: listing.price,
         quantity: listing.quantity,
-        externalId: sku,
+        externalId: publishResponse.listingId || sku,
         status: 'active',
         marketplace: Marketplace.EBAY,
       }
