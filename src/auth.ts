@@ -3,7 +3,6 @@ import Credentials from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { loginSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
-import { rateLimiter } from '@/lib/ratelimit';
 import { authConfig as baseAuthConfig } from '@/auth.config';
 
 // Full config — Node.js runtime only (API routes, server components).
@@ -32,16 +31,9 @@ export const authConfig: NextAuthConfig = {
             return null;
           }
 
-          // Brute-force protection: signup already rate-limits by IP, but
-          // login had no limit at all — an attacker could try unlimited
-          // passwords against one email. Same generic failure (null) as
-          // every other rejection path below, so this never reveals
-          // whether the limit or the password was the actual reason.
-          const rateLimitResult = await rateLimiter.checkLogin(result.data.email);
-          if (!rateLimitResult.success) {
-            return null;
-          }
-
+          // Brute-force protection now happens one layer up, in
+          // src/app/api/auth/[...nextauth]/route.ts, before this handler
+          // (and its Prisma/bcrypt work) ever runs — see that file for why.
           const user = await prisma.user.findUnique({
             where: { email: result.data.email },
           });
