@@ -27,6 +27,10 @@ export default function LoginPage() {
         redirect: false,
       });
 
+      if (result?.status === 429) {
+        throw new Error('Too many login attempts. Please try again in 15 minutes.');
+      }
+
       if (!result || result.error) {
         throw new Error('Invalid email or password');
       }

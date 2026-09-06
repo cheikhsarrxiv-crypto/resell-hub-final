@@ -34,7 +34,17 @@ export async function POST(request: NextRequest) {
           );
 
           return NextResponse.json(
-            { error: 'Too many login attempts. Please try again later.' },
+            {
+              error: 'Too many login attempts. Please try again later.',
+              // next-auth/react's client-side signIn() unconditionally does
+              // `new URL(data.url)` on this JSON body to pull out an error
+              // code — with no `url` field that throws "Failed to construct
+              // 'URL': Invalid URL" instead of ever returning a result the
+              // caller can inspect. request.url is just used as a valid
+              // absolute URL to satisfy that; the login page checks
+              // result.status, not anything encoded in this URL.
+              url: request.url,
+            },
             {
               status: 429,
               headers: {
