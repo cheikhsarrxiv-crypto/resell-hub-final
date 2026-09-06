@@ -1,15 +1,10 @@
 import Link from 'next/link';
-import { Space_Grotesk, Inter } from 'next/font/google';
 import { ArrowRight, Layers, ShoppingBag, RefreshCw, PackageCheck } from 'lucide-react';
 import { LandingNav } from '@/components/landing/LandingNav';
 import { HeroOrb } from '@/components/landing/HeroOrb';
 import { HeroStage } from '@/components/landing/HeroStage';
 import { Reveal } from '@/components/landing/Reveal';
-
-// Scoped to this route only — layout.tsx (shared with /dashboard) is left
-// untouched, so nothing outside the public landing page changes font.
-const display = Space_Grotesk({ subsets: ['latin'], weight: ['500', '700'], variable: '--font-display' });
-const body = Inter({ subsets: ['latin'], weight: ['400', '500', '600'], variable: '--font-body' });
+import { displayFont as display, bodyFont as body } from '@/lib/fonts';
 
 // Marketplace automation status reflects the real OAuth integrations wired
 // up in src/app/api/marketplace/connect/[marketplace]/route.ts and the

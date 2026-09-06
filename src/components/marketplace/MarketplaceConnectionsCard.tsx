@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Button } from '@/components/UI/Button'
+import { DashboardButton } from '@/components/dashboard/DashboardButton'
 import { Marketplace } from '@/types/marketplace'
 import { format } from 'date-fns'
 
@@ -85,15 +85,15 @@ export function MarketplaceConnectionsCard({
 
   return (
     <div className="space-y-4">
-      {/* eBay — unchanged */}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+      {/* eBay */}
+      <div className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5 sm:p-6">
         <div className="flex items-start justify-between mb-6 flex-wrap gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-[#14161A] flex items-center justify-center flex-shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-white/[0.06] flex items-center justify-center flex-shrink-0">
               <span className="text-white text-xs font-bold tracking-tight">eBay</span>
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-[#14161A]">eBay</h2>
+              <h2 className="text-base font-semibold text-white">eBay</h2>
               <p className="text-gray-500 text-sm">Sell your products on eBay</p>
             </div>
           </div>
@@ -101,8 +101,8 @@ export function MarketplaceConnectionsCard({
           {isEbayConnected ? (
             <div className="flex items-center gap-3">
               <div className="flex flex-col items-end">
-                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-green-700">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-600" />
+                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                   Connected
                 </span>
                 {lastSync ? (
@@ -115,55 +115,56 @@ export function MarketplaceConnectionsCard({
                   </span>
                 ) : null}
               </div>
-              <Button
+              <DashboardButton
                 variant="outline"
                 size="sm"
                 onClick={() => handleDisconnect('ebay')}
                 disabled={disconnecting === 'ebay'}
               >
                 {disconnecting === 'ebay' ? 'Disconnecting...' : 'Disconnect'}
-              </Button>
+              </DashboardButton>
             </div>
           ) : (
             <div className="flex items-center gap-3">
               <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-300" />
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
                 Disconnected
               </span>
-              <Button
+              <DashboardButton
+                variant="primary"
                 onClick={() => handleConnect('ebay')}
                 disabled={connecting === 'ebay'}
               >
                 {connecting === 'ebay' ? 'Connecting...' : 'Connect to eBay'}
-              </Button>
+              </DashboardButton>
             </div>
           )}
         </div>
 
         {isEbayConnected && (
-          <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded border border-[#FF5A1F]/30">
-            <p className="text-sm text-[#14161A]">
+          <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20">
+            <p className="text-sm text-gray-200">
               Your eBay account is connected. You can now sync listings and orders.
             </p>
           </div>
         )}
 
         {connectError?.marketplace === 'ebay' && (
-          <div className="mt-4 p-4 bg-red-50 rounded border border-red-200">
-            <p className="text-sm text-red-700">{connectError.message}</p>
+          <div className="mt-4 p-4 bg-red-500/10 rounded-xl border border-red-500/20">
+            <p className="text-sm text-red-300">{connectError.message}</p>
           </div>
         )}
       </div>
 
       {/* Etsy */}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+      <div className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5 sm:p-6">
         <div className="flex items-start justify-between mb-6 flex-wrap gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-[#F1641E] flex items-center justify-center flex-shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-[#F1641E]/90 flex items-center justify-center flex-shrink-0">
               <span className="text-white text-xs font-bold tracking-tight">Etsy</span>
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-[#14161A]">Etsy</h2>
+              <h2 className="text-base font-semibold text-white">Etsy</h2>
               <p className="text-gray-500 text-sm">Sell your products on Etsy</p>
             </div>
           </div>
@@ -171,8 +172,8 @@ export function MarketplaceConnectionsCard({
           {isEtsyConnected ? (
             <div className="flex items-center gap-3">
               <div className="flex flex-col items-end">
-                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-green-700">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-600" />
+                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                   Connected
                 </span>
                 {etsyLastSync ? (
@@ -185,42 +186,43 @@ export function MarketplaceConnectionsCard({
                   </span>
                 ) : null}
               </div>
-              <Button
+              <DashboardButton
                 variant="outline"
                 size="sm"
                 onClick={() => handleDisconnect('etsy')}
                 disabled={disconnecting === 'etsy'}
               >
                 {disconnecting === 'etsy' ? 'Disconnecting...' : 'Disconnect'}
-              </Button>
+              </DashboardButton>
             </div>
           ) : (
             <div className="flex items-center gap-3">
               <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-300" />
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
                 Disconnected
               </span>
-              <Button
+              <DashboardButton
+                variant="primary"
                 onClick={() => handleConnect('etsy')}
                 disabled={connecting === 'etsy'}
               >
                 {connecting === 'etsy' ? 'Connecting...' : 'Connect to Etsy'}
-              </Button>
+              </DashboardButton>
             </div>
           )}
         </div>
 
         {isEtsyConnected && (
-          <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded border border-[#FF5A1F]/30">
-            <p className="text-sm text-[#14161A]">
+          <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20">
+            <p className="text-sm text-gray-200">
               Your Etsy account is connected. You can now sync listings and orders.
             </p>
           </div>
         )}
 
         {connectError?.marketplace === 'etsy' && (
-          <div className="mt-4 p-4 bg-red-50 rounded border border-red-200">
-            <p className="text-sm text-red-700">{connectError.message}</p>
+          <div className="mt-4 p-4 bg-red-500/10 rounded-xl border border-red-500/20">
+            <p className="text-sm text-red-300">{connectError.message}</p>
           </div>
         )}
       </div>

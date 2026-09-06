@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useWorkspace } from '@/hooks';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
-import { Button } from '@/components/UI/Button';
-import { Badge } from '@/components/UI/Button';
+import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
+import { StatusBadge } from '@/components/dashboard/StatusBadge';
+import { PageHeader } from '@/components/dashboard/PageHeader';
+import { DashboardLoadingState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
 import Link from 'next/link';
 import { formatCurrency, formatDateTime } from '@/lib/utils';
 import { Plus, Eye, Trash2 } from 'lucide-react';
@@ -45,16 +47,6 @@ export default function ListingsPage() {
 
   const syncStatuses = ['not_synced', 'syncing', 'synced', 'failed'];
 
-  const getSyncStatusBadge = (syncStatus: string) => {
-    const colors: { [key: string]: string } = {
-      not_synced: 'bg-gray-100 text-gray-800',
-      syncing: 'bg-yellow-100 text-yellow-800',
-      synced: 'bg-green-100 text-green-800',
-      failed: 'bg-red-100 text-red-800',
-    };
-    return colors[syncStatus] || 'bg-gray-100 text-gray-800';
-  };
-
   const getSyncStatusLabel = (syncStatus: string) => {
     const labels: { [key: string]: string } = {
       not_synced: 'Not synced',
@@ -67,90 +59,86 @@ export default function ListingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold font-display text-[#14161A]">Listings</h1>
-          <p className="text-gray-600 mt-1">Manage your marketplace listings</p>
-        </div>
-        <Link href="/dashboard/listings/new">
-          <Button variant="primary" size="lg">
-            <Plus className="w-5 h-5 mr-2" />
-            Create Listing
-          </Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Listings"
+        description="Manage your marketplace listings"
+        action={
+          <Link href="/dashboard/listings/new">
+            <DashboardButton variant="primary">
+              <Plus className="w-4 h-4" />
+              Create Listing
+            </DashboardButton>
+          </Link>
+        }
+      />
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap">
-        <Button
+        <DashboardButton
           variant={syncStatusFilter === '' ? 'primary' : 'outline'}
           size="sm"
           onClick={() => setSyncStatusFilter('')}
         >
           All
-        </Button>
+        </DashboardButton>
         {syncStatuses.map((s) => (
-          <Button
+          <DashboardButton
             key={s}
             variant={syncStatusFilter === s ? 'primary' : 'outline'}
             size="sm"
             onClick={() => setSyncStatusFilter(s)}
           >
             {getSyncStatusLabel(s)}
-          </Button>
+          </DashboardButton>
         ))}
       </div>
 
       {/* Listings Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Your Listings ({visibleListings.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Your Listings ({visibleListings.length})</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
           {loading ? (
-            <div className="text-center py-8 text-gray-500">Loading...</div>
+            <DashboardLoadingState message="Loading listings..." />
           ) : visibleListings.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              No listings yet. Create one to get started.
-            </div>
+            <DashboardEmptyState title="No listings yet" description="Create one to get started." />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
               <table className="w-full min-w-[720px]">
                 <thead>
-                  <tr className="border-b">
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Title</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Marketplace</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Price</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Status</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Created</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-900">Actions</th>
+                  <tr className="border-b border-white/[0.06]">
+                    <th className="text-left py-3 pr-4 font-medium text-gray-500">Title</th>
+                    <th className="text-left py-3 px-4 font-medium text-gray-500">Marketplace</th>
+                    <th className="text-left py-3 px-4 font-medium text-gray-500">Price</th>
+                    <th className="text-left py-3 px-4 font-medium text-gray-500">Status</th>
+                    <th className="text-left py-3 px-4 font-medium text-gray-500">Created</th>
+                    <th className="text-left py-3 pl-4 font-medium text-gray-500">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleListings.map((listing) => (
-                    <tr key={listing.id} className="border-b hover:bg-gray-50">
-                      <td className="py-3 px-4 text-gray-900 font-medium">{listing.title}</td>
-                      <td className="py-3 px-4 text-gray-600">
+                    <tr key={listing.id} className="border-b border-white/[0.04] last:border-b-0 hover:bg-white/[0.02] transition-colors">
+                      <td className="py-3 pr-4 text-white font-medium">{listing.title}</td>
+                      <td className="py-3 px-4 text-gray-400">
                         {listing.connection?.marketplace?.displayName || 'N/A'}
                       </td>
-                      <td className="py-3 px-4 text-gray-900">{formatCurrency(listing.price)}</td>
+                      <td className="py-3 px-4 text-gray-300">{formatCurrency(listing.price)}</td>
                       <td className="py-3 px-4">
-                        <Badge className={getSyncStatusBadge(listing.syncStatus)}>
-                          {getSyncStatusLabel(listing.syncStatus)}
-                        </Badge>
+                        <StatusBadge status={listing.syncStatus} label={getSyncStatusLabel(listing.syncStatus)} />
                       </td>
-                      <td className="py-3 px-4 text-gray-600 text-sm">
+                      <td className="py-3 px-4 text-gray-500 text-sm">
                         {formatDateTime(new Date(listing.createdAt))}
                       </td>
-                      <td className="py-3 px-4">
-                        <div className="flex gap-2">
+                      <td className="py-3 pl-4">
+                        <div className="flex gap-1">
                           <Link href={`/dashboard/listings/${listing.id}`}>
-                            <button className="p-1 hover:bg-gray-100 rounded">
-                              <Eye className="w-4 h-4 text-gray-600" />
+                            <button className="p-1.5 hover:bg-white/[0.06] rounded-full transition-colors">
+                              <Eye className="w-4 h-4 text-gray-400" />
                             </button>
                           </Link>
-                          <button className="p-1 hover:bg-gray-100 rounded">
-                            <Trash2 className="w-4 h-4 text-red-600" />
+                          <button className="p-1.5 hover:bg-white/[0.06] rounded-full transition-colors">
+                            <Trash2 className="w-4 h-4 text-red-400" />
                           </button>
                         </div>
                       </td>
@@ -160,8 +148,8 @@ export default function ListingsPage() {
               </table>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </DashboardCardContent>
+      </DashboardCard>
     </div>
   );
 }

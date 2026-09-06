@@ -33,9 +33,15 @@ describe('Sign-out uses the signOut() Server Action, not a raw /api/auth/signout
   });
 
   it('DashboardLayout no longer posts directly to /api/auth/signout', () => {
-    const source = read('src/components/Layout/DashboardLayout.tsx');
-    expect(source).toContain('signOutAction');
-    expect(source).not.toContain('/api/auth/signout');
+    // The sign-out form itself lives in DashboardSidebar.tsx (rendered by
+    // DashboardLayout for both the desktop sidebar and the mobile drawer)
+    // since the Dashboard V2 redesign split the sidebar into its own
+    // component — same signOutAction, just relocated.
+    const layoutSource = read('src/components/Layout/DashboardLayout.tsx');
+    const sidebarSource = read('src/components/dashboard/DashboardSidebar.tsx');
+    expect(sidebarSource).toContain('signOutAction');
+    expect(layoutSource).not.toContain('/api/auth/signout');
+    expect(sidebarSource).not.toContain('/api/auth/signout');
   });
 
   it('workspace/page.tsx no longer links (GET) to /api/auth/signout', () => {

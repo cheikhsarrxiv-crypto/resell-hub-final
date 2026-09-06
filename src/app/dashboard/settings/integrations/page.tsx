@@ -30,15 +30,18 @@ export default async function IntegrationsPage() {
   })
 
   return (
-    <div className="container py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold">Marketplace Integrations</h1>
-        <p className="text-gray-600 mt-2">Connect and manage your marketplace accounts</p>
+    <div className="space-y-6">
+      <div>
+        <h1
+          className="text-2xl sm:text-3xl font-bold text-white tracking-tight"
+          style={{ fontFamily: 'var(--font-display)' }}
+        >
+          Marketplace Integrations
+        </h1>
+        <p className="text-gray-500 mt-1 text-sm sm:text-base">Connect and manage your marketplace accounts</p>
       </div>
 
-      <div className="grid gap-6">
-        <MarketplaceConnectionsCard connections={connections} />
-      </div>
+      <MarketplaceConnectionsCard connections={connections} />
     </div>
   )
 }

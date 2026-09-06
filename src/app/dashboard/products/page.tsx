@@ -1,19 +1,21 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useWorkspace } from '@/hooks';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
-import { Button } from '@/components/UI/Button';
-import { Plus, Package } from 'lucide-react';
+import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
+import { PageHeader } from '@/components/dashboard/PageHeader';
+import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { Plus, Package, Search } from 'lucide-react';
 import { formatCurrency } from '@/lib/utils';
-import { LoadingState, ErrorState, EmptyState } from '@/components/StateComponents';
 
 export default function ProductsPage() {
   const { workspaceId, isReady } = useWorkspace();
   const [products, setProducts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
 
   useEffect(() => {
     if (!isReady) return;
@@ -45,79 +47,95 @@ export default function ProductsPage() {
     }
   };
 
+  const visibleProducts = useMemo(() => {
+    if (!search.trim()) return products;
+    const q = search.trim().toLowerCase();
+    return products.filter((p) => p.title?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q));
+  }, [products, search]);
+
   if (!isReady || loading) {
-    return <LoadingState message="Loading products..." />;
+    return <DashboardLoadingState message="Loading products..." />;
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center flex-col sm:flex-row gap-4">
-        <div>
-          <h1 className="text-3xl font-bold font-display text-[#14161A]">Products</h1>
-          <p className="text-gray-600 mt-1">Manage your product catalog</p>
-        </div>
-        <Link href="/dashboard/products/new">
-          <Button variant="primary" size="lg">
-            <Plus className="w-5 h-5 mr-2" />
-            Add Product
-          </Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Products"
+        description="Manage your product catalog"
+        action={
+          <Link href="/dashboard/products/new">
+            <DashboardButton variant="primary">
+              <Plus className="w-4 h-4" />
+              Add Product
+            </DashboardButton>
+          </Link>
+        }
+      />
 
       {error && (
-        <ErrorState
-          message="Failed to load products"
-          details={error || undefined}
-          onRetry={() => fetchProducts()}
-        />
+        <DashboardErrorState message="Failed to load products" details={error || undefined} onRetry={() => fetchProducts()} />
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Your Products ({products.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <DashboardCard>
+        <DashboardCardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <DashboardCardTitle>Your Products ({visibleProducts.length})</DashboardCardTitle>
+          {products.length > 0 && (
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search products..."
+                className="w-full bg-white/[0.04] border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-[#FF5A1F]/50 focus:border-[#FF5A1F]/50"
+              />
+            </div>
+          )}
+        </DashboardCardHeader>
+        <DashboardCardContent>
           {products.length === 0 ? (
-            <EmptyState
+            <DashboardEmptyState
               title="No products yet"
               description="Create your first product to get started selling"
-              icon={<Package className="w-12 h-12 text-gray-300 mb-4" />}
+              icon={<Package className="w-10 h-10 text-gray-700 mb-4" />}
               action={
                 <Link href="/dashboard/products/new">
-                  <Button variant="primary">Create First Product</Button>
+                  <DashboardButton variant="primary">Create First Product</DashboardButton>
                 </Link>
               }
             />
+          ) : visibleProducts.length === 0 ? (
+            <DashboardEmptyState title="No matches" description={`No products match "${search}"`} />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
               <table className="w-full text-sm min-w-[420px] md:min-w-[640px]">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-left">Title</th>
-                    <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-left hidden md:table-cell">SKU</th>
-                    <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-right">Price</th>
-                    <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-right hidden sm:table-cell">Stock</th>
-                    <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-right">Profit</th>
+                <thead>
+                  <tr className="border-b border-white/[0.06]">
+                    <th className="py-3 pr-4 font-medium text-gray-500 text-left">Title</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-left hidden md:table-cell">SKU</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-right">Price</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-right hidden sm:table-cell">Stock</th>
+                    <th className="py-3 pl-4 font-medium text-gray-500 text-right">Profit</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {products.map((product) => (
-                    <tr key={product.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="px-4 sm:px-6 py-4 font-medium">{product.title}</td>
-                      <td className="px-4 sm:px-6 py-4 hidden md:table-cell text-xs font-mono text-gray-600">
-                        {product.sku}
-                      </td>
-                      <td className="px-4 sm:px-6 py-4 text-right">{formatCurrency(product.sellingPrice)}</td>
-                      <td className="px-4 sm:px-6 py-4 text-right hidden sm:table-cell">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          product.quantity > 0
-                            ? 'bg-green-100 text-green-800'
-                            : 'bg-red-100 text-red-800'
-                        }`}>
+                  {visibleProducts.map((product) => (
+                    <tr key={product.id} className="border-b border-white/[0.04] last:border-b-0 hover:bg-white/[0.02] transition-colors">
+                      <td className="py-4 pr-4 font-medium text-white">{product.title}</td>
+                      <td className="py-4 px-4 hidden md:table-cell text-xs font-mono text-gray-500">{product.sku}</td>
+                      <td className="py-4 px-4 text-right text-gray-300">{formatCurrency(product.sellingPrice)}</td>
+                      <td className="py-4 px-4 text-right hidden sm:table-cell">
+                        <span
+                          className={`px-2 py-1 rounded-full text-xs font-medium border ${
+                            product.quantity > 0
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                              : 'bg-red-500/10 text-red-400 border-red-500/20'
+                          }`}
+                        >
                           {product.quantity}
                         </span>
                       </td>
-                      <td className="px-4 sm:px-6 py-4 text-right text-green-600 font-semibold">
+                      <td className="py-4 pl-4 text-right text-emerald-400 font-semibold">
                         {formatCurrency(product.sellingPrice - product.purchasePrice - (product.fulfillmentCost || 0))}
                       </td>
                     </tr>
@@ -126,8 +144,8 @@ export default function ProductsPage() {
               </table>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </DashboardCardContent>
+      </DashboardCard>
     </div>
   );
 }
