@@ -140,7 +140,7 @@ export default function ListingsPage() {
                         </Badge>
                       </td>
                       <td className="py-3 px-4 text-gray-600 text-sm">
-                        {formatDateTime(listing.createdAt)}
+                        {formatDateTime(new Date(listing.createdAt))}
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex gap-2">

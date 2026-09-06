@@ -20,13 +20,23 @@ export function formatDate(date: Date): string {
 }
 
 export function formatDateTime(date: Date): string {
+  // Re-wrapping in `new Date(...)` normalizes both a genuine Date and a
+  // JSON-deserialized ISO string (API responses never carry real Date
+  // objects) to the same thing; Intl.DateTimeFormat.format() throws
+  // "Invalid time value" for either an invalid Date or a non-Date value,
+  // which previously took down the whole page for one bad row instead of
+  // just that row's cell.
+  const normalized = new Date(date);
+  if (isNaN(normalized.getTime())) {
+    return '—';
+  }
   return new Intl.DateTimeFormat('fr-FR', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(date);
+  }).format(normalized);
 }
 
 export function calculateProfit(
