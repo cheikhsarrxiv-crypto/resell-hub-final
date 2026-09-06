@@ -9,11 +9,33 @@ interface MarketplaceConnectionsCardProps {
   connections: any[]
 }
 
+/**
+ * Pure decision logic for handleConnect(), pulled out so it can be unit
+ * tested directly (no DOM/component rendering needed — this repo's
+ * Vitest config runs in the 'node' environment). fetch() only rejects on
+ * a network-level failure: a 4xx/5xx response (with a JSON {error: ...}
+ * body) or a 200 that's unexpectedly missing authUrl both resolve
+ * normally and must be treated as failures here, not silently ignored.
+ */
+export function resolveConnectOutcome(
+  response: Response,
+  data: { authUrl?: string; error?: string }
+): { ok: true; authUrl: string } | { ok: false; message: string } {
+  if (response.ok && data.authUrl) {
+    return { ok: true, authUrl: data.authUrl }
+  }
+  return {
+    ok: false,
+    message: data.error || 'Failed to start the connection. Please try again.',
+  }
+}
+
 export function MarketplaceConnectionsCard({
   connections,
 }: MarketplaceConnectionsCardProps) {
   const [connecting, setConnecting] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
+  const [connectError, setConnectError] = useState<{ marketplace: string; message: string } | null>(null)
 
   const ebayConnection = connections.find(c => c.marketplaceId === 'ebay')
   const isEbayConnected = ebayConnection?.status === 'connected'
@@ -25,14 +47,25 @@ export function MarketplaceConnectionsCard({
 
   const handleConnect = async (marketplace: string) => {
     setConnecting(marketplace)
+    setConnectError(null)
     try {
       const response = await fetch(`/api/marketplace/connect/${marketplace}`)
       const data = await response.json()
-      if (data.authUrl) {
-        window.location.href = data.authUrl
+      const outcome = resolveConnectOutcome(response, data)
+
+      if (!outcome.ok) {
+        setConnectError({ marketplace, message: outcome.message })
+        setConnecting(null)
+        return
       }
+
+      window.location.href = outcome.authUrl
     } catch (error) {
       console.error('Failed to initiate connection:', error)
+      setConnectError({
+        marketplace,
+        message: 'Failed to start the connection. Please try again.',
+      })
       setConnecting(null)
     }
   }
@@ -114,6 +147,12 @@ export function MarketplaceConnectionsCard({
             </p>
           </div>
         )}
+
+        {connectError?.marketplace === 'ebay' && (
+          <div className="mt-4 p-4 bg-red-50 rounded border border-red-200">
+            <p className="text-sm text-red-700">{connectError.message}</p>
+          </div>
+        )}
       </div>
 
       {/* Etsy */}
@@ -176,6 +215,12 @@ export function MarketplaceConnectionsCard({
             <p className="text-sm text-[#14161A]">
               Your Etsy account is connected. You can now sync listings and orders.
             </p>
+          </div>
+        )}
+
+        {connectError?.marketplace === 'etsy' && (
+          <div className="mt-4 p-4 bg-red-50 rounded border border-red-200">
+            <p className="text-sm text-red-700">{connectError.message}</p>
           </div>
         )}
       </div>
