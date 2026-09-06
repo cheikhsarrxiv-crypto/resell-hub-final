@@ -115,7 +115,7 @@ export default function ListingsPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full min-w-[720px]">
                 <thead>
                   <tr className="border-b">
                     <th className="text-left py-3 px-4 font-semibold text-gray-900">Title</th>
