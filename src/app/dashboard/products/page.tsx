@@ -90,7 +90,7 @@ export default function ProductsPage() {
             />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[420px] md:min-w-[640px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="px-4 sm:px-6 py-3 font-semibold text-gray-900 text-left">Title</th>
