@@ -16,6 +16,7 @@ import { auth } from '@/auth'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
+import { verifyWorkspaceAccess, errorResponse } from '@/lib/security'
 
 const SUPPORTED_MARKETPLACES: Record<string, Marketplace> = {
   EBAY: Marketplace.EBAY,
@@ -50,7 +51,20 @@ export async function POST(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const workspaceId = session.user.workspaceId || 'default'
+    // No fabricated "default" workspace: an account with no workspace on
+    // its session has nothing to disconnect.
+    if (!session.user.workspaceId) {
+      return NextResponse.json(
+        { error: 'No workspace found for this account' },
+        { status: 403 }
+      )
+    }
+
+    // Same ownership + verified-email check every other workspace-scoped
+    // route in the app uses (src/lib/security.ts) — re-verified fresh
+    // against the database, not just trusted from the JWT.
+    const workspaceId = await verifyWorkspaceAccess(session.user.workspaceId)
+
     const marketplaceParam = params.marketplace.toUpperCase()
 
     const marketplace = SUPPORTED_MARKETPLACES[marketplaceParam]
@@ -73,9 +87,6 @@ export async function POST(
     })
   } catch (error) {
     console.error('[Marketplace Disconnect] Failed to disconnect marketplace connection')
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to disconnect' },
-      { status: 500 }
-    )
+    return errorResponse(error)
   }
 }

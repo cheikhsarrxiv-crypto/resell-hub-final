@@ -17,8 +17,10 @@
 import { auth } from '@/auth'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
 import { SubscriptionService } from '@/services/SubscriptionService'
+import { TokenManager } from '@/services/marketplace/TokenManager'
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
+import { verifyWorkspaceAccess } from '@/lib/security'
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -51,6 +53,14 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { marketplace: string } }
 ) {
+  const marketplaceParam = params.marketplace.toUpperCase()
+  const stateCookieName = `oauth_state_${marketplaceParam.toLowerCase()}`
+  // Tracks whether the state cookie has been confirmed genuine and
+  // should be deleted on whatever response we return from here on —
+  // including an error redirect if the token exchange itself fails
+  // afterward. Once validated, the state must never be usable again.
+  let consumedState = false
+
   try {
     const session = await auth()
 
@@ -58,8 +68,23 @@ export async function GET(
       return NextResponse.redirect(new URL('/login', req.url))
     }
 
-    const workspaceId = session.user.workspaceId || 'default'
-    const marketplaceParam = params.marketplace.toUpperCase()
+    // No fabricated "default" workspace: an account with no workspace on
+    // its session cannot complete a marketplace connection at all.
+    if (!session.user.workspaceId) {
+      return NextResponse.redirect(
+        new URL(
+          `/dashboard/settings/integrations?status=error&error=${encodeURIComponent(
+            'No workspace found for this account'
+          )}`,
+          req.url
+        )
+      )
+    }
+
+    // Same ownership + verified-email check every other workspace-scoped
+    // route in the app uses (src/lib/security.ts) — re-verified fresh
+    // against the database, not just trusted from the JWT.
+    const workspaceId = await verifyWorkspaceAccess(session.user.workspaceId)
 
     const marketplace = SUPPORTED_MARKETPLACES[marketplaceParam]
     if (!marketplace) {
@@ -92,15 +117,28 @@ export async function GET(
       )
     }
 
-    // Basic well-formedness check on state before handing off to the
-    // service (which performs the real timing-safe verification against
-    // the stored expected state during token exchange).
-    if (typeof state !== 'string' || state.length !== 64) {
+    // CSRF protection: the state returned by the marketplace must match
+    // the one generated and stored in an httpOnly cookie when this flow
+    // was initiated (connect/route.ts) — a well-formed-looking state is
+    // not enough on its own. A missing cookie (expired, never set, or
+    // already consumed by a previous callback) or a mismatch means this
+    // request wasn't triggered by a flow this browser actually started.
+    const expectedState = req.cookies.get(stateCookieName)?.value
+
+    if (
+      state.length !== 64 ||
+      !expectedState ||
+      !new TokenManager().verifyOAuthState(state, expectedState)
+    ) {
       return NextResponse.json(
         { error: 'Invalid OAuth state' },
         { status: 400 }
       )
     }
+
+    // State confirmed genuine — consume it now so it can never be
+    // replayed, regardless of whether the token exchange below succeeds.
+    consumedState = true
 
     // PKCE (Etsy only): retrieve the code_verifier persisted by the
     // connect route. Undefined for eBay (cookie never set for it).
@@ -116,7 +154,7 @@ export async function GET(
     // the count.
     const existingConnection = await service.getConnection(workspaceId, marketplace)
     if (!existingConnection && (await SubscriptionService.isLimitReached(workspaceId, 'marketplaces'))) {
-      return NextResponse.redirect(
+      const response = NextResponse.redirect(
         new URL(
           `/dashboard/settings/integrations?status=error&error=${encodeURIComponent(
             'Marketplace connection limit reached for your plan'
@@ -124,6 +162,8 @@ export async function GET(
           req.url
         )
       )
+      response.cookies.delete(stateCookieName)
+      return response
     }
 
     // Real code -> token exchange + encrypted storage (workspace-scoped)
@@ -136,6 +176,7 @@ export async function GET(
         req.url
       )
     )
+    response.cookies.delete(stateCookieName)
     if (codeVerifier) {
       response.cookies.delete(pkceCookieName)
     }
@@ -146,11 +187,15 @@ export async function GET(
     console.error('[Marketplace Callback] OAuth callback failed for workspace-scoped connection attempt')
 
     const errorMsg = error instanceof Error ? error.message : 'Connection failed'
-    return NextResponse.redirect(
+    const response = NextResponse.redirect(
       new URL(
         `/dashboard/settings/integrations?status=error&error=${encodeURIComponent(errorMsg)}`,
         req.url
       )
     )
+    if (consumedState) {
+      response.cookies.delete(stateCookieName)
+    }
+    return response
   }
 }
