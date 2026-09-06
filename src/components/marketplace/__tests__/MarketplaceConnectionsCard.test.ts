@@ -131,3 +131,90 @@ describe('Scope: only the frontend card changed — no backend/OAuth/DB code ref
     expect(componentSource).toContain('fetch(`/api/marketplace/disconnect/${marketplace}`');
   });
 });
+
+/**
+ * Finding #3 fix: the OAuth callback redirects back to this page with
+ * ?status=connected&marketplace=... (success) or ?status=error&error=...
+ * (failure), but nothing ever read or displayed those params — a
+ * successful or failed eBay/Etsy connection attempt was silently lost.
+ *
+ * resolveCallbackNotice() is the pure decision logic for turning those
+ * three raw query values into a one-time notice. Like
+ * resolveConnectOutcome() above, this file can't be imported directly
+ * (jsx: "preserve" + .tsx under Vitest/esbuild — see header comment), so
+ * this proves the logic via source-level checks against the real
+ * function body, the same convention already established here.
+ */
+describe('resolveCallbackNotice() — pure decision logic for the OAuth callback redirect', () => {
+  const fnStart = componentSource.indexOf('export function resolveCallbackNotice(');
+  const fnEnd = componentSource.indexOf('\n}\n', fnStart);
+  const fnBody = componentSource.slice(fnStart, fnEnd);
+
+  it('exists as a standalone, exported function (testable independently of React state)', () => {
+    expect(fnStart).toBeGreaterThan(-1);
+  });
+
+  it('1 & 2. on status=connected with a recognized marketplace, builds a success message using its display name (covers both ebay and etsy via the shared lookup table)', () => {
+    expect(fnBody).toContain("if (status === 'connected')");
+    expect(fnBody).toContain('marketplaceParam ? MARKETPLACE_DISPLAY_NAMES[marketplaceParam] : undefined');
+    expect(fnBody).toContain("return { type: 'success', message: `${displayName} connected successfully.` }");
+    // The lookup table itself must map both real marketplaces to their display name.
+    expect(componentSource).toContain("ebay: 'eBay'");
+    expect(componentSource).toContain("etsy: 'Etsy'");
+  });
+
+  it('does not fabricate a success message when marketplace is missing/unrecognized on status=connected', () => {
+    const connectedBranchStart = fnBody.indexOf("if (status === 'connected')");
+    const connectedBranchEnd = fnBody.indexOf('if (status === \'error\')');
+    const connectedBranch = fnBody.slice(connectedBranchStart, connectedBranchEnd);
+    expect(connectedBranch).toContain('if (!displayName) return null');
+  });
+
+  it('3. on status=error, surfaces the provided error message verbatim, with a safe generic fallback', () => {
+    expect(fnBody).toContain("if (status === 'error')");
+    expect(fnBody).toContain('message: errorParam ||');
+    expect(fnBody).toContain("'Something went wrong connecting your marketplace account.'");
+  });
+
+  it('4 & 7. returns null for no/unrecognized status — no message, no crash (falls through to the final return)', () => {
+    expect(fnBody.trim().endsWith('return null')).toBe(true);
+  });
+});
+
+describe('MarketplaceConnectionsCard wires resolveCallbackNotice() into a one-time, cleaned-up notice', () => {
+  it('reads status/marketplace/error from useSearchParams(), not from a trusted workspaceId or any other source', () => {
+    expect(componentSource).toContain("import { useRouter, usePathname, useSearchParams } from 'next/navigation'");
+    expect(componentSource).toContain("searchParams.get('status')");
+    expect(componentSource).toContain("searchParams.get('marketplace')");
+    expect(componentSource).toContain("searchParams.get('error')");
+    // No workspaceId is ever read from the URL by this component.
+    expect(componentSource).not.toContain("searchParams.get('workspaceId')");
+  });
+
+  it('5. computes the notice once (lazy useState initializer) and cleans the URL via router.replace(pathname) in a mount-only effect', () => {
+    expect(componentSource).toContain('const [callbackNotice] = useState(() =>');
+    const effectStart = componentSource.indexOf('useEffect(() => {\n    if (callbackNotice)');
+    expect(effectStart).toBeGreaterThan(-1);
+    const effectEnd = componentSource.indexOf('}, [])', effectStart);
+    const effectBody = componentSource.slice(effectStart, effectEnd);
+    expect(effectBody).toContain('router.replace(pathname)');
+    // Empty dependency array: runs once on mount, not on every render.
+    expect(componentSource.slice(effectEnd, effectEnd + 6)).toBe('}, [])');
+  });
+
+  it('6. renders the message as plain JSX text (React-escaped), never via dangerouslySetInnerHTML', () => {
+    expect(componentSource).toContain('{callbackNotice.message}');
+    expect(componentSource).not.toContain('dangerouslySetInnerHTML');
+  });
+
+  it('4. the notice banner is only rendered when a notice actually exists (no params -> no banner)', () => {
+    expect(componentSource).toContain('{callbackNotice && (');
+  });
+
+  it('reuses the existing success/error visual style already used elsewhere in this file, rather than introducing new classes', () => {
+    // Same classes as the existing permanent "connected" banner.
+    expect(componentSource).toContain("'p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20'");
+    // Same classes as the existing connectError banner.
+    expect(componentSource).toContain("'p-4 bg-red-500/10 rounded-xl border border-red-500/20'");
+  });
+});

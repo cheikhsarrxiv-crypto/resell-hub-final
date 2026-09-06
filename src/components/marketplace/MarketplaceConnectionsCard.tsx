@@ -1,12 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import { DashboardButton } from '@/components/dashboard/DashboardButton'
 import { Marketplace } from '@/types/marketplace'
 import { format } from 'date-fns'
 
 interface MarketplaceConnectionsCardProps {
   connections: any[]
+}
+
+const MARKETPLACE_DISPLAY_NAMES: Record<string, string> = {
+  ebay: 'eBay',
+  etsy: 'Etsy',
 }
 
 /**
@@ -30,9 +36,69 @@ export function resolveConnectOutcome(
   }
 }
 
+/**
+ * Pure decision logic for interpreting the OAuth callback's redirect
+ * query params (?status=connected&marketplace=ebay or
+ * ?status=error&error=...) into a one-time notice to show the user.
+ * Pulled out for the same reason as resolveConnectOutcome() above:
+ * testable without rendering.
+ *
+ * Unknown/malformed values are ignored rather than guessed at — no
+ * message is safer than a wrong one. Note the OAuth callback's redirect
+ * only ever includes `marketplace` on the success case, never on an
+ * error one, so error messages are intentionally not attributed to a
+ * specific marketplace card here.
+ */
+export function resolveCallbackNotice(
+  status: string | null,
+  marketplaceParam: string | null,
+  errorParam: string | null
+): { type: 'success' | 'error'; message: string } | null {
+  if (status === 'connected') {
+    const displayName = marketplaceParam ? MARKETPLACE_DISPLAY_NAMES[marketplaceParam] : undefined
+    if (!displayName) return null
+    return { type: 'success', message: `${displayName} connected successfully.` }
+  }
+
+  if (status === 'error') {
+    return {
+      type: 'error',
+      message: errorParam || 'Something went wrong connecting your marketplace account.',
+    }
+  }
+
+  return null
+}
+
 export function MarketplaceConnectionsCard({
   connections,
 }: MarketplaceConnectionsCardProps) {
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+
+  // Computed once from the URL this component first mounted with (lazy
+  // initializer), before the params are stripped below — a refresh must
+  // not re-show this, and router.replace() changing the URL must not
+  // re-trigger this computation.
+  const [callbackNotice] = useState(() =>
+    resolveCallbackNotice(
+      searchParams.get('status'),
+      searchParams.get('marketplace'),
+      searchParams.get('error')
+    )
+  )
+
+  useEffect(() => {
+    if (callbackNotice) {
+      // Strip the one-time OAuth callback params so a page refresh (or
+      // back/forward navigation) doesn't re-display the same notice.
+      router.replace(pathname)
+    }
+    // Intentionally run once on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const [connecting, setConnecting] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [connectError, setConnectError] = useState<{ marketplace: string; message: string } | null>(null)
@@ -85,6 +151,20 @@ export function MarketplaceConnectionsCard({
 
   return (
     <div className="space-y-4">
+      {callbackNotice && (
+        <div
+          className={
+            callbackNotice.type === 'success'
+              ? 'p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20'
+              : 'p-4 bg-red-500/10 rounded-xl border border-red-500/20'
+          }
+        >
+          <p className={callbackNotice.type === 'success' ? 'text-sm text-gray-200' : 'text-sm text-red-300'}>
+            {callbackNotice.message}
+          </p>
+        </div>
+      )}
+
       {/* eBay */}
       <div className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5 sm:p-6">
         <div className="flex items-start justify-between mb-6 flex-wrap gap-4">
