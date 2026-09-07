@@ -67,7 +67,7 @@ export default function ProductImagesPage() {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch(`/api/products/${productId}/images`, {
+        const response = await fetch(`/api/products/${productId}/images?workspaceId=${workspaceId}`, {
           method: 'POST',
           body: formData,
         });
