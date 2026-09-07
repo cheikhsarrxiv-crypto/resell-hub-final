@@ -35,7 +35,7 @@ interface OrbitItem {
 const ORBIT_ITEMS: OrbitItem[] = [
   { label: 'eBay', kind: 'marketplace', status: 'live' },
   { label: 'Etsy', kind: 'marketplace', status: 'live' },
-  { label: 'ADKSY AI', kind: 'process', status: 'live' },
+  { label: 'Sync Engine', kind: 'process', status: 'live' },
   { label: 'Order', kind: 'process', status: 'live' },
   { label: 'Depop', kind: 'marketplace', status: 'soon' },
   { label: 'Vinted', kind: 'marketplace', status: 'soon' },

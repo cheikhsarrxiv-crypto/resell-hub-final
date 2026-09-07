@@ -8,15 +8,19 @@ import { displayFont as display, bodyFont as body } from '@/lib/fonts';
 
 // Marketplace automation status reflects the real OAuth integrations wired
 // up in src/app/api/marketplace/connect/[marketplace]/route.ts and the
-// adapters in src/services/marketplace/adapters/ — eBay and Etsy are real,
-// live API integrations; Depop is a documented placeholder blocked on
-// partner approval; Vinted has no public API and is intentionally blocked.
+// adapters in src/services/marketplace/adapters/ — eBay is a real, fully
+// wired live integration. Etsy is also real and live, but its listing
+// flow still uses placeholder taxonomy fields (see EtsyAdapter.ts) and
+// production usage depends on Etsy's own commercial app review, so it
+// must not be presented as equally production-ready as eBay. Depop is a
+// documented placeholder blocked on partner approval; Vinted has no
+// public API and is intentionally blocked.
 // Never present a marketplace as automated unless it actually is.
 const MARKETPLACES = [
-  { name: 'eBay', status: 'live' as const },
-  { name: 'Etsy', status: 'live' as const },
-  { name: 'Depop', status: 'soon' as const },
-  { name: 'Vinted', status: 'soon' as const },
+  { name: 'eBay', status: 'live' as const, badge: 'Automated' },
+  { name: 'Etsy', status: 'live' as const, badge: 'In review' },
+  { name: 'Depop', status: 'soon' as const, badge: 'Coming soon' },
+  { name: 'Vinted', status: 'soon' as const, badge: 'Coming soon' },
 ];
 
 const HOW_IT_WORKS = [
@@ -24,7 +28,7 @@ const HOW_IT_WORKS = [
   { n: '02', title: 'Analyze', desc: 'See real margin and profit on every item before you commit to listing it.' },
   { n: '03', title: 'List', desc: 'Publish a listing to eBay or Etsy with your price and quantity, live in minutes.' },
   { n: '04', title: 'Sell', desc: 'Orders sync automatically as they come in, from every connected marketplace.' },
-  { n: '05', title: 'Fulfill', desc: 'Route the order to a fulfillment partner and track cost, revenue and profit per shipment.' },
+  { n: '05', title: 'Fulfill', desc: 'Send the order to your fulfillment partner in one click, then track cost, revenue and profit automatically.' },
 ];
 
 const FEATURES = [
@@ -237,7 +241,8 @@ export default function Home() {
             <p className="text-gray-400 leading-relaxed max-w-xl mx-auto mb-14">
               ADKSY automates the busywork behind every sale — calculating real margin
               on every product, keeping listings and orders in sync across marketplaces,
-              and routing fulfillment to your partner so you can focus on sourcing.
+              and tracking cost, revenue and profit the moment you send an order to
+              fulfillment, so you can focus on sourcing.
             </p>
           </Reveal>
 
@@ -276,8 +281,8 @@ export default function Home() {
           </Reveal>
           <Reveal delayMs={120}>
             <p className="text-gray-400 max-w-lg mx-auto">
-              eBay and Etsy are fully automated today. Depop and Vinted are on our
-              roadmap — not yet available.
+              eBay is fully automated today. Etsy is live and in review.
+              Depop and Vinted are on our roadmap — not yet available.
             </p>
           </Reveal>
         </div>
@@ -303,7 +308,7 @@ export default function Home() {
                       : 'bg-white/5 text-gray-500'
                   }`}
                 >
-                  {m.status === 'live' ? 'Automated' : 'Coming soon'}
+                  {m.badge}
                 </span>
               </div>
             </Reveal>
@@ -324,7 +329,7 @@ export default function Home() {
               className="font-bold leading-[1.05]"
               style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.75rem, 4.5vw, 3rem)' }}
             >
-              From order to tracking, automatically.
+              One click to fulfillment. Tracked automatically.
             </h2>
           </Reveal>
         </div>
