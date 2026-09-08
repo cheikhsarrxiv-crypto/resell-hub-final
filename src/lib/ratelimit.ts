@@ -29,6 +29,9 @@ const DEFAULT_CONFIGS = {
   fulfillment: { points: 100, duration: 3600 }, // 100 per hour
   emailVerification: { points: 3, duration: 3600 }, // 3 per hour
   aiChat: { points: 20, duration: 3600 }, // 20 per hour (per workspace)
+  forgotPasswordIp: { points: 5, duration: 3600 }, // 5 per hour per IP
+  forgotPasswordEmail: { points: 3, duration: 3600 }, // 3 per hour per email
+  resetPasswordIp: { points: 10, duration: 3600 }, // 10 per hour per IP
 } as const;
 
 type LimitType = keyof typeof DEFAULT_CONFIGS;
@@ -232,6 +235,18 @@ export class RateLimiterService {
 
   async checkAiChat(workspaceId: string): Promise<RateLimitResult> {
     return this.check(workspaceId, 'aiChat');
+  }
+
+  async checkForgotPasswordIP(ip: string): Promise<RateLimitResult> {
+    return this.check(`forgot-password:${ip}`, 'forgotPasswordIp');
+  }
+
+  async checkForgotPasswordEmail(email: string): Promise<RateLimitResult> {
+    return this.check(email, 'forgotPasswordEmail');
+  }
+
+  async checkResetPasswordIP(ip: string): Promise<RateLimitResult> {
+    return this.check(`reset-password:${ip}`, 'resetPasswordIp');
   }
 
   static getClientIP(request: Request): string {

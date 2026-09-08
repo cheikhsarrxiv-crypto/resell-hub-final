@@ -25,6 +25,15 @@ export const setPasswordSchema = z.object({
   path: ["confirmPassword"],
 });
 
+export const resetPasswordWithTokenSchema = z.object({
+  token: z.string().min(1, 'Reset token is required'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  confirmPassword: z.string(),
+}).refine((data) => data.password === data.confirmPassword, {
+  message: "Passwords don't match",
+  path: ["confirmPassword"],
+});
+
 // Workspace
 export const createWorkspaceSchema = z.object({
   name: z.string().min(2, 'Workspace name must be at least 2 characters'),
@@ -148,3 +157,4 @@ export type CreateFulfillmentOrderInput = z.infer<typeof createFulfillmentOrderS
 export type ConnectMarketplaceInput = z.infer<typeof connectMarketplaceSchema>;
 export type ChangeSubscriptionInput = z.infer<typeof changeSubscriptionSchema>;
 export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;
+export type ResetPasswordWithTokenInput = z.infer<typeof resetPasswordWithTokenSchema>;

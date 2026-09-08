@@ -88,6 +88,23 @@ export class EmailService {
   }
 
   /**
+   * Send password reset link
+   */
+  static async sendPasswordResetEmail(
+    email: string,
+    resetUrl: string
+  ): Promise<EmailResult> {
+    return this.send({
+      to: email,
+      subject: 'Reset your ADKSY password',
+      template: 'password-reset',
+      variables: {
+        resetUrl,
+      },
+    });
+  }
+
+  /**
    * Send welcome email
    */
   static async sendWelcomeEmail(
@@ -502,6 +519,12 @@ export class EmailService {
 <p>Thanks for signing up for ADKSY. Please confirm your email address to activate your account.</p>
 <p><a href="{{verificationUrl}}">Verify my email</a></p>
 <p>This link expires in 24 hours. If you didn't create an ADKSY account, you can ignore this email.</p>
+      `,
+      'password-reset': `
+<h1>Reset your password</h1>
+<p>We received a request to reset the password for your ADKSY account.</p>
+<p><a href="{{resetUrl}}">Reset my password</a></p>
+<p>This link expires in 1 hour and can only be used once. If you didn't request a password reset, you can safely ignore this email — your password will not be changed.</p>
       `,
       welcome: `
 <h1>Welcome to ADKSY</h1>
