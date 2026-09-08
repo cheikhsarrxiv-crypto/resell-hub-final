@@ -116,6 +116,27 @@ export const changeSubscriptionSchema = z.object({
   planId: z.string().min(1),
 });
 
+// AI Assistant
+export const aiChatMessageSchema = z.object({
+  message: z.string().min(1, 'Message is required').max(4000, 'Message is too long'),
+  currentPage: z
+    .enum(['dashboard', 'products', 'listings', 'orders', 'settings', 'integrations'])
+    .optional(),
+  // Prior turns from this session's in-memory conversation, resent by the
+  // client so the (stateless, V1) API can give contextual replies —
+  // capped to keep request size and token usage bounded.
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().min(1).max(4000),
+      })
+    )
+    .max(20)
+    .optional()
+    .default([]),
+});
+
 export type SignUpInput = z.infer<typeof signUpSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type CreateProductInput = z.infer<typeof createProductSchema>;
@@ -126,3 +147,4 @@ export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 export type CreateFulfillmentOrderInput = z.infer<typeof createFulfillmentOrderSchema>;
 export type ConnectMarketplaceInput = z.infer<typeof connectMarketplaceSchema>;
 export type ChangeSubscriptionInput = z.infer<typeof changeSubscriptionSchema>;
+export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;

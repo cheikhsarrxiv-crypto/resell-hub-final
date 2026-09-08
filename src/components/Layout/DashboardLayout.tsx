@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { DashboardSidebar, type NavItem } from '@/components/dashboard/DashboardSidebar';
 import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
+import { AiChatWidget } from '@/components/dashboard/AiChatWidget';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -96,6 +97,10 @@ export function DashboardLayout({
       <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0">
         <div className="p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
+
+      {/* Merchant-facing assistant only — not shown in the admin section,
+          which has a different context/audience. */}
+      {!isAdmin && <AiChatWidget />}
     </div>
   );
 }
