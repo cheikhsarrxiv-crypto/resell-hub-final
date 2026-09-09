@@ -3,7 +3,7 @@ import { prisma } from '@/lib/prisma';
 import { AdapterFactory } from './marketplace/AdapterFactory';
 import { MarketplaceConnectionService } from './marketplace/MarketplaceConnectionService';
 import { SubscriptionService } from './SubscriptionService';
-import { Marketplace } from '@/types/marketplace';
+import { Marketplace, ErrorType } from '@/types/marketplace';
 import MarketplaceAdapter from './marketplace/MarketplaceAdapter';
 
 interface MarketplaceOAuthConfig {
@@ -85,6 +85,36 @@ async function getAuthenticatedAdapter(
   (adapter as any).setAccessToken(accessToken);
 
   return adapter;
+}
+
+/**
+ * Map a marketplace adapter error to a short, safe, user-facing message
+ * — never the raw provider error, a stack trace, or any token/secret.
+ * Mirrors the mapping already used in createListing()'s catch block
+ * (same regex patterns), extended with update/delete-specific fallback
+ * phrasing. Works whether the error is a plain Error or an already-
+ * normalized error object from ErrorNormalizer (both expose `.message`).
+ */
+function toSafeMarketplaceErrorMessage(
+  error: unknown,
+  marketplaceDisplayName: string,
+  action: 'update' | 'delete'
+): string {
+  const rawMessage = typeof (error as any)?.message === 'string' ? (error as any).message : '';
+
+  if (/not connected/i.test(rawMessage)) {
+    return `${marketplaceDisplayName} isn't connected. Reconnect it in Settings and try again.`;
+  }
+  if (/unauthorized|token|expired/i.test(rawMessage)) {
+    return `Your ${marketplaceDisplayName} connection has expired. Reconnect it in Settings and try again.`;
+  }
+  if (/limit|quota/i.test(rawMessage)) {
+    return `${marketplaceDisplayName} rejected this request due to an account limit.`;
+  }
+
+  return action === 'update'
+    ? `Couldn't update this listing on ${marketplaceDisplayName}. Please try again.`
+    : `Couldn't remove this listing from ${marketplaceDisplayName}. Please try again.`;
 }
 
 export class ListingService {
@@ -283,7 +313,10 @@ export class ListingService {
       throw new Error('Listing not found');
     }
 
-    // Update on marketplace
+    // Update on marketplace FIRST. The local DB must only adopt the new
+    // values once the marketplace actually confirms the update — silently
+    // applying them after a failed marketplace call would make ADKSY and
+    // the real eBay/Etsy listing diverge (Finding #4).
     if (listing.connection && listing.externalId) {
       const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
@@ -295,11 +328,14 @@ export class ListingService {
           quantity: data.quantity,
         });
       } catch (error) {
-        console.error('Failed to update listing on marketplace:', error);
+        console.error(`Failed to update listing on ${listing.connection.marketplace.displayName}:`, error);
+        throw new Error(toSafeMarketplaceErrorMessage(error, listing.connection.marketplace.displayName, 'update'));
       }
     }
 
-    // Update in database
+    // Update in database — only reached when there was nothing to sync
+    // (no connection/externalId, unchanged prior behavior) or the
+    // marketplace update above actually succeeded.
     return prisma.listing.update({
       where: { id: listingId },
       data: {
@@ -327,18 +363,34 @@ export class ListingService {
       throw new Error('Listing not found');
     }
 
-    // Delete from marketplace
+    // Delete from marketplace FIRST. The local DB must only be marked
+    // delisted once the marketplace confirms the item is actually gone —
+    // otherwise ADKSY could hide a listing that stays live and
+    // purchasable on eBay/Etsy (Finding #4).
     if (listing.connection && listing.externalId) {
       const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
       try {
         await adapter.deleteListing(listing.externalId);
       } catch (error) {
-        console.error('Failed to delete listing from marketplace:', error);
+        // A 404/NOT_FOUND from the marketplace means the listing is
+        // already gone there — the desired end state (delisted) is
+        // already achieved, so this is treated as an idempotent success
+        // rather than a failure. Reuses the existing ErrorNormalizer
+        // NOT_FOUND type instead of inventing a new error model.
+        const isAlreadyGoneOnMarketplace = (error as any)?.type === ErrorType.NOT_FOUND;
+
+        if (!isAlreadyGoneOnMarketplace) {
+          console.error(`Failed to delete listing from ${listing.connection.marketplace.displayName}:`, error);
+          throw new Error(toSafeMarketplaceErrorMessage(error, listing.connection.marketplace.displayName, 'delete'));
+        }
       }
     }
 
-    // Mark as deleted in database
+    // Mark as deleted in database — only reached when there was nothing
+    // to remove (no connection/externalId, unchanged prior behavior), the
+    // marketplace deletion above succeeded, or the item was already gone
+    // there (NOT_FOUND).
     return prisma.listing.update({
       where: { id: listingId },
       data: {

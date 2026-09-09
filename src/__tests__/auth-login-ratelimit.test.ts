@@ -1,19 +1,28 @@
 /**
- * Proves the login brute-force fix: src/auth.ts's Credentials.authorize()
- * now calls rateLimiter.checkLogin(email) before checking the password.
- * Previously only signup was rate-limited (checkSignup) — login had none
- * at all, so an attacker could try unlimited passwords against one email.
+ * Proves the login brute-force fix: the credentials callback route
+ * (src/app/api/auth/[...nextauth]/route.ts) now calls
+ * rateLimiter.checkLogin(email) — read from the request body — before
+ * ever calling NextAuth's handlers.POST(). Previously this lived inside
+ * src/auth.ts's Credentials.authorize(), but authorize() returning null
+ * on a block just makes NextAuth treat it as "invalid credentials" (a
+ * plain 200), so a caller could never distinguish "wrong password" from
+ * "rate limited" and never got a real 429/Retry-After to back off on.
+ * Checking in the route, before handlers.POST(), lets a limit violation
+ * short-circuit with a real HTTP 429.
  *
- * src/auth.ts cannot be imported live in this Vitest setup: next-auth's
- * module graph pulls in next/server, which fails to resolve here (same
- * pre-existing environment issue documented on
- * subscription-plan-change-security.test.ts). So this combines:
+ * Neither src/auth.ts nor the route file can be imported live in this
+ * Vitest setup: next-auth's module graph pulls in next/server, which
+ * fails to resolve here (same pre-existing environment issue documented
+ * on subscription-plan-change-security.test.ts). So this combines:
  *  1. A real behavioral test of RateLimiterService.checkLogin() itself
- *     (the exact mechanism auth.ts calls), same convention as
+ *     (the exact mechanism the route calls), same convention as
  *     ratelimit-stripe.test.ts for the Stripe routes.
- *  2. A source-level check that auth.ts actually calls it inside
- *     authorize(), before the password comparison — so the fix is wired,
- *     not just that the underlying limiter method happens to work.
+ *  2. A source-level check that the route actually calls it for the
+ *     credentials callback, before delegating to handlers.POST(), and
+ *     responds 429 (not a silent pass-through) when blocked.
+ *  3. A source-level check that src/auth.ts no longer also calls it —
+ *     otherwise every attempt would be counted twice against the same
+ *     Upstash/in-memory key.
  */
 import fs from 'fs';
 import path from 'path';
@@ -52,28 +61,53 @@ describe('RateLimiterService.checkLogin — backing auth.ts authorize()', () => 
   });
 });
 
-describe('auth.ts source — checkLogin is actually wired into authorize()', () => {
-  it('calls rateLimiter.checkLogin() inside authorize(), before the bcrypt password comparison', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'src/auth.ts'), 'utf-8');
+describe('[...nextauth] route source — checkLogin is wired in front of handlers.POST()', () => {
+  const routeSource = fs.readFileSync(
+    path.join(process.cwd(), 'src/app/api/auth/[...nextauth]/route.ts'),
+    'utf-8'
+  );
 
-    const authorizeStart = source.indexOf('async authorize(credentials)');
-    expect(authorizeStart).toBeGreaterThan(-1);
+  it('calls rateLimiter.checkLogin() for the credentials callback, before delegating to handlers.POST()', () => {
+    const postStart = routeSource.indexOf('export async function POST(');
+    expect(postStart).toBeGreaterThan(-1);
 
-    const rateLimitCallIndex = source.indexOf('rateLimiter.checkLogin(', authorizeStart);
-    const passwordCompareIndex = source.indexOf('bcrypt.compare(', authorizeStart);
-
-    expect(rateLimitCallIndex).toBeGreaterThan(authorizeStart);
-    expect(passwordCompareIndex).toBeGreaterThan(authorizeStart);
-    expect(rateLimitCallIndex).toBeLessThan(passwordCompareIndex);
-
-    // On block, authorize() must return null like every other rejection
-    // path here — never a distinct message that would tell an attacker
-    // "the password would have been checked but you're rate-limited"
-    // vs. "the password was wrong".
-    const betweenCheckAndReturn = source.slice(
-      rateLimitCallIndex,
-      source.indexOf('return null', rateLimitCallIndex) + 'return null'.length
+    const pathCheckIndex = routeSource.indexOf(
+      "'/api/auth/callback/credentials'",
+      postStart
     );
-    expect(betweenCheckAndReturn).toContain('!rateLimitResult.success');
+    const rateLimitCallIndex = routeSource.indexOf('rateLimiter.checkLogin(', postStart);
+    const handlersPostIndex = routeSource.lastIndexOf('handlers.POST(request)');
+
+    expect(pathCheckIndex).toBeGreaterThan(postStart);
+    expect(rateLimitCallIndex).toBeGreaterThan(pathCheckIndex);
+    expect(handlersPostIndex).toBeGreaterThan(rateLimitCallIndex);
+  });
+
+  it('reads the email via request.clone().formData(), so NextAuth can still read the body afterward', () => {
+    expect(routeSource).toContain('request.clone().formData()');
+  });
+
+  it('responds with a real HTTP 429 and rate-limit headers when blocked, not a silent pass-through', () => {
+    const rateLimitCallIndex = routeSource.indexOf('rateLimiter.checkLogin(');
+    const blockBranch = routeSource.slice(
+      rateLimitCallIndex,
+      routeSource.indexOf('handlers.POST(request)')
+    );
+
+    expect(blockBranch).toContain('!rateLimitResult.success');
+    expect(blockBranch).toContain('status: 429');
+    expect(blockBranch).toContain("'Retry-After'");
+    expect(blockBranch).toContain("'X-RateLimit-Limit'");
+    expect(blockBranch).toContain("'X-RateLimit-Remaining'");
+    expect(blockBranch).toContain("'X-RateLimit-Reset'");
+    expect(blockBranch).toContain('Too many login attempts. Please try again later.');
+  });
+});
+
+describe('auth.ts source — no longer double-checks the login rate limit', () => {
+  it('does not call rateLimiter.checkLogin() inside authorize() (would double-count every attempt)', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/auth.ts'), 'utf-8');
+    expect(source).not.toContain('rateLimiter.checkLogin(');
+    expect(source).not.toContain("from '@/lib/ratelimit'");
   });
 });

@@ -7,6 +7,7 @@ import { auth } from '@/auth'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
+import { verifyWorkspaceAccess, errorResponse } from '@/lib/security'
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -48,7 +49,20 @@ export async function GET(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const workspaceId = session.user.workspaceId || 'default'
+    // No fabricated "default" workspace: an account with no workspace on
+    // its session cannot initiate a marketplace connection at all.
+    if (!session.user.workspaceId) {
+      return NextResponse.json(
+        { error: 'No workspace found for this account' },
+        { status: 403 }
+      )
+    }
+
+    // Same ownership + verified-email check every other workspace-scoped
+    // route in the app uses (src/lib/security.ts) — re-verified fresh
+    // against the database, not just trusted from the JWT.
+    const workspaceId = await verifyWorkspaceAccess(session.user.workspaceId)
+
     const marketplaceParam = params.marketplace.toUpperCase()
 
     // Validate marketplace
@@ -69,13 +83,29 @@ export async function GET(
       state,
     })
 
+    const isProduction = process.env.NODE_ENV === 'production'
+
+    // CSRF protection for the OAuth "state" parameter: bind it to this
+    // browser via a short-lived httpOnly cookie, the same pattern already
+    // used below for Etsy's PKCE code_verifier. The callback route
+    // compares the state it receives from the marketplace against this
+    // cookie (TokenManager.verifyOAuthState) before doing anything else,
+    // and deletes it immediately after — one-time-use, 10-minute TTL.
+    response.cookies.set(`oauth_state_${marketplaceParam.toLowerCase()}`, state, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      maxAge: 600, // 10 minutes — matches the PKCE cookie below
+      path: '/',
+    })
+
     // PKCE (Etsy only): persist the code_verifier in a short-lived,
     // httpOnly cookie so the callback route can retrieve it. Never
     // logged, never returned in the JSON body, never stored in the DB.
     if (codeVerifier) {
       response.cookies.set(`pkce_verifier_${marketplaceParam.toLowerCase()}`, codeVerifier, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
+        secure: isProduction,
         sameSite: 'lax',
         maxAge: 600, // 10 minutes — plenty for the OAuth redirect round-trip
         path: '/',
@@ -85,9 +115,6 @@ export async function GET(
     return response
   } catch (error) {
     console.error('Connect marketplace error:', error)
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to initiate connection' },
-      { status: 500 }
-    )
+    return errorResponse(error)
   }
 }

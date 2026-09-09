@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/UI/Button';
+import { signOutAction } from '@/app/actions/auth';
 
 type VerifyState = 'idle' | 'verifying' | 'success' | 'error';
 type ResendState = 'idle' | 'sending' | 'sent' | 'error';
@@ -150,7 +151,7 @@ function VerifyEmailContent() {
             </>
           )}
 
-          <div className="mt-6 pt-6 border-t border-gray-200">
+          <div className="mt-6 pt-6 border-t border-gray-200 space-y-3">
             <p className="text-gray-600 text-sm">
               {/* Plain <a>, not <Link>: for a still-unverified, already
                   logged-in user this hits a real two-hop server redirect
@@ -166,6 +167,22 @@ function VerifyEmailContent() {
                 Back to login
               </a>
             </p>
+            {/* A user who reaches this page already authenticated but
+                unverified had no way to sign out before: "Back to login"
+                only bounces them right back here (session exists ->
+                middleware sends /login -> /dashboard -> dashboard/layout.tsx
+                sends -> /verify-email). signOutAction is the same
+                Server Action used elsewhere (DashboardLayout, workspace
+                page); for a visitor with no session it's a harmless no-op
+                redirect to /login. */}
+            <form action={signOutAction}>
+              <button
+                type="submit"
+                className="text-gray-500 hover:text-gray-700 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </form>
           </div>
         </div>
       </div>

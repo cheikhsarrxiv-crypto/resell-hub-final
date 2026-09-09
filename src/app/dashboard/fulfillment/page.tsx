@@ -2,11 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { useWorkspace } from '@/hooks';
-import { Card, CardContent, CardHeader, CardTitle, StatCard } from '@/components/UI/Card';
-import { Badge } from '@/components/UI/Button';
+import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
+import { StatCard } from '@/components/dashboard/StatCard';
+import { StatusBadge } from '@/components/dashboard/StatusBadge';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
+import { PageHeader } from '@/components/dashboard/PageHeader';
+import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
 import { Zap, TrendingUp, Package, Truck } from 'lucide-react';
-import { formatCurrency, getStatusColor, getStatusLabel, formatDateTime } from '@/lib/utils';
-import { LoadingState, ErrorState, EmptyState } from '@/components/StateComponents';
+import { formatCurrency, getStatusLabel, formatDateTime } from '@/lib/utils';
 
 interface FulfillmentOrder {
   id: string;
@@ -83,18 +86,15 @@ export default function FulfillmentPage() {
   const statuses = ['pending', 'accepted', 'processing', 'shipped', 'delivered', 'failed', 'cancelled'];
 
   if (!isReady || loading) {
-    return <LoadingState message="Loading fulfillment data..." />;
+    return <DashboardLoadingState message="Loading fulfillment data..." />;
   }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold font-display text-[#14161A]">Fulfillment</h1>
-        <p className="text-gray-600 mt-1">Track orders sent to fulfillment partners</p>
-      </div>
+      <PageHeader title="Fulfillment" description="Track orders sent to fulfillment partners" />
 
       {error && (
-        <ErrorState
+        <DashboardErrorState
           message="Failed to load fulfillment data"
           details={error || undefined}
           onRetry={() => fetchFulfillmentData()}
@@ -103,115 +103,90 @@ export default function FulfillmentPage() {
 
       {/* Metrics */}
       {metrics && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <StatCard
-            label="Fulfillment Orders"
-            value={metrics.totalOrders}
-            icon={<Zap className="w-8 h-8" />}
-          />
-          <StatCard
-            label="Revenue"
-            value={formatCurrency(metrics.totalRevenue)}
-            icon={<TrendingUp className="w-8 h-8" />}
-          />
-          <StatCard
-            label="Profit"
-            value={formatCurrency(metrics.totalProfit)}
-            icon={<Package className="w-8 h-8" />}
-          />
-          <StatCard
-            label="Margin"
-            value={`${metrics.margin.toFixed(1)}%`}
-            icon={<Truck className="w-8 h-8" />}
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+          <StatCard label="Fulfillment Orders" value={metrics.totalOrders} icon={<Zap className="w-5 h-5" />} />
+          <StatCard label="Revenue" value={formatCurrency(metrics.totalRevenue)} icon={<TrendingUp className="w-5 h-5" />} accent />
+          <StatCard label="Profit" value={formatCurrency(metrics.totalProfit)} icon={<Package className="w-5 h-5" />} accent />
+          <StatCard label="Margin" value={`${metrics.margin.toFixed(1)}%`} icon={<Truck className="w-5 h-5" />} />
         </div>
       )}
 
       {/* Filters */}
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex gap-2 flex-wrap">
-            <button
-              onClick={() => setStatusFilter('')}
-              className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                statusFilter === ''
-                  ? 'bg-[#FF5A1F] text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
+      <DashboardCard className="p-4 sm:p-5">
+        <div className="flex gap-2 flex-wrap">
+          <DashboardButton
+            variant={statusFilter === '' ? 'primary' : 'outline'}
+            size="sm"
+            onClick={() => setStatusFilter('')}
+          >
+            All
+          </DashboardButton>
+          {statuses.map((status) => (
+            <DashboardButton
+              key={status}
+              variant={statusFilter === status ? 'primary' : 'outline'}
+              size="sm"
+              onClick={() => setStatusFilter(status)}
+              className="capitalize"
             >
-              All
-            </button>
-            {statuses.map((status) => (
-              <button
-                key={status}
-                onClick={() => setStatusFilter(status)}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors capitalize ${
-                  statusFilter === status
-                    ? 'bg-[#FF5A1F] text-white'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                {getStatusLabel(status)}
-              </button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+              {getStatusLabel(status)}
+            </DashboardButton>
+          ))}
+        </div>
+      </DashboardCard>
 
       {/* Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Fulfillment Orders ({orders.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Fulfillment Orders ({orders.length})</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
           {orders.length === 0 ? (
-            <EmptyState
+            <DashboardEmptyState
               title="No fulfillment orders yet"
               description="Orders sent to fulfillment partners will appear here"
-              icon={<Zap className="w-12 h-12 text-gray-300 mb-4" />}
+              icon={<Zap className="w-10 h-10 text-gray-700 mb-4" />}
             />
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-left">Order</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-left">Partner</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-right">Qty</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-right">Cost</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-right">Profit</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-left">Status</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-left">Tracking</th>
-                    <th className="px-6 py-3 font-semibold text-gray-900 text-left">Date</th>
+                <thead>
+                  <tr className="border-b border-white/[0.06]">
+                    <th className="py-3 pr-4 font-medium text-gray-500 text-left">Order</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-left">Partner</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-right">Qty</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-right">Cost</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-right">Profit</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-left">Status</th>
+                    <th className="py-3 px-4 font-medium text-gray-500 text-left">Tracking</th>
+                    <th className="py-3 pl-4 font-medium text-gray-500 text-left">Date</th>
                   </tr>
                 </thead>
                 <tbody>
                   {orders.map((fo) => (
-                    <tr key={fo.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="px-6 py-4">
+                    <tr key={fo.id} className="border-b border-white/[0.04] last:border-b-0 hover:bg-white/[0.02] transition-colors">
+                      <td className="py-4 pr-4">
                         <div>
-                          <p className="font-medium">{fo.order?.customerName || 'N/A'}</p>
+                          <p className="font-medium text-white">{fo.order?.customerName || 'N/A'}</p>
                           <p className="text-xs text-gray-500 font-mono">{fo.order?.id?.slice(0, 8)}</p>
                         </div>
                       </td>
-                      <td className="px-6 py-4">
-                        <p className="font-medium text-gray-900">{fo.partner?.name}</p>
+                      <td className="py-4 px-4">
+                        <p className="font-medium text-white">{fo.partner?.name}</p>
                         <p className="text-xs text-gray-500">{fo.partner?.country}</p>
                       </td>
-                      <td className="px-6 py-4 text-right">{fo.quantity}</td>
-                      <td className="px-6 py-4 text-right">{formatCurrency(fo.totalCost)}</td>
-                      <td className="px-6 py-4 text-right text-green-600 font-semibold">
+                      <td className="py-4 px-4 text-right text-gray-300">{fo.quantity}</td>
+                      <td className="py-4 px-4 text-right text-gray-300">{formatCurrency(fo.totalCost)}</td>
+                      <td className="py-4 px-4 text-right text-emerald-400 font-semibold">
                         {formatCurrency(fo.profit)}
                       </td>
-                      <td className="px-6 py-4">
-                        <div className={`inline-flex px-2 py-1 rounded text-xs font-medium ${getStatusColor(fo.status)}`}>
-                          {getStatusLabel(fo.status)}
-                        </div>
+                      <td className="py-4 px-4">
+                        <StatusBadge status={fo.status} />
                       </td>
-                      <td className="px-6 py-4 text-xs font-mono text-gray-600">
+                      <td className="py-4 px-4 text-xs font-mono text-gray-500">
                         {fo.shipment?.trackingNumber || '—'}
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-600">
+                      <td className="py-4 pl-4 text-sm text-gray-500">
                         {formatDateTime(new Date(fo.createdAt))}
                       </td>
                     </tr>
@@ -220,8 +195,8 @@ export default function FulfillmentPage() {
               </table>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </DashboardCardContent>
+      </DashboardCard>
     </div>
   );
 }

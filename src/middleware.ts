@@ -36,6 +36,8 @@ export async function middleware(request: NextRequest) {
     pathname === '/login' ||
     pathname === '/signup' ||
     pathname === '/verify-email' ||
+    pathname === '/forgot-password' ||
+    pathname === '/reset-password' ||
     pathname === '/api/email/verify' ||
     pathname.startsWith('/api/auth') ||
     pathname.startsWith('/pricing') ||

@@ -1,486 +1,451 @@
-import { Button } from '@/components/UI/Button';
 import Link from 'next/link';
-import {
-  ArrowRight,
-  RefreshCw,
-  PackageCheck,
-  LineChart,
-  Layers,
-  ShoppingBag,
-  TrendingUp,
-  Clock,
-} from 'lucide-react';
+import { ArrowRight, Layers, ShoppingBag, RefreshCw, PackageCheck } from 'lucide-react';
+import { LandingNav } from '@/components/landing/LandingNav';
+import { HeroOrb } from '@/components/landing/HeroOrb';
+import { HeroStage } from '@/components/landing/HeroStage';
+import { Reveal } from '@/components/landing/Reveal';
+import { displayFont as display, bodyFont as body } from '@/lib/fonts';
 
+// Marketplace automation status reflects the real OAuth integrations wired
+// up in src/app/api/marketplace/connect/[marketplace]/route.ts and the
+// adapters in src/services/marketplace/adapters/ — eBay is a real, fully
+// wired live integration. Etsy is also real and live, but its listing
+// flow still uses placeholder taxonomy fields (see EtsyAdapter.ts) and
+// production usage depends on Etsy's own commercial app review, so it
+// must not be presented as equally production-ready as eBay. Depop is a
+// documented placeholder blocked on partner approval; Vinted has no
+// public API and is intentionally blocked.
+// Never present a marketplace as automated unless it actually is.
 const MARKETPLACES = [
-  { name: 'eBay', status: 'live' },
-  { name: 'Vinted', status: 'soon' },
-  { name: 'Depop', status: 'soon' },
-  { name: 'Etsy', status: 'soon' },
+  { name: 'eBay', status: 'live' as const, badge: 'Automated' },
+  { name: 'Etsy', status: 'live' as const, badge: 'In review' },
+  { name: 'Depop', status: 'soon' as const, badge: 'Coming soon' },
+  { name: 'Vinted', status: 'soon' as const, badge: 'Coming soon' },
+];
+
+const HOW_IT_WORKS = [
+  { n: '01', title: 'Find', desc: 'Source what you’re going to resell and log it in your catalog — purchase price, stock, condition.' },
+  { n: '02', title: 'Analyze', desc: 'See real margin and profit on every item before you commit to listing it.' },
+  { n: '03', title: 'List', desc: 'Publish a listing to eBay or Etsy with your price and quantity, live in minutes.' },
+  { n: '04', title: 'Sell', desc: 'Orders sync automatically as they come in, from every connected marketplace.' },
+  { n: '05', title: 'Fulfill', desc: 'Send the order to your fulfillment partner in one click, then track cost, revenue and profit automatically.' },
 ];
 
 const FEATURES = [
   {
     icon: Layers,
     title: 'Product catalog',
-    description: 'Track every item you source — purchase price, selling price, stock, category — in one place.',
+    desc: 'Every item you source — purchase price, selling price, stock — tracked in one place.',
   },
   {
     icon: ShoppingBag,
-    title: 'Listings on eBay',
-    description: 'Turn a product into a live eBay listing with a title, description, price and quantity in a few clicks.',
+    title: 'Multi-marketplace listings',
+    desc: 'Turn one product into live listings on eBay and Etsy without re-entering anything.',
   },
   {
     icon: RefreshCw,
-    title: 'Order tracking',
-    description: 'See every order as it comes in, filter by status, and follow it through to delivery.',
+    title: 'Order sync',
+    desc: 'Every order, from every connected marketplace, in one queue you can filter and track.',
   },
   {
     icon: PackageCheck,
-    title: 'Fulfillment',
-    description: 'Send orders to a fulfillment partner and track cost, revenue and profit per shipment.',
-  },
-  {
-    icon: LineChart,
-    title: 'Analytics',
-    description: 'Revenue trend, top products, and performance by marketplace — updated after every sale.',
-  },
-  {
-    icon: TrendingUp,
-    title: 'Margin, not just revenue',
-    description: 'Every product and order shows real profit and margin, not just the price it sold for.',
+    title: 'Fulfillment & margin',
+    desc: 'Route orders to a partner and see real profit — not just the price it sold for.',
   },
 ];
 
-const BENEFITS = [
-  {
-    title: 'Stop juggling tabs',
-    description: 'Manage your product, your eBay listing and the resulting order from the same dashboard.',
-  },
-  {
-    title: 'Know your real margin',
-    description: 'Purchase price vs. selling price is calculated automatically for every item you sell.',
-  },
-  {
-    title: 'Hand off fulfillment when you need to',
-    description: 'Route orders to a partner and keep visibility on cost and profit — without losing control.',
-  },
+const PLANS = [
+  { name: 'Starter', price: 19, blurb: 'Up to 500 orders / month' },
+  { name: 'Pro', price: 49, blurb: 'Up to 2,000 orders / month', highlighted: true },
+  { name: 'Business', price: 99, blurb: 'Up to 10,000 orders / month' },
 ];
-
-const condensedPlans = [
-  { name: 'Free', price: 0 },
-  { name: 'Starter', price: 19 },
-  { name: 'Pro', price: 49 },
-  { name: 'Business', price: 99 },
-];
-
-function Logo({ light = false }: { light?: boolean }) {
-  return (
-    <svg width="28" height="28" viewBox="0 0 72 72">
-      <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="6" />
-      <path
-        d="M24 48 L36 22 L48 48 M29 39 H43"
-        stroke={light ? 'white' : '#14161A'}
-        strokeWidth="6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-    </svg>
-  );
-}
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-[#F7F6F2]">
-      {/* Intro animation — decorative, purely CSS, auto-dismisses after ~3.5s.
-          aria-hidden because the real Hero content below is already in the
-          DOM and remains reachable to assistive tech and no-JS/reduced-motion
-          visitors throughout. */}
-      <div className="intro-overlay" aria-hidden="true">
-        <div className="flex flex-col items-center px-6 text-center">
-          <div className="intro-symbol mb-4">
-            <svg width="56" height="56" viewBox="0 0 72 72">
-              <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="6" />
-              <path
-                d="M24 48 L36 22 L48 48 M29 39 H43"
-                stroke="white"
-                strokeWidth="6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                fill="none"
-              />
-            </svg>
-          </div>
+    <div className={`${display.variable} ${body.variable} bg-[#08080a] text-white overflow-x-clip`} style={{ fontFamily: 'var(--font-body)' }}>
+      <LandingNav />
 
-          <div className="intro-wordmark font-display text-2xl sm:text-3xl font-bold text-white tracking-tight mb-10">
-            ADKSY
-          </div>
+      {/* ============ HERO ============ */}
+      <section className="relative min-h-screen flex flex-col justify-center px-6 pt-32 pb-16 overflow-hidden">
+        {/* Faint vignette texture instead of a flat black fill */}
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(80% 60% at 50% 0%, rgba(255,255,255,0.05), transparent 60%), radial-gradient(60% 50% at 85% 30%, rgba(255,90,31,0.06), transparent 60%)',
+          }}
+          aria-hidden="true"
+        />
 
-          <div className="intro-flow flex items-center gap-3 sm:gap-4">
-            <div className="bg-white/5 border border-white/10 rounded-xl px-3 sm:px-4 py-3 text-left">
-              <p className="text-[10px] uppercase tracking-widest text-gray-500 font-mono mb-1">Product</p>
-              <p className="text-xs sm:text-sm font-medium text-white whitespace-nowrap">Nike Air Max 90</p>
-            </div>
+        <HeroStage>
+          <div className="hero-zoom relative max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-16 items-center">
+            <div className="hero-fade">
+              <Reveal>
+                <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-gray-400 mb-6">
+                  The reselling operating system
+                </p>
+              </Reveal>
 
-            <div className="intro-line w-8 sm:w-12 h-px bg-white/15 flex-shrink-0" />
+              <h1
+                className="font-bold leading-[0.95] mb-8"
+                style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2.75rem, 7vw, 5.5rem)' }}
+              >
+                <Reveal delayMs={80}>
+                  <span className="block text-white">Sell</span>
+                </Reveal>
+                <Reveal delayMs={160}>
+                  <span className="block text-gray-500">Everywhere.</span>
+                </Reveal>
+                <Reveal delayMs={280}>
+                  <span className="block text-white">From One Place.</span>
+                </Reveal>
+              </h1>
 
-            <div className="flex flex-col items-center gap-1 flex-shrink-0">
-              <svg width="24" height="24" viewBox="0 0 72 72">
-                <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="7" />
-                <path d="M25 47 L36 23 L47 47" stroke="white" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-              </svg>
-              <span className="text-[9px] font-mono uppercase tracking-widest text-gray-500">ADKSY</span>
-            </div>
+              <Reveal delayMs={420}>
+                <p className="text-gray-400 text-base sm:text-lg max-w-md mb-10 leading-relaxed">
+                  Manage your products, listings, orders and fulfillment from one place.
+                </p>
+              </Reveal>
 
-            <div className="intro-line w-8 sm:w-12 h-px bg-white/15 flex-shrink-0" />
-
-            <div className="bg-white/5 border border-[#FF5A1F]/40 rounded-xl px-3 sm:px-4 py-3">
-              <p className="text-[10px] uppercase tracking-widest text-gray-500 font-mono mb-1">Marketplace</p>
-              <p className="text-xs sm:text-sm font-medium text-[#FF5A1F] whitespace-nowrap">eBay</p>
-            </div>
-          </div>
-
-          <div className="intro-status mt-6 inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-widest bg-[#FF5A1F]/10 text-[#FF5A1F] border border-[#FF5A1F]/30 rounded-full px-3 py-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#FF5A1F]" />
-            Published
-          </div>
-        </div>
-      </div>
-
-      {/* Navigation */}
-      <nav className="flex justify-between items-center px-6 py-5 max-w-6xl mx-auto">
-        <div className="flex items-center gap-2">
-          <Logo />
-          <span className="font-display text-xl font-bold text-[#14161A] tracking-tight">
-            ADKSY
-          </span>
-        </div>
-        <div className="flex gap-3 items-center">
-          <Link href="/login" className="text-sm font-medium text-[#14161A] hover:text-[#FF5A1F] transition-colors px-3">
-            Sign in
-          </Link>
-          <Link href="/signup">
-            <Button className="bg-[#14161A] text-white hover:bg-[#2a2d33] rounded-full px-5">
-              Get started
-            </Button>
-          </Link>
-        </div>
-      </nav>
-
-      {/* 1. Hero */}
-      <section className="bg-[#14161A] text-white">
-        <div className="max-w-6xl mx-auto px-6 pt-16 pb-24 grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
-          <div>
-            <div className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-6 border border-[#FF5A1F]/30 rounded-full px-3 py-1">
-              Live on eBay · More marketplaces soon
-            </div>
-            <h1 className="font-display text-5xl sm:text-6xl font-bold leading-[1.05] mb-6">
-              List it once.
-              <br />
-              Sell it <span className="text-[#FF5A1F]">everywhere.</span>
-            </h1>
-            <p className="text-lg text-gray-400 max-w-md mb-8 leading-relaxed">
-              ADKSY is the hub for your reselling business — manage products, publish
-              to eBay, and track orders, fulfillment and profit from one dashboard.
-            </p>
-            <div className="flex flex-wrap gap-3">
-              <Link href="/signup">
-                <Button className="bg-[#FF5A1F] text-white hover:bg-[#e64f18] rounded-full px-6 py-3 text-base">
-                  Start free <ArrowRight className="w-4 h-4 ml-2 inline" />
-                </Button>
-              </Link>
-              <Link href="/pricing">
-                <Button variant="outline" className="border-white/20 text-white hover:bg-white/10 rounded-full px-6 py-3 text-base">
-                  See pricing
-                </Button>
-              </Link>
-            </div>
-          </div>
-
-          {/* Signature element */}
-          <div className="relative">
-            <div className="bg-white text-[#14161A] rounded-2xl p-5 shadow-2xl max-w-sm mx-auto">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-14 h-14 rounded-lg bg-[#F0EEE8] flex items-center justify-center font-mono text-xs text-gray-400">
-                  IMG
-                </div>
-                <div>
-                  <p className="font-semibold text-sm leading-tight">Nike Air Max 90 — 42</p>
-                  <p className="text-xs text-gray-500 font-mono mt-0.5">SKU-NK-0042 · 89,00 €</p>
-                </div>
-              </div>
-              <div className="h-px bg-gray-100 mb-4" />
-              <p className="text-xs uppercase tracking-widest text-gray-400 font-mono mb-3">
-                Published to
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {MARKETPLACES.map((m) => (
-                  <span
-                    key={m.name}
-                    className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${
-                      m.status === 'live'
-                        ? 'text-[#FF5A1F] border-[#FF5A1F]'
-                        : 'text-gray-400 border-[#E5E2DB] border-dashed'
-                    }`}
+              <Reveal delayMs={520}>
+                <div className="flex flex-wrap gap-3">
+                  <Link
+                    href="/signup"
+                    className="inline-flex items-center gap-2 bg-white text-black font-medium rounded-full px-6 py-3 text-sm hover:bg-gray-200 transition-colors"
                   >
-                    {m.name}
-                    {m.status === 'soon' && <span className="ml-1 text-[10px]">· soon</span>}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 2. What ADKSY does */}
-      <section className="max-w-4xl mx-auto px-6 py-20 text-center">
-        <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3">
-          What it does
-        </p>
-        <h2 className="font-display text-3xl font-bold text-[#14161A] mb-10">
-          Three steps. One dashboard.
-        </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 text-left">
-          <div>
-            <div className="font-display text-4xl font-bold text-[#FF5A1F] mb-2">01</div>
-            <p className="font-semibold text-[#14161A] mb-1">Add your product</p>
-            <p className="text-sm text-gray-600">Purchase price, selling price, stock — tracked from day one.</p>
-          </div>
-          <div>
-            <div className="font-display text-4xl font-bold text-[#FF5A1F] mb-2">02</div>
-            <p className="font-semibold text-[#14161A] mb-1">Publish to eBay</p>
-            <p className="text-sm text-gray-600">Create a listing with your price and quantity, live in minutes.</p>
-          </div>
-          <div>
-            <div className="font-display text-4xl font-bold text-[#FF5A1F] mb-2">03</div>
-            <p className="font-semibold text-[#14161A] mb-1">Track the sale</p>
-            <p className="text-sm text-gray-600">Order, fulfillment and real profit — all in the same place.</p>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. Visual demo: product -> eBay */}
-      <section className="bg-white border-y border-[#E5E2DB]">
-        <div className="max-w-5xl mx-auto px-6 py-20">
-          <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3 text-center">
-            From catalog to marketplace
-          </p>
-          <h2 className="font-display text-3xl font-bold text-[#14161A] mb-14 text-center">
-            One product, published to eBay.
-          </h2>
-          <div className="flex flex-col md:flex-row items-center justify-center gap-6">
-            <div className="bg-[#F7F6F2] border border-[#E5E2DB] rounded-2xl p-6 w-full max-w-xs">
-              <p className="text-xs font-mono uppercase tracking-widest text-gray-400 mb-3">Product</p>
-              <div className="w-full h-24 rounded-lg bg-[#E5E2DB] mb-3 flex items-center justify-center font-mono text-xs text-gray-400">
-                IMG
-              </div>
-              <p className="font-semibold text-[#14161A]">Nike Air Max 90 — 42</p>
-              <p className="text-xs text-gray-500 font-mono mt-1">Stock: 12 · Margin: 35%</p>
+                    Get Started <ArrowRight className="w-4 h-4" />
+                  </Link>
+                  <a
+                    href="#product"
+                    className="inline-flex items-center gap-2 border border-white/15 text-white font-medium rounded-full px-6 py-3 text-sm hover:bg-white/5 transition-colors"
+                  >
+                    Explore ADKSY
+                  </a>
+                </div>
+              </Reveal>
             </div>
 
-            <ArrowRight className="w-8 h-8 text-[#FF5A1F] rotate-90 md:rotate-0 flex-shrink-0" />
-
-            <div className="bg-[#14161A] rounded-2xl p-6 w-full max-w-xs text-white">
-              <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3">eBay listing</p>
-              <p className="font-semibold">Nike Air Max 90 — Taille 42</p>
-              <p className="text-sm text-gray-400 mt-1">89,00 €</p>
-              <span className="inline-block mt-3 text-[10px] font-mono uppercase tracking-wide bg-[#FF5A1F]/10 text-[#FF5A1F] px-2 py-1 rounded-full">
-                Published
-              </span>
+            {/* 3D orb: bubble sphere + central mark + orbiting marketplace/process badges */}
+            <div className="hero-fade relative h-[420px] sm:h-[480px] lg:h-[560px]">
+              <HeroOrb />
             </div>
           </div>
-        </div>
-      </section>
 
-      {/* 4 & 5. Marketplace status */}
-      <section className="max-w-5xl mx-auto px-6 py-20">
-        <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3 text-center">
-          Marketplaces
-        </p>
-        <h2 className="font-display text-3xl font-bold text-[#14161A] mb-3 text-center">
-          eBay is live today.
-        </h2>
-        <p className="text-gray-600 text-center mb-14 max-w-lg mx-auto">
-          Vinted, Depop and Etsy are on our roadmap — not yet available.
-        </p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-white border border-[#FF5A1F] rounded-xl p-5 text-center">
-            <p className="font-display font-bold text-[#14161A] mb-2">eBay</p>
-            <span className="text-[10px] font-mono uppercase tracking-wide bg-[#FF5A1F]/10 text-[#FF5A1F] px-2 py-1 rounded-full">
-              Active
+          {/* Bottom of hero: scroll cue + organic line */}
+          <div className="hero-fade relative mt-16 flex flex-col items-center gap-3">
+            <span className="text-[11px] uppercase tracking-[0.2em] text-gray-500 landing-pulse">
+              Scroll to explore
             </span>
+            <span className="w-px h-8 bg-gradient-to-b from-gray-500 to-transparent" aria-hidden="true" />
           </div>
-          {['Vinted', 'Depop', 'Etsy'].map((name) => (
-            <div key={name} className="bg-white border border-dashed border-[#E5E2DB] rounded-xl p-5 text-center opacity-70">
-              <p className="font-display font-bold text-gray-400 mb-2">{name}</p>
-              <span className="text-[10px] font-mono uppercase tracking-wide bg-gray-100 text-gray-500 px-2 py-1 rounded-full">
-                Coming soon
-              </span>
-            </div>
+        </HeroStage>
+
+        <svg
+          className="absolute bottom-0 left-0 w-full h-24 sm:h-32 text-white/[0.03]"
+          viewBox="0 0 1200 120"
+          preserveAspectRatio="none"
+          aria-hidden="true"
+        >
+          <path
+            d="M0,60 C300,120 600,0 900,60 C1050,90 1150,40 1200,60 L1200,120 L0,120 Z"
+            fill="currentColor"
+            className="landing-drift"
+          />
+        </svg>
+      </section>
+
+      {/* ============ ONE PRODUCT. EVERY MARKETPLACE. ============ */}
+      <section id="product" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
+        <div className="max-w-4xl mx-auto text-center">
+          <Reveal>
+            <h2
+              className="font-bold leading-[1.05] mb-6"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
+            >
+              ONE PRODUCT.
+              <br />
+              <span className="text-gray-500">EVERY MARKETPLACE.</span>
+            </h2>
+          </Reveal>
+          <Reveal delayMs={120}>
+            <p className="text-gray-400 max-w-lg mx-auto mb-16">
+              Catalog an item once. Publish it wherever your buyers already are.
+            </p>
+          </Reveal>
+        </div>
+
+        <div className="max-w-3xl mx-auto flex flex-wrap items-center justify-center gap-3">
+          {MARKETPLACES.map((m, i) => (
+            <Reveal key={m.name} delayMs={i * 90}>
+              <div
+                className={`px-5 py-3 rounded-full border text-sm font-medium ${
+                  m.status === 'live'
+                    ? 'border-white/20 text-white bg-white/[0.04]'
+                    : 'border-white/10 text-gray-500 border-dashed'
+                }`}
+              >
+                {m.name}
+                {m.status === 'soon' && <span className="ml-2 text-[10px] text-gray-600">soon</span>}
+              </div>
+            </Reveal>
           ))}
         </div>
       </section>
 
-      {/* 6. Features */}
-      <section className="bg-white border-y border-[#E5E2DB]">
-        <div className="max-w-6xl mx-auto px-6 py-20">
-          <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3">
-            Features
-          </p>
-          <h2 className="font-display text-3xl font-bold text-[#14161A] mb-14 max-w-lg">
-            Everything between &ldquo;sourced it&rdquo; and &ldquo;shipped it.&rdquo;
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {FEATURES.map((f) => (
-              <div key={f.title} className="border-t-2 border-[#14161A] pt-5">
-                <f.icon className="w-6 h-6 text-[#FF5A1F] mb-4" />
-                <h3 className="font-display font-bold text-[#14161A] mb-2">{f.title}</h3>
-                <p className="text-gray-600 text-sm leading-relaxed">{f.description}</p>
-              </div>
+      {/* ============ HOW ADKSY WORKS ============ */}
+      <section id="how-it-works" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
+        <div className="max-w-5xl mx-auto">
+          <Reveal>
+            <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-[#FF5A1F] mb-4 text-center">
+              How it works
+            </p>
+          </Reveal>
+          <div className="divide-y divide-white/[0.06]">
+            {HOW_IT_WORKS.map((step, i) => (
+              <Reveal key={step.n} delayMs={i * 80}>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-10 py-8">
+                  <span
+                    className="font-bold text-gray-700 shrink-0 w-24"
+                    style={{ fontFamily: 'var(--font-display)', fontSize: '2.5rem' }}
+                  >
+                    {step.n}
+                  </span>
+                  <h3 className="font-semibold text-lg text-white sm:w-40 shrink-0">{step.title}</h3>
+                  <p className="text-gray-400 text-sm leading-relaxed max-w-xl">{step.desc}</p>
+                </div>
+              </Reveal>
             ))}
           </div>
         </div>
       </section>
 
-      {/* 7. Benefits */}
-      <section className="max-w-5xl mx-auto px-6 py-20">
-        <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3 text-center">
-          Why resellers use ADKSY
-        </p>
-        <h2 className="font-display text-3xl font-bold text-[#14161A] mb-14 text-center">
-          Built around how you actually work.
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {BENEFITS.map((b) => (
-            <div key={b.title} className="text-center">
-              <h3 className="font-semibold text-[#14161A] mb-2">{b.title}</h3>
-              <p className="text-sm text-gray-600 leading-relaxed">{b.description}</p>
+      {/* ============ AI / AUTOMATION ============ */}
+      <section className="relative py-28 sm:py-36 px-6 bg-[#050506] border-t border-white/[0.06] overflow-hidden">
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{ background: 'radial-gradient(50% 40% at 50% 40%, rgba(255,90,31,0.05), transparent 70%)' }}
+          aria-hidden="true"
+        />
+        <div className="relative max-w-3xl mx-auto text-center">
+          <Reveal>
+            <h2
+              className="font-bold leading-[1.05] mb-6"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
+            >
+              YOUR RESELLING
+              <br />
+              <span className="text-gray-500">AUTOMATION ENGINE.</span>
+            </h2>
+          </Reveal>
+          <Reveal delayMs={120}>
+            <p className="text-gray-400 leading-relaxed max-w-xl mx-auto mb-14">
+              ADKSY automates the busywork behind every sale — calculating real margin
+              on every product, keeping listings and orders in sync across marketplaces,
+              and tracking cost, revenue and profit the moment you send an order to
+              fulfillment, so you can focus on sourcing.
+            </p>
+          </Reveal>
+
+          <Reveal delayMs={220}>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              {['Margin calculated', 'Listing synced', 'Order matched', 'Fulfillment routed'].map((label, i) => (
+                <div
+                  key={label}
+                  className="flex items-center gap-2 bg-white/[0.03] border border-white/10 rounded-full px-4 py-2"
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full bg-[#FF5A1F] landing-pulse"
+                    style={{ animationDelay: `${i * 0.3}s` }}
+                    aria-hidden="true"
+                  />
+                  <span className="text-xs text-gray-300">{label}</span>
+                </div>
+              ))}
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* ============ MARKETPLACES ============ */}
+      <section id="marketplaces" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
+        <div className="max-w-4xl mx-auto text-center mb-16">
+          <Reveal>
+            <h2
+              className="font-bold leading-[1.05] mb-6"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
+            >
+              ONE LISTING.
+              <br />
+              <span className="text-gray-500">EVERYWHERE.</span>
+            </h2>
+          </Reveal>
+          <Reveal delayMs={120}>
+            <p className="text-gray-400 max-w-lg mx-auto">
+              eBay is fully automated today. Etsy is live and in review.
+              Depop and Vinted are on our roadmap — not yet available.
+            </p>
+          </Reveal>
+        </div>
+
+        <div className="max-w-4xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4">
+          {MARKETPLACES.map((m, i) => (
+            <Reveal key={m.name} delayMs={i * 90}>
+              <div
+                className={`rounded-2xl p-6 text-center border ${
+                  m.status === 'live' ? 'border-white/15 bg-white/[0.03]' : 'border-white/[0.06] border-dashed'
+                }`}
+              >
+                <p
+                  className={`font-bold mb-3 ${m.status === 'live' ? 'text-white' : 'text-gray-600'}`}
+                  style={{ fontFamily: 'var(--font-display)' }}
+                >
+                  {m.name}
+                </p>
+                <span
+                  className={`text-[10px] font-mono uppercase tracking-wide px-2 py-1 rounded-full ${
+                    m.status === 'live'
+                      ? 'bg-[#FF5A1F]/10 text-[#FF5A1F]'
+                      : 'bg-white/5 text-gray-500'
+                  }`}
+                >
+                  {m.badge}
+                </span>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* ============ FULFILLMENT FLOW ============ */}
+      <section className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06] bg-[#050506]">
+        <div className="max-w-3xl mx-auto text-center mb-16">
+          <Reveal>
+            <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-[#FF5A1F] mb-4">
+              Fulfillment
+            </p>
+          </Reveal>
+          <Reveal delayMs={100}>
+            <h2
+              className="font-bold leading-[1.05]"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.75rem, 4.5vw, 3rem)' }}
+            >
+              One click to fulfillment. Tracked automatically.
+            </h2>
+          </Reveal>
+        </div>
+
+        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-2 flex-wrap">
+          {['Customer order', 'ADKSY', 'Fulfillment partner', 'Shipment', 'Tracking'].map((step, i, arr) => (
+            <div key={step} className="flex items-center gap-3 sm:gap-2">
+              <Reveal delayMs={i * 110}>
+                <div className="bg-white/[0.03] border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-200 whitespace-nowrap">
+                  {step}
+                </div>
+              </Reveal>
+              {i < arr.length - 1 && (
+                <ArrowRight className="w-4 h-4 text-gray-700 rotate-90 sm:rotate-0 shrink-0" aria-hidden="true" />
+              )}
             </div>
           ))}
         </div>
       </section>
 
-      {/* 8. Dashboard preview */}
-      <section className="bg-[#14161A]">
-        <div className="max-w-5xl mx-auto px-6 py-20">
-          <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3 text-center">
-            Inside ADKSY
-          </p>
-          <h2 className="font-display text-3xl font-bold text-white mb-14 text-center">
-            One dashboard for the whole flow.
-          </h2>
-          <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
-            <div className="bg-[#F7F6F2] border-b border-[#E5E2DB] px-6 py-3 flex items-center gap-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-gray-300" />
-              <div className="w-2.5 h-2.5 rounded-full bg-gray-300" />
-              <div className="w-2.5 h-2.5 rounded-full bg-gray-300" />
-              <span className="ml-3 text-xs text-gray-400 font-mono">adksy.io/dashboard</span>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-6">
-              <div className="bg-[#F7F6F2] rounded-lg p-4">
-                <p className="text-xs text-gray-500">Revenue</p>
-                <p className="font-display font-bold text-[#14161A] text-lg mt-1">4 285,00 €</p>
-              </div>
-              <div className="bg-[#F7F6F2] rounded-lg p-4">
-                <p className="text-xs text-gray-500">Orders</p>
-                <p className="font-display font-bold text-[#14161A] text-lg mt-1">142</p>
-              </div>
-              <div className="bg-[#F7F6F2] rounded-lg p-4">
-                <p className="text-xs text-gray-500">Profit</p>
-                <p className="font-display font-bold text-[#14161A] text-lg mt-1">1 612,50 €</p>
-              </div>
-              <div className="bg-[#F7F6F2] rounded-lg p-4">
-                <p className="text-xs text-gray-500">Margin</p>
-                <p className="font-display font-bold text-[#14161A] text-lg mt-1">37.6%</p>
-              </div>
-            </div>
-            <p className="text-center text-xs text-gray-400 pb-6">Illustrative data for preview purposes</p>
-          </div>
+      {/* ============ PRICING ============ */}
+      <section id="pricing" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
+        <div className="max-w-4xl mx-auto text-center mb-16">
+          <Reveal>
+            <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-[#FF5A1F] mb-4">Pricing</p>
+          </Reveal>
+          <Reveal delayMs={100}>
+            <h2
+              className="font-bold leading-[1.05]"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.75rem, 4.5vw, 3rem)' }}
+            >
+              Simple, transparent pricing.
+            </h2>
+          </Reveal>
         </div>
-      </section>
 
-      {/* 9. Pricing (condensed) */}
-      <section className="max-w-5xl mx-auto px-6 py-20">
-        <p className="text-xs font-mono uppercase tracking-widest text-[#FF5A1F] mb-3 text-center">
-          Pricing
-        </p>
-        <h2 className="font-display text-3xl font-bold text-[#14161A] mb-14 text-center">
-          Simple, transparent pricing.
-        </h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          {condensedPlans.map((plan) => (
-            <div key={plan.name} className="bg-white border border-[#E5E2DB] rounded-xl p-5 text-center">
-              <p className="font-semibold text-[#14161A] mb-2">{plan.name}</p>
-              <p className="font-display text-2xl font-bold text-[#14161A]">
-                {plan.price === 0 ? 'Free' : `${plan.price.toFixed(0)}€`}
-              </p>
-              {plan.price > 0 && <p className="text-xs text-gray-500">/month</p>}
-            </div>
+        <div className="max-w-4xl mx-auto grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+          {PLANS.map((plan, i) => (
+            <Reveal key={plan.name} delayMs={i * 100}>
+              <div
+                className={`rounded-2xl p-8 text-center border h-full ${
+                  plan.highlighted ? 'border-white/25 bg-white/[0.04]' : 'border-white/10'
+                }`}
+              >
+                <p className="text-sm text-gray-400 mb-4">{plan.name}</p>
+                <p className="font-bold text-white mb-1" style={{ fontFamily: 'var(--font-display)', fontSize: '2.5rem' }}>
+                  &euro;{plan.price}
+                </p>
+                <p className="text-xs text-gray-600 mb-6">/month, or &euro;{plan.price * 10}/year</p>
+                <p className="text-sm text-gray-400">{plan.blurb}</p>
+              </div>
+            </Reveal>
           ))}
         </div>
-        <div className="text-center">
-          <Link href="/pricing">
-            <Button variant="outline" className="border-[#14161A] text-[#14161A] hover:bg-[#14161A] hover:text-white rounded-full px-6">
+
+        <Reveal delayMs={300}>
+          <div className="text-center">
+            <Link
+              href="/pricing"
+              className="inline-flex items-center gap-2 text-sm text-gray-300 hover:text-white transition-colors border border-white/15 rounded-full px-6 py-3"
+            >
               View full pricing
-            </Button>
-          </Link>
-        </div>
+            </Link>
+          </div>
+        </Reveal>
       </section>
 
-      {/* 10. FAQ */}
-      <section className="bg-white border-t border-[#E5E2DB]">
-        <div className="max-w-3xl mx-auto px-6 py-20">
-          <h2 className="font-display text-3xl font-bold text-[#14161A] mb-12 text-center">
-            Frequently asked questions
-          </h2>
-          <div className="space-y-8">
-            {[
-              {
-                q: 'Which marketplaces can I sell on right now?',
-                a: 'eBay is fully supported today. Vinted, Depop and Etsy are on our roadmap and not yet available.',
-              },
-              {
-                q: 'Do I need a credit card to start?',
-                a: 'No. The Free plan requires no credit card — upgrade whenever you need more products or listings.',
-              },
-              {
-                q: 'Can I change my plan anytime?',
-                a: 'Yes, you can upgrade or downgrade at any time from your account settings.',
-              },
-              {
-                q: 'Does ADKSY handle fulfillment?',
-                a: 'You can route orders to a fulfillment partner and track cost, revenue and profit — available from the Pro plan.',
-              },
-            ].map((faq, idx) => (
-              <div key={idx}>
-                <h3 className="font-semibold text-[#14161A] mb-2">{faq.q}</h3>
-                <p className="text-gray-600 text-sm">{faq.a}</p>
-              </div>
+      {/* ============ FEATURES ============ */}
+      <section id="features" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06] bg-[#050506]">
+        <div className="max-w-5xl mx-auto">
+          <Reveal>
+            <h2
+              className="font-bold leading-[1.05] mb-14 max-w-lg"
+              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.75rem, 4.5vw, 3rem)' }}
+            >
+              Everything between &ldquo;sourced it&rdquo; and &ldquo;shipped it.&rdquo;
+            </h2>
+          </Reveal>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {FEATURES.map((f, i) => (
+              <Reveal key={f.title} delayMs={i * 90}>
+                <div className="border-t border-white/15 pt-5">
+                  <f.icon className="w-5 h-5 text-[#FF5A1F] mb-4" />
+                  <h3 className="font-semibold text-white mb-2">{f.title}</h3>
+                  <p className="text-gray-400 text-sm leading-relaxed">{f.desc}</p>
+                </div>
+              </Reveal>
             ))}
           </div>
         </div>
       </section>
 
-      {/* 11. Final CTA */}
-      <section className="max-w-6xl mx-auto px-6 py-20">
-        <div className="bg-[#14161A] rounded-2xl px-10 py-16 text-center">
-          <h2 className="font-display text-3xl font-bold text-white mb-4">
-            Your next sale is one listing away.
+      {/* ============ FINAL CTA ============ */}
+      <section className="relative py-28 sm:py-40 px-6 border-t border-white/[0.06] text-center">
+        <Reveal>
+          <h2
+            className="font-bold leading-[0.95] mb-10"
+            style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2.25rem, 7vw, 4.5rem)' }}
+          >
+            READY TO
+            <br />
+            <span className="text-gray-500">SELL EVERYWHERE?</span>
           </h2>
-          <p className="text-gray-400 mb-8 max-w-md mx-auto">
-            Free to start. No credit card required.
-          </p>
-          <Link href="/signup">
-            <Button className="bg-[#FF5A1F] text-white hover:bg-[#e64f18] rounded-full px-8 py-3 text-base">
-              Create your account
-            </Button>
+        </Reveal>
+        <Reveal delayMs={140}>
+          <Link
+            href="/signup"
+            className="inline-flex items-center gap-2 bg-white text-black font-medium rounded-full px-8 py-4 text-sm hover:bg-gray-200 transition-colors"
+          >
+            Get Started <ArrowRight className="w-4 h-4" />
           </Link>
-        </div>
+        </Reveal>
       </section>
 
-      {/* Footer */}
-      <footer className="border-t border-[#E5E2DB] py-10 text-center text-sm text-gray-500">
+      {/* ============ FOOTER ============ */}
+      <footer className="border-t border-white/[0.06] py-10 px-6 text-center text-xs text-gray-600">
         <p>&copy; 2026 ADKSY. All rights reserved.</p>
       </footer>
     </div>

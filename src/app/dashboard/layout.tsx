@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { auth } from '@/auth';
 import prisma from '@/lib/prisma';
 import { DashboardLayout } from '@/components/Layout/DashboardLayout';
+import { displayFont, bodyFont } from '@/lib/fonts';
 
 // Pinned explicitly: Prisma Client threw "not configured to run in Edge
 // Runtime" from this route's compiled function on Vercel despite it
@@ -43,8 +44,10 @@ export default async function DashboardRootLayout({
   const workspaceSlug = 'demo-shop';
 
   return (
-    <DashboardLayout workspaceSlug={workspaceSlug} baseUrl="/dashboard">
-      {children}
-    </DashboardLayout>
+    <div className={`${displayFont.variable} ${bodyFont.variable}`} style={{ fontFamily: 'var(--font-body)' }}>
+      <DashboardLayout workspaceSlug={workspaceSlug} baseUrl="/dashboard">
+        {children}
+      </DashboardLayout>
+    </div>
   );
 }

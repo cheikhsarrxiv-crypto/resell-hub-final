@@ -1,6 +1,6 @@
 'use client';
 
-import { Button } from './UI/Button';
+import { DashboardButton } from './dashboard/DashboardButton';
 import { AlertCircle } from 'lucide-react';
 
 interface ConfirmModalProps {
@@ -29,35 +29,28 @@ export function ConfirmModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4">
-        <div className={`p-6 ${danger ? 'bg-red-50' : ''}`}>
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 px-4">
+      <div className="bg-[#0d0d10] border border-white/10 rounded-2xl shadow-2xl max-w-md w-full">
+        <div className={`p-6 ${danger ? 'bg-red-500/[0.04] rounded-t-2xl' : ''}`}>
           <div className="flex items-center gap-3 mb-4">
-            {danger && <AlertCircle className="w-6 h-6 text-red-600" />}
-            <h2 className={`text-lg font-bold ${danger ? 'text-red-900' : 'text-gray-900'}`}>
-              {title}
-            </h2>
+            {danger && <AlertCircle className="w-5 h-5 text-red-400" />}
+            <h2 className={`text-lg font-bold ${danger ? 'text-red-300' : 'text-white'}`}>{title}</h2>
           </div>
-          <p className={danger ? 'text-red-800' : 'text-gray-700'}>{message}</p>
+          <p className={danger ? 'text-red-200/70' : 'text-gray-400'}>{message}</p>
         </div>
 
-        <div className="flex gap-3 px-6 py-4 bg-gray-50 rounded-b-lg border-t border-gray-200">
-          <Button
-            variant="outline"
-            onClick={onCancel}
+        <div className="flex gap-3 px-6 py-4 border-t border-white/[0.06]">
+          <DashboardButton variant="outline" onClick={onCancel} disabled={loading} className="flex-1">
+            {cancelText}
+          </DashboardButton>
+          <DashboardButton
+            variant={danger ? 'danger' : 'primary'}
+            onClick={onConfirm}
             disabled={loading}
             className="flex-1"
           >
-            {cancelText}
-          </Button>
-          <Button
-            variant={danger ? 'outline' : 'primary'}
-            onClick={onConfirm}
-            disabled={loading}
-            className={`flex-1 ${danger ? 'text-red-600 border-red-300 hover:bg-red-50' : ''}`}
-          >
             {loading ? 'Processing...' : confirmText}
-          </Button>
+          </DashboardButton>
         </div>
       </div>
     </div>

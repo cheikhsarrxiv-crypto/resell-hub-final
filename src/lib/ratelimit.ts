@@ -28,6 +28,10 @@ const DEFAULT_CONFIGS = {
   stripe: { points: 50, duration: 3600 }, // 50 per hour
   fulfillment: { points: 100, duration: 3600 }, // 100 per hour
   emailVerification: { points: 3, duration: 3600 }, // 3 per hour
+  aiChat: { points: 20, duration: 3600 }, // 20 per hour (per workspace)
+  forgotPasswordIp: { points: 5, duration: 3600 }, // 5 per hour per IP
+  forgotPasswordEmail: { points: 3, duration: 3600 }, // 3 per hour per email
+  resetPasswordIp: { points: 10, duration: 3600 }, // 10 per hour per IP
 } as const;
 
 type LimitType = keyof typeof DEFAULT_CONFIGS;
@@ -103,7 +107,13 @@ class UpstashRateLimiter {
         },
         body: JSON.stringify([
           ['INCR', redisKey],
-          ['EXPIRE', redisKey, config.duration],
+          // NX: only set the TTL when the key has none yet (i.e. on the
+          // first request of a window). Without NX, this EXPIRE re-runs on
+          // every call — including ones that already fail the limit — and
+          // keeps pushing the TTL back, so a key under sustained traffic
+          // never expires and the counter never resets: a fixed window
+          // that in practice never re-opens.
+          ['EXPIRE', redisKey, config.duration, 'NX'],
           ['TTL', redisKey],
         ]),
       });
@@ -221,6 +231,22 @@ export class RateLimiterService {
 
   async checkEmailVerification(userId: string): Promise<RateLimitResult> {
     return this.check(userId, 'emailVerification');
+  }
+
+  async checkAiChat(workspaceId: string): Promise<RateLimitResult> {
+    return this.check(workspaceId, 'aiChat');
+  }
+
+  async checkForgotPasswordIP(ip: string): Promise<RateLimitResult> {
+    return this.check(`forgot-password:${ip}`, 'forgotPasswordIp');
+  }
+
+  async checkForgotPasswordEmail(email: string): Promise<RateLimitResult> {
+    return this.check(email, 'forgotPasswordEmail');
+  }
+
+  async checkResetPasswordIP(ip: string): Promise<RateLimitResult> {
+    return this.check(`reset-password:${ip}`, 'resetPasswordIp');
   }
 
   static getClientIP(request: Request): string {

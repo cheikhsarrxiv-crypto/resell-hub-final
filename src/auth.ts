@@ -3,7 +3,6 @@ import Credentials from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { loginSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
-import { rateLimiter } from '@/lib/ratelimit';
 import { authConfig as baseAuthConfig } from '@/auth.config';
 
 // Full config — Node.js runtime only (API routes, server components).
@@ -32,16 +31,9 @@ export const authConfig: NextAuthConfig = {
             return null;
           }
 
-          // Brute-force protection: signup already rate-limits by IP, but
-          // login had no limit at all — an attacker could try unlimited
-          // passwords against one email. Same generic failure (null) as
-          // every other rejection path below, so this never reveals
-          // whether the limit or the password was the actual reason.
-          const rateLimitResult = await rateLimiter.checkLogin(result.data.email);
-          if (!rateLimitResult.success) {
-            return null;
-          }
-
+          // Brute-force protection now happens one layer up, in
+          // src/app/api/auth/[...nextauth]/route.ts, before this handler
+          // (and its Prisma/bcrypt work) ever runs — see that file for why.
           const user = await prisma.user.findUnique({
             where: { email: result.data.email },
           });
@@ -79,6 +71,12 @@ export const authConfig: NextAuthConfig = {
         token.email = user.email;
         token.name = user.name;
 
+        // Explicit issuance stamp (rather than relying on NextAuth's
+        // implicit `iat`) so an already-issued JWT can be invalidated
+        // later by comparing it against User.passwordChangedAt — see the
+        // re-validation branch below.
+        token.tokenIssuedAt = Date.now();
+
         // Populate workspaceId (most recently created workspace, same
         // convention as GET /api/workspaces + useWorkspace()) so that
         // server-side routes relying on session.user.workspaceId (e.g.
@@ -90,7 +88,40 @@ export const authConfig: NextAuthConfig = {
           select: { id: true },
         });
         token.workspaceId = workspace?.id;
+        return token;
       }
+
+      // No `user` here means this is an existing session, not a fresh
+      // sign-in — NextAuth just re-decoded a previously issued token.
+      // Sessions are otherwise stateless (JWT strategy, no server-side
+      // session store), so this is the only place a password change can
+      // ever invalidate a token that's already out in a cookie. One
+      // extra indexed lookup per request for existing sessions is the
+      // accepted cost of being able to do that at all.
+      if (!token.id) {
+        return token;
+      }
+
+      const dbUser = await prisma.user.findUnique({
+        where: { id: token.id as string },
+        select: { passwordChangedAt: true },
+      });
+
+      const tokenIssuedAt = typeof token.tokenIssuedAt === 'number' ? token.tokenIssuedAt : 0;
+
+      if (dbUser?.passwordChangedAt && dbUser.passwordChangedAt.getTime() > tokenIssuedAt) {
+        // Password changed after this token was issued (this also
+        // catches tokens issued before this field existed, which carry
+        // no tokenIssuedAt claim at all — treated as issued at time 0,
+        // so any real passwordChangedAt invalidates them). Returning an
+        // empty object strips token.id/email/name/workspaceId; the
+        // session callback in auth.config.ts then leaves
+        // session.user.id undefined, which every existing
+        // `!session?.user?.id` guard in the app already treats as
+        // unauthenticated — no other code needs to change.
+        return {};
+      }
+
       return token;
     },
   },

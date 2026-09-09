@@ -50,7 +50,7 @@ export default function NewProductPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: formData.title,
-          description: formData.description,
+          description: formData.description.trim() || undefined,
           purchasePrice: parseFloat(formData.purchasePrice),
           sellingPrice: parseFloat(formData.sellingPrice),
           quantity: parseInt(formData.quantity),

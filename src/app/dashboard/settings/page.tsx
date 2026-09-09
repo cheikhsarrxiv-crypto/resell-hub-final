@@ -3,10 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWorkspace } from '@/hooks';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
-import { Button } from '@/components/UI/Button';
+import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
+import { PageHeader } from '@/components/dashboard/PageHeader';
+import { DashboardLoadingState, DashboardErrorState } from '@/components/dashboard/DashboardStates';
 import { ConfirmModal } from '@/components/ConfirmModal';
-import { LoadingState, ErrorState } from '@/components/StateComponents';
+
+const inputClass =
+  'w-full bg-white/[0.04] border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-[#FF5A1F]/50 focus:border-[#FF5A1F]/50';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -88,117 +92,95 @@ export default function SettingsPage() {
   };
 
   if (!isReady) {
-    return <LoadingState message="Loading settings..." />;
+    return <DashboardLoadingState message="Loading settings..." />;
   }
 
   return (
-    <div className="space-y-8 max-w-2xl">
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
-        <p className="text-gray-600 mt-1">Manage your workspace settings</p>
-      </div>
+    <div className="space-y-6 max-w-2xl">
+      <PageHeader title="Settings" description="Manage your workspace settings" />
 
       {/* Success Message */}
       {success && (
-        <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg">
+        <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 px-4 py-3 rounded-lg text-sm">
           ✓ Settings saved successfully
         </div>
       )}
 
       {/* Error Message */}
-      {error && <ErrorState message="Error" details={error || undefined} />}
+      {error && <DashboardErrorState message="Error" details={error || undefined} />}
 
       {/* Workspace Info */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Workspace Information</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Workspace Information</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Workspace Name
-            </label>
+            <label className="block text-sm font-medium text-gray-400 mb-2">Workspace Name</label>
             <input
               type="text"
               value={workspaceName}
               onChange={(e) => setWorkspaceName(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={inputClass}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Description
-            </label>
+            <label className="block text-sm font-medium text-gray-400 mb-2">Description</label>
             <textarea
               value={workspaceDescription}
               onChange={(e) => setWorkspaceDescription(e.target.value)}
               rows={4}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={inputClass}
               placeholder="Describe your reselling business..."
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Country
-            </label>
-            <select
-              value={country}
-              onChange={(e) => setCountry(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            >
-              <option value="">Select country</option>
-              <option value="FR">France</option>
-              <option value="DE">Germany</option>
-              <option value="UK">United Kingdom</option>
-              <option value="US">United States</option>
-              <option value="OTHER">Other</option>
+            <label className="block text-sm font-medium text-gray-400 mb-2">Country</label>
+            <select value={country} onChange={(e) => setCountry(e.target.value)} className={inputClass}>
+              <option value="" className="bg-[#0d0d10]">Select country</option>
+              <option value="FR" className="bg-[#0d0d10]">France</option>
+              <option value="DE" className="bg-[#0d0d10]">Germany</option>
+              <option value="UK" className="bg-[#0d0d10]">United Kingdom</option>
+              <option value="US" className="bg-[#0d0d10]">United States</option>
+              <option value="OTHER" className="bg-[#0d0d10]">Other</option>
             </select>
           </div>
 
-          <Button
-            variant="primary"
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full sm:w-auto"
-          >
+          <DashboardButton variant="primary" onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
             {saving ? 'Saving...' : 'Save Changes'}
-          </Button>
-        </CardContent>
-      </Card>
+          </DashboardButton>
+        </DashboardCardContent>
+      </DashboardCard>
 
       {/* Workspace ID */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Workspace ID</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="bg-gray-100 p-3 rounded font-mono text-sm text-gray-600 break-all">
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Workspace ID</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
+          <div className="bg-white/[0.04] border border-white/[0.06] p-3 rounded-lg font-mono text-sm text-gray-400 break-all">
             {workspace?.id}
           </div>
           <p className="text-xs text-gray-600 mt-2">Use this ID for API calls</p>
-        </CardContent>
-      </Card>
+        </DashboardCardContent>
+      </DashboardCard>
 
       {/* Danger Zone */}
-      <Card className="border-red-200 bg-red-50">
-        <CardHeader>
-          <CardTitle className="text-red-900">Danger Zone</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-red-800 mb-4">
+      <DashboardCard className="border-red-500/20 bg-red-500/[0.03]">
+        <DashboardCardHeader>
+          <DashboardCardTitle className="text-red-300">Danger Zone</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
+          <p className="text-sm text-red-200/70 mb-4">
             Deleting this workspace will permanently remove all data. This action cannot be undone.
           </p>
-          <Button
-            variant="outline"
-            className="text-red-600 border-red-300 hover:bg-red-100"
-            onClick={() => setShowDeleteModal(true)}
-          >
+          <DashboardButton variant="danger" onClick={() => setShowDeleteModal(true)}>
             Delete Workspace
-          </Button>
-        </CardContent>
-      </Card>
+          </DashboardButton>
+        </DashboardCardContent>
+      </DashboardCard>
 
       {/* Delete Modal */}
       <ConfirmModal
