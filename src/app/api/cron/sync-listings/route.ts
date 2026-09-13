@@ -2,15 +2,22 @@
  * GET /api/cron/sync-listings
  *
  * Vercel Cron endpoint (see vercel.json, every 30 minutes): reconciles
- * eBay listings into ResellHub for every workspace with a connected eBay
- * MarketplaceConnection.
+ * listings into ResellHub for every workspace with a connected eBay or
+ * Etsy MarketplaceConnection. Depop/Vinted are intentionally excluded —
+ * they have no working OAuth connection flow (see AdapterFactory).
  *
  * - Protected by CRON_SECRET (see src/lib/cronAuth.ts) — rejects with 401
  *   if missing/incorrect, never logs or returns the secret.
  * - Iterates real workspaceIds from connected MarketplaceConnection rows
  *   only; never falls back to a default workspace.
- * - Each workspace is processed independently: a failure on one workspace
- *   is caught and counted, and does not stop the others from running.
+ * - Each workspace+marketplace pair is processed independently and
+ *   sequentially: a failure on one does not stop the others, and there is
+ *   no concurrent sync for the same pair within a single run (one
+ *   MarketplaceConnection row per (workspaceId, marketplaceId) — see the
+ *   @@unique constraint on the model). eBay and Etsy rows for the same
+ *   workspace are separate pairs, so one marketplace's failure or in-
+ *   progress sync (ListingsSyncService's own SyncLog guard is keyed by
+ *   marketplace) never blocks or interferes with the other.
  * - Response is a generic summary only (counts) — never access tokens,
  *   refresh tokens, client secrets, or any per-workspace sensitive data.
  */
@@ -20,14 +27,16 @@ import { verifyCronSecret } from '@/lib/cronAuth'
 import { ListingsSyncService } from '@/services/marketplace/ListingsSyncService'
 import { Marketplace } from '@/types/marketplace'
 
+const SYNCED_MARKETPLACES = [Marketplace.EBAY, Marketplace.ETSY]
+
 export async function GET(req: NextRequest) {
   if (!verifyCronSecret(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   const connections = await prisma.marketplaceConnection.findMany({
-    where: { marketplaceId: Marketplace.EBAY, status: 'connected' },
-    select: { workspaceId: true },
+    where: { marketplaceId: { in: SYNCED_MARKETPLACES }, status: 'connected' },
+    select: { workspaceId: true, marketplaceId: true },
   })
 
   const service = new ListingsSyncService()
@@ -37,7 +46,7 @@ export async function GET(req: NextRequest) {
 
   for (const connection of connections) {
     try {
-      const result = await service.syncListings(connection.workspaceId, Marketplace.EBAY)
+      const result = await service.syncListings(connection.workspaceId, connection.marketplaceId as Marketplace)
       if (result.skipped) {
         skipped++
       } else {

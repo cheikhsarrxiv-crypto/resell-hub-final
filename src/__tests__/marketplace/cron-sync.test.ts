@@ -159,8 +159,8 @@ describe('Cron routes - processing with a valid secret', () => {
 
   it('TEST 3: processes every connected eBay workspace and returns a summary', async () => {
     ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
-      { workspaceId: 'ws-1' },
-      { workspaceId: 'ws-2' },
+      { workspaceId: 'ws-1', marketplaceId: Marketplace.EBAY },
+      { workspaceId: 'ws-2', marketplaceId: Marketplace.EBAY },
     ])
     const syncSpy = vi
       .spyOn(OrdersSyncService.prototype, 'syncOrders')
@@ -171,16 +171,83 @@ describe('Cron routes - processing with a valid secret', () => {
 
     expect(res.status).toBe(200)
     expect(prisma.marketplaceConnection.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { marketplaceId: Marketplace.EBAY, status: 'connected' } })
+      expect.objectContaining({
+        where: { marketplaceId: { in: [Marketplace.EBAY, Marketplace.ETSY] }, status: 'connected' },
+      })
     )
     expect(syncSpy).toHaveBeenCalledTimes(2)
+    expect(syncSpy).toHaveBeenNthCalledWith(1, 'ws-1', Marketplace.EBAY)
+    expect(syncSpy).toHaveBeenNthCalledWith(2, 'ws-2', Marketplace.EBAY)
+    expect(body).toEqual({ workspacesTotal: 2, succeeded: 2, failed: 0, skipped: 0 })
+  })
+
+  it('selects both eBay and Etsy connections, and passes each its own marketplace to OrdersSyncService', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
+      { workspaceId: 'ws-ebay', marketplaceId: Marketplace.EBAY },
+      { workspaceId: 'ws-etsy', marketplaceId: Marketplace.ETSY },
+    ])
+    const syncSpy = vi.spyOn(OrdersSyncService.prototype, 'syncOrders').mockResolvedValue({ processed: 1, failed: 0 })
+
+    const res = await syncOrdersGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(syncSpy).toHaveBeenCalledTimes(2)
+    expect(syncSpy).toHaveBeenCalledWith('ws-ebay', Marketplace.EBAY)
+    expect(syncSpy).toHaveBeenCalledWith('ws-etsy', Marketplace.ETSY)
+    expect(body).toEqual({ workspacesTotal: 2, succeeded: 2, failed: 0, skipped: 0 })
+  })
+
+  it('never queries for Depop or Vinted connections', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([])
+    vi.spyOn(OrdersSyncService.prototype, 'syncOrders')
+
+    await syncOrdersGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+
+    const [callArgs] = (prisma.marketplaceConnection.findMany as any).mock.calls[0]
+    const marketplaceFilter = callArgs.where.marketplaceId.in
+    expect(marketplaceFilter).toContain(Marketplace.EBAY)
+    expect(marketplaceFilter).toContain(Marketplace.ETSY)
+    expect(marketplaceFilter).not.toContain(Marketplace.DEPOP)
+    expect(marketplaceFilter).not.toContain(Marketplace.VINTED)
+  })
+
+  it('a workspace connected to both eBay and Etsy gets one independent, sequential sync per marketplace (no dedup, no concurrent overlap)', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
+      { workspaceId: 'ws-both', marketplaceId: Marketplace.EBAY },
+      { workspaceId: 'ws-both', marketplaceId: Marketplace.ETSY },
+    ])
+    const callOrder: string[] = []
+    let ebayInFlight = false
+    let etsyInFlight = false
+    vi.spyOn(OrdersSyncService.prototype, 'syncOrders').mockImplementation(async (_workspaceId: string, marketplace: Marketplace) => {
+      callOrder.push(marketplace)
+      // Prove the two calls never overlap in time (fully sequential) and
+      // that eBay's own in-flight state never leaks into the Etsy call.
+      if (marketplace === Marketplace.EBAY) {
+        expect(etsyInFlight).toBe(false)
+        ebayInFlight = true
+        await Promise.resolve()
+        ebayInFlight = false
+      } else {
+        expect(ebayInFlight).toBe(false)
+        etsyInFlight = true
+        await Promise.resolve()
+        etsyInFlight = false
+      }
+      return { processed: 1, failed: 0 }
+    })
+
+    const res = await syncOrdersGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(callOrder).toEqual([Marketplace.EBAY, Marketplace.ETSY])
     expect(body).toEqual({ workspacesTotal: 2, succeeded: 2, failed: 0, skipped: 0 })
   })
 
   it('TEST 4 & 8: a workspace that throws does not block the others, and each call uses its own real workspaceId', async () => {
     ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
-      { workspaceId: 'ws-fails' },
-      { workspaceId: 'ws-ok' },
+      { workspaceId: 'ws-fails', marketplaceId: Marketplace.EBAY },
+      { workspaceId: 'ws-ok', marketplaceId: Marketplace.ETSY },
     ])
     const calledWith: string[] = []
     vi.spyOn(OrdersSyncService.prototype, 'syncOrders').mockImplementation(async (workspaceId: string) => {
@@ -194,7 +261,7 @@ describe('Cron routes - processing with a valid secret', () => {
     const res = await syncOrdersGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
     const body = await res.json()
 
-    expect(calledWith).toEqual(['ws-fails', 'ws-ok']) // both were attempted — isolation confirmed
+    expect(calledWith).toEqual(['ws-fails', 'ws-ok']) // both were attempted — isolation confirmed, eBay failure didn't block Etsy
     expect(body).toEqual({ workspacesTotal: 2, succeeded: 1, failed: 1, skipped: 0 })
   })
 
@@ -224,12 +291,47 @@ describe('Cron routes - processing with a valid secret', () => {
   })
 
   it('listings route mirrors the same summary shape', async () => {
-    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([{ workspaceId: 'ws-1' }])
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([{ workspaceId: 'ws-1', marketplaceId: Marketplace.EBAY }])
     vi.spyOn(ListingsSyncService.prototype, 'syncListings').mockResolvedValue({ processed: 2, failed: 0 })
 
     const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
     const body = await res.json()
     expect(body).toEqual({ workspacesTotal: 1, succeeded: 1, failed: 0, skipped: 0 })
+  })
+
+  it('listings route: selects both eBay and Etsy connections, and passes each its own marketplace to ListingsSyncService', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
+      { workspaceId: 'ws-ebay', marketplaceId: Marketplace.EBAY },
+      { workspaceId: 'ws-etsy', marketplaceId: Marketplace.ETSY },
+    ])
+    const syncSpy = vi.spyOn(ListingsSyncService.prototype, 'syncListings').mockResolvedValue({ processed: 1, failed: 0 })
+
+    const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(prisma.marketplaceConnection.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { marketplaceId: { in: [Marketplace.EBAY, Marketplace.ETSY] }, status: 'connected' },
+      })
+    )
+    expect(syncSpy).toHaveBeenCalledTimes(2)
+    expect(syncSpy).toHaveBeenCalledWith('ws-ebay', Marketplace.EBAY)
+    expect(syncSpy).toHaveBeenCalledWith('ws-etsy', Marketplace.ETSY)
+    expect(body).toEqual({ workspacesTotal: 2, succeeded: 2, failed: 0, skipped: 0 })
+  })
+
+  it('listings route: never queries for Depop or Vinted connections', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([])
+    vi.spyOn(ListingsSyncService.prototype, 'syncListings')
+
+    await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+
+    const [callArgs] = (prisma.marketplaceConnection.findMany as any).mock.calls[0]
+    const marketplaceFilter = callArgs.where.marketplaceId.in
+    expect(marketplaceFilter).toContain(Marketplace.EBAY)
+    expect(marketplaceFilter).toContain(Marketplace.ETSY)
+    expect(marketplaceFilter).not.toContain(Marketplace.DEPOP)
+    expect(marketplaceFilter).not.toContain(Marketplace.VINTED)
   })
 })
 
