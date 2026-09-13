@@ -422,6 +422,7 @@ export class EbayAdapter extends MarketplaceAdapter {
           title: item.title,
           quantity: item.quantity,
           price: item.lineItemPrice?.value ? parseFloat(item.lineItemPrice.value) : 0,
+          sku: item.sku,
         })),
         shippingAddress: order.fulfillmentStartInstructions?.[0]?.shippingStep?.shippingAddress,
       }))

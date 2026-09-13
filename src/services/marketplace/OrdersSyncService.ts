@@ -9,6 +9,7 @@ import { MarketplaceConnectionService } from './MarketplaceConnectionService'
 import { RateLimitManager } from './RateLimitManager'
 import { StatusMapper } from './StatusMapper'
 import { Marketplace } from '@/types/marketplace'
+import { ProductService } from '@/services/ProductService'
 
 const PAGE_SIZE = 100
 // Safety cap: never page indefinitely (max 5000 orders processed per run).
@@ -107,7 +108,7 @@ export class OrdersSyncService {
                 },
               })
             } else {
-              await prisma.order.create({
+              const createdOrder = await prisma.order.create({
                 data: {
                   workspaceId,
                   externalOrderId: order.externalOrderId,
@@ -123,6 +124,57 @@ export class OrdersSyncService {
                   status: mappedStatus,
                 },
               })
+
+              // STOCK: only reached on first sight of this order — the
+              // "existing" branch above (status/price updates on later
+              // syncs of the same order) never re-enters here, so each
+              // real sale reserves inventory exactly once regardless of
+              // how many times this order is synced afterwards.
+              for (const item of order.items || []) {
+                if (!item.sku) {
+                  console.error(
+                    `[OrdersSyncService] Order ${order.externalOrderId} line "${item.title}" has no SKU — skipping inventory reservation`
+                  )
+                  continue
+                }
+
+                const product = await prisma.product.findUnique({
+                  where: { workspaceId_sku: { workspaceId, sku: item.sku } },
+                })
+
+                if (!product) {
+                  console.error(
+                    `[OrdersSyncService] Order ${order.externalOrderId}: no product found for SKU "${item.sku}" in workspace ${workspaceId} — skipping inventory reservation`
+                  )
+                  continue
+                }
+
+                try {
+                  await ProductService.reserveInventory(product.id, workspaceId, item.quantity)
+                } catch (reserveError) {
+                  // Insufficient inventory (or a missing Inventory row)
+                  // must never block recording the sale or the rest of
+                  // this sync run — reserveInventory's atomic guard
+                  // already guarantees `available` never goes negative;
+                  // we just log the discrepancy for manual reconciliation
+                  // instead of silently dropping the order line below.
+                  console.error(
+                    `[OrdersSyncService] Order ${order.externalOrderId}: failed to reserve inventory for product ${product.id} (SKU "${item.sku}"): ${
+                      reserveError instanceof Error ? reserveError.message : 'unknown error'
+                    }`
+                  )
+                }
+
+                await prisma.orderItem.create({
+                  data: {
+                    orderId: createdOrder.id,
+                    productId: product.id,
+                    title: item.title,
+                    quantity: item.quantity,
+                    price: item.price,
+                  },
+                })
+              }
             }
 
             processed++

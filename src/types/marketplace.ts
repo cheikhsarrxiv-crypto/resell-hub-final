@@ -173,6 +173,12 @@ export interface MarketplaceOrderItem {
   title: string;
   price: number;
   quantity: number;
+  // The SKU the marketplace echoes back on the order line. For eBay this is
+  // exactly the SKU ResellHub sent when publishing the listing (see
+  // ListingService.createListing -> adapter.createListing({ sku: product.sku })),
+  // so it maps 1:1 back to Product.sku (@@unique([workspaceId, sku])) — not
+  // to Listing.externalId, which eBay sets to its own listingId instead.
+  sku?: string;
 }
 
 export interface Address {
