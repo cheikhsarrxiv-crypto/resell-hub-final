@@ -22,6 +22,10 @@ vi.mock('@/lib/prisma', () => ({
     orderItem: { create: vi.fn() },
     product: { findUnique: vi.fn() },
     inventory: { updateMany: vi.fn(), findUnique: vi.fn() },
+    // findMany is used to resolve Order.listingId (0/1/many active listings
+    // for the product on this marketplace) — see the "listingId resolution"
+    // describe block below. Defaults to 0 candidates in beforeEach.
+    listing: { findMany: vi.fn() },
   },
 }))
 
@@ -74,6 +78,9 @@ describe('OrdersSyncService — inventory reservation on new eBay orders', () =>
       available: 9,
       reserved: 1,
     })
+    // Default: no active listing found — Order.listingId resolution stays
+    // null unless a test explicitly mocks a different candidate count.
+    ;(prisma.listing.findMany as any).mockResolvedValue([])
     vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-token')
   })
 

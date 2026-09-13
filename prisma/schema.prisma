@@ -166,6 +166,18 @@ model Product {
   quantity Int     @default(1) // DB-level CHECK (quantity >= 0) exists in production (added by the stock_race_fix migration); not expressible in Prisma's schema language, so it's undeclared here — do not remove without also dropping the DB constraint. NOT the source of truth for current stock: only set at creation/manual edit, never decremented by a sale — see Inventory.available for the real, live figure.
   location String?
 
+  // Shipping/fulfillment data — nullable: unknown for every product that
+  // existed before these columns, and not collected anywhere in the UI
+  // yet. Units are explicit in the field names, not left ambiguous.
+  weightGrams       Float?
+  lengthCm          Float?
+  widthCm           Float?
+  heightCm          Float?
+  // Supplier's own SKU for this product, distinct from Product.sku (ADKSY's
+  // own SKU, sent to marketplaces — see ListingService/EbayAdapter/
+  // EtsyAdapter). Never used to replace or derive Product.sku.
+  supplierSku String?
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
@@ -393,10 +405,21 @@ model Order {
   status          String @default("pending") // pending, processing, shipped, delivered, cancelled, error
   fulfillmentType String @default("self") // self, automatic
 
-  shippingAddress    String @db.Text
+  // Origin marketplace of this order — 'ebay' | 'etsy' (same string values
+  // as MarketplaceConnection.marketplaceId and the app-level Marketplace
+  // enum in @/types/marketplace). Plain string, not a relation, matching
+  // the existing WebhookLog.marketplace precedent elsewhere in this schema.
+  // Null for an order created directly in ADKSY with no known marketplace.
+  marketplace String?
+
+  shippingAddress    String  @db.Text
+  shippingAddress2   String? @db.Text // line 2 / complement, e.g. apartment or suite
   shippingCity       String
+  shippingState      String? // state / province / region
   shippingPostalCode String
   shippingCountry    String
+  shippingPhone      String? // recipient phone, when the marketplace provides one
+  shippingEmail      String? // recipient email, when the marketplace provides one
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -419,6 +442,13 @@ model OrderItem {
   title    String
   quantity Int
   price    Float
+
+  // Historical snapshot of Product.purchasePrice at the moment this
+  // OrderItem was created — never updated afterwards, so a later edit to
+  // Product.purchasePrice never changes an already-recorded sale's cost
+  // basis. Null on rows created before this column existed (unknown, not
+  // zero — a real cost was never captured for them).
+  purchasePrice Float?
 
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])

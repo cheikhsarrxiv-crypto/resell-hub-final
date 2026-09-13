@@ -108,6 +108,48 @@ export class OrdersSyncService {
                 },
               })
             } else {
+              // Resolve each line's Product once, up front — reused below
+              // both to pick the order's origin listing and to avoid
+              // re-querying the same product a second time in the
+              // stock-reservation loop.
+              const resolvedProducts = new Map<string, { id: string; purchasePrice: number }>()
+              for (const item of order.items || []) {
+                if (!item.sku || resolvedProducts.has(item.sku)) {
+                  continue
+                }
+                const product = await prisma.product.findUnique({
+                  where: { workspaceId_sku: { workspaceId, sku: item.sku } },
+                })
+                if (product) {
+                  resolvedProducts.set(item.sku, product)
+                }
+              }
+
+              // Origin listing (Order.listingId): a single scalar FK, so
+              // only usable when unambiguous. Use the first line item
+              // whose SKU resolved to a Product, and only when exactly
+              // one active Listing exists for it on this marketplace —
+              // never guess between several candidates, and never touch
+              // this for the "existing" (status-update) branch above.
+              let resolvedListingId: string | null = null
+              const firstResolvedItem = (order.items || []).find((item) => item.sku && resolvedProducts.has(item.sku))
+              if (firstResolvedItem?.sku) {
+                const firstProduct = resolvedProducts.get(firstResolvedItem.sku)!
+                const candidateListings = await prisma.listing.findMany({
+                  where: {
+                    productId: firstProduct.id,
+                    workspaceId,
+                    status: 'active',
+                    deletedAt: null,
+                    connection: { marketplaceId: marketplace },
+                  },
+                  select: { id: true },
+                })
+                if (candidateListings.length === 1) {
+                  resolvedListingId = candidateListings[0].id
+                }
+              }
+
               const createdOrder = await prisma.order.create({
                 data: {
                   workspaceId,
@@ -117,10 +159,16 @@ export class OrdersSyncService {
                   customerEmail: order.buyerEmail || '',
                   totalPrice: order.totalPrice,
                   estimatedProfit: 0,
+                  marketplace,
+                  listingId: resolvedListingId,
                   shippingAddress: order.shippingAddress?.street1 || '',
+                  shippingAddress2: order.shippingAddress?.street2 || null,
                   shippingCity: order.shippingAddress?.city || '',
+                  shippingState: order.shippingAddress?.state || null,
                   shippingPostalCode: order.shippingAddress?.postalCode || '',
                   shippingCountry: order.shippingAddress?.country || '',
+                  shippingPhone: order.shippingAddress?.phone || null,
+                  shippingEmail: order.shippingAddress?.email || null,
                   status: mappedStatus,
                 },
               })
@@ -138,9 +186,7 @@ export class OrdersSyncService {
                   continue
                 }
 
-                const product = await prisma.product.findUnique({
-                  where: { workspaceId_sku: { workspaceId, sku: item.sku } },
-                })
+                const product = resolvedProducts.get(item.sku)
 
                 if (!product) {
                   console.error(
@@ -172,6 +218,9 @@ export class OrdersSyncService {
                     title: item.title,
                     quantity: item.quantity,
                     price: item.price,
+                    // Historical cost snapshot — see OrderItem.purchasePrice
+                    // in the schema. Never re-read from Product afterwards.
+                    purchasePrice: product.purchasePrice,
                   },
                 })
               }

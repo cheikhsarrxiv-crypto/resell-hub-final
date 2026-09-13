@@ -529,6 +529,11 @@ export class EtsyAdapter extends MarketplaceAdapter {
             state: receipt.state || '',
             postalCode: receipt.zip || '',
             country: receipt.country_iso || '',
+            // Etsy's Receipt has no phone field at all — email is the only
+            // extra contact detail available, and it's the same
+            // buyer_email already used for MarketplaceOrder.buyerEmail
+            // above, just also surfaced on the address itself.
+            email: receipt.buyer_email || undefined,
           }
         : undefined,
     }

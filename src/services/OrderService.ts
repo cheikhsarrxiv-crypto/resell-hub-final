@@ -45,6 +45,12 @@ export class OrderService {
           marketplaceFees: data.marketplaceFees,
           estimatedProfit: data.estimatedProfit,
           fulfillmentType: data.fulfillmentType || 'self',
+          // The listing being sold is already known here (unlike
+          // OrdersSyncService's best-effort resolution for synced orders)
+          // — but a purely ADKSY-native listing (never published to any
+          // marketplace) has no connection, so this stays null rather than
+          // guessing.
+          marketplace: listing.connection?.marketplace?.name || null,
           shippingAddress: data.shippingAddress,
           shippingCity: data.shippingCity,
           shippingPostalCode: data.shippingPostalCode,
@@ -57,6 +63,9 @@ export class OrderService {
                 title: listing.product.title,
                 quantity: 1,
                 price: listing.price,
+                // Historical cost snapshot — see OrderItem.purchasePrice in
+                // the schema. Never re-read from Product afterwards.
+                purchasePrice: listing.product.purchasePrice,
               },
             ],
           },
