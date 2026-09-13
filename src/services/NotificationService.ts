@@ -21,7 +21,20 @@ export type NotificationType =
  */
 export class NotificationService {
   /**
-   * Create a notification for a workspace
+   * Create an in-app notification for a workspace.
+   *
+   * NEVER THROWS: a notification is a side effect of a business operation
+   * (new order, shipment, payment failure, ...) and must never make that
+   * operation fail — every error is caught and logged here.
+   *
+   * `Notification.userId` points at a User, not a Workspace, so this
+   * resolves workspaceId -> its owning user's id via Workspace.userId
+   * (a plain column, already on every Workspace row) before writing.
+   *
+   * `metadata` isn't persisted: the Notification table has no column for
+   * it (id, userId, type, title, message, isRead, createdAt only) and
+   * this fix doesn't add one — kept in the signature only so existing
+   * callers (all of which already pass it) don't need to change.
    */
   static async createNotification(
     workspaceId: string,
@@ -31,11 +44,26 @@ export class NotificationService {
     metadata?: Record<string, any>
   ) {
     try {
-      // TODO: Implement in-app notification creation
-      // For now, just log
-      console.log(
-        `[NotificationService] ${type}: ${title} - ${message}`
-      );
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { userId: true },
+      });
+
+      if (!workspace) {
+        console.error(
+          `[NotificationService] Cannot create notification: workspace ${workspaceId} not found`
+        );
+        return;
+      }
+
+      await prisma.notification.create({
+        data: {
+          userId: workspace.userId,
+          type,
+          title,
+          message,
+        },
+      });
     } catch (error) {
       console.error('[NotificationService] Failed to create notification:', error);
     }
