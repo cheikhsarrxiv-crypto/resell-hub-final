@@ -404,6 +404,20 @@ export class ListingService {
    * Sync inventory across all listings
    */
   static async syncListingInventory(productId: string, workspaceId: string, quantity: number) {
+    // The marketplace Inventory APIs (eBay's bulkUpdatePriceQuantity, in
+    // particular) are keyed by the product's own SKU — the exact value
+    // sent when the listing was published (see createListing above) —
+    // never by listing.externalId, which eBay sets to its own listingId,
+    // a different identifier those endpoints don't accept.
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { sku: true },
+    });
+
+    if (!product) {
+      throw new Error('Product not found');
+    }
+
     const listings = await prisma.listing.findMany({
       where: {
         productId,
@@ -423,7 +437,7 @@ export class ListingService {
         const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
-          await adapter.updateInventory(listing.externalId, quantity);
+          await adapter.updateInventory(product.sku, quantity);
           updates.push({
             listingId: listing.id,
             status: 'synced',
@@ -456,6 +470,17 @@ export class ListingService {
    * Handle sold out - delist from all marketplaces when inventory reaches 0
    */
   static async handleSoldOut(productId: string, workspaceId: string) {
+    // See syncListingInventory above: the marketplace call needs the
+    // product's own SKU, never listing.externalId.
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { sku: true },
+    });
+
+    if (!product) {
+      throw new Error('Product not found');
+    }
+
     const listings = await prisma.listing.findMany({
       where: {
         productId,
@@ -483,7 +508,7 @@ export class ListingService {
         const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
-          await adapter.updateInventory(listing.externalId, 0);
+          await adapter.updateInventory(product.sku, 0);
         } catch (error) {
           console.error(`Failed to update marketplace inventory:`, error);
         }

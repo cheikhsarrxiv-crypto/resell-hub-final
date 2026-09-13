@@ -494,26 +494,62 @@ export class EbayAdapter extends MarketplaceAdapter {
   }
 
   /**
-   * REAL: Update inventory quantity
+   * REAL: Update inventory quantity via eBay's bulkUpdatePriceQuantity.
+   * https://developer.ebay.com/api-docs/sell/inventory/resources/inventory_item/methods/bulkUpdatePriceQuantity
+   *
+   * Takes the Product SKU (the exact value ResellHub sent to eBay when
+   * publishing — see createListing above), never Listing.externalId,
+   * which eBay sets to its own listingId, a different identifier the
+   * Inventory API does not accept here.
+   *
+   * Chosen over the alternative, createOrReplaceInventoryItem (PUT
+   * .../inventory_item/{sku}), because that call REPLACES the entire
+   * inventory item — every field (title, description, condition,
+   * images...) must be resent or it's overwritten/cleared. This endpoint
+   * updates only quantity (and optionally price) without touching
+   * anything else, which is all a stock sync needs.
+   *
+   * IDEMPOTENT BY DESIGN: the caller always passes the current absolute
+   * quantity (Inventory.available), never a relative delta — sending the
+   * same quantity twice is a no-op on eBay's side.
    */
-  async updateInventory(listingId: string, quantity: number): Promise<void> {
+  async updateInventory(sku: string, quantity: number): Promise<void> {
     if (!this.accessToken) {
       throw new Error('Access token required')
     }
 
     try {
       const body = {
-        availability: {
-          totalQuantity: quantity,
-        },
+        requests: [
+          {
+            sku,
+            shipToLocationAvailability: {
+              quantity,
+            },
+          },
+        ],
       }
 
-      await this.callEbayApi(
-        'PATCH',
-        `/sell/inventory/v1/inventory/${listingId}`,
+      const response = await this.callEbayApi(
+        'POST',
+        '/sell/inventory/v1/bulk_update_price_quantity',
         this.accessToken,
         body
       )
+
+      // bulkUpdatePriceQuantity can return HTTP 200 with a per-SKU failure
+      // embedded in the response body — callEbayApi only throws on a
+      // non-2xx HTTP status, so a rejected SKU (e.g. "does not exist")
+      // would otherwise be silently treated as success.
+      const result = response?.responses?.[0]
+      if (result?.statusCode && result.statusCode >= 300) {
+        throw {
+          status: result.statusCode,
+          statusCode: result.statusCode,
+          message: result.errors?.[0]?.message || `eBay rejected the inventory update for SKU ${sku}`,
+          error: result,
+        }
+      }
     } catch (error) {
       throw ErrorNormalizer.normalize(error, 'ebay')
     }

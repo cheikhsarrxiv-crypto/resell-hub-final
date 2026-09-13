@@ -1,6 +1,7 @@
 import { CreateProductInput, UpdateProductInput } from '@/lib/validations';
 import { prisma } from '@/lib/prisma';
 import { SubscriptionService } from './SubscriptionService';
+import { ListingService } from './ListingService';
 
 export class ProductService {
   static async createProduct(workspaceId: string, data: CreateProductInput) {
@@ -254,7 +255,7 @@ export class ProductService {
       throw new Error('Insufficient inventory');
     }
 
-    return prisma.inventory.findUnique({
+    const inventory = await prisma.inventory.findUnique({
       where: {
         productId_workspaceId: {
           productId,
@@ -262,10 +263,26 @@ export class ProductService {
         },
       },
     });
+
+    // Mirror the new available quantity to any connected marketplace
+    // listing(s) for this product. Inventory.available (just decremented
+    // above) stays the ADKSY source of truth regardless of what happens
+    // here — this is best-effort: a marketplace-side failure (or even a
+    // bug inside syncListingInventory itself) must never undo or fail a
+    // reservation that has already succeeded.
+    if (inventory) {
+      try {
+        await ListingService.syncListingInventory(productId, workspaceId, inventory.available);
+      } catch (error) {
+        console.error(`[ProductService] Failed to sync inventory to marketplace(s) for product ${productId}:`, error);
+      }
+    }
+
+    return inventory;
   }
 
   static async releaseInventory(productId: string, workspaceId: string, quantity: number) {
-    return prisma.inventory.update({
+    const inventory = await prisma.inventory.update({
       where: {
         productId_workspaceId: {
           productId,
@@ -281,5 +298,16 @@ export class ProductService {
         },
       },
     });
+
+    // Same best-effort mirroring as reserveInventory above — never lets a
+    // marketplace-side failure undo or fail a release that already
+    // succeeded locally.
+    try {
+      await ListingService.syncListingInventory(productId, workspaceId, inventory.available);
+    } catch (error) {
+      console.error(`[ProductService] Failed to sync inventory to marketplace(s) for product ${productId}:`, error);
+    }
+
+    return inventory;
   }
 }
