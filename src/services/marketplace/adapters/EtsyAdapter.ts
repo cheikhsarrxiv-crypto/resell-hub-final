@@ -492,6 +492,13 @@ export class EtsyAdapter extends MarketplaceAdapter {
         price: t.price?.amount && t.price?.divisor
           ? t.price.amount / t.price.divisor
           : 0,
+        // Etsy's Transaction object (returned inline on every receipt, see
+        // getOrders above) has its own top-level `sku` field, distinct from
+        // `listing_id` — nullable when the listing has no SKU set. When
+        // ADKSY created the listing (createListing above sends
+        // `sku: [listing.sku]` in the draft body), this echoes back
+        // Product.sku, same 1:1 mapping eBay's line-item sku already has.
+        sku: t.sku || undefined,
       })),
       shippingAddress: receipt.first_line
         ? {

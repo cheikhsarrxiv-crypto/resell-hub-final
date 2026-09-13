@@ -178,6 +178,10 @@ export interface MarketplaceOrderItem {
   // ListingService.createListing -> adapter.createListing({ sku: product.sku })),
   // so it maps 1:1 back to Product.sku (@@unique([workspaceId, sku])) — not
   // to Listing.externalId, which eBay sets to its own listingId instead.
+  // Etsy's Transaction object has the same 1:1 mapping via its own
+  // top-level `sku` field (see EtsyAdapter.createListing/mapOrder) — but it
+  // is nullable there (a listing with no SKU set has transaction.sku ===
+  // null), so this stays undefined rather than a placeholder in that case.
   sku?: string;
 }
 
