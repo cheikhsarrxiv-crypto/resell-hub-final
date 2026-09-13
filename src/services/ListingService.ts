@@ -117,6 +117,34 @@ function toSafeMarketplaceErrorMessage(
     : `Couldn't remove this listing from ${marketplaceDisplayName}. Please try again.`;
 }
 
+/**
+ * Each marketplace's Inventory API is keyed by a different identifier —
+ * passing the wrong one either fails outright or silently updates the
+ * wrong resource:
+ * - eBay's bulkUpdatePriceQuantity is keyed by SKU (Product.sku, the
+ *   exact value ResellHub sent at publish time — see createListing).
+ *   eBay has no SKU-less inventory endpoint.
+ * - Etsy's /listings/{listing_id}/inventory is keyed by the listing_id
+ *   itself (Listing.externalId). Etsy has no SKU-indexed inventory
+ *   endpoint at all.
+ * Add a new case here (never reuse an existing one by assumption) when a
+ * marketplace with a different convention is wired up.
+ */
+function getInventoryUpdateIdentifier(
+  marketplaceName: string,
+  listing: { externalId: string | null },
+  productSku: string
+): string {
+  switch (marketplaceName.toLowerCase()) {
+    case 'ebay':
+      return productSku;
+    case 'etsy':
+      return listing.externalId!;
+    default:
+      throw new Error(`getInventoryUpdateIdentifier: no known Inventory API identifier convention for marketplace "${marketplaceName}"`);
+  }
+}
+
 export class ListingService {
   /**
    * Create listing and publish to selected marketplaces
@@ -404,11 +432,8 @@ export class ListingService {
    * Sync inventory across all listings
    */
   static async syncListingInventory(productId: string, workspaceId: string, quantity: number) {
-    // The marketplace Inventory APIs (eBay's bulkUpdatePriceQuantity, in
-    // particular) are keyed by the product's own SKU — the exact value
-    // sent when the listing was published (see createListing above) —
-    // never by listing.externalId, which eBay sets to its own listingId,
-    // a different identifier those endpoints don't accept.
+    // Which identifier each marketplace's Inventory API needs varies —
+    // see getInventoryUpdateIdentifier above.
     const product = await prisma.product.findUnique({
       where: { id: productId },
       select: { sku: true },
@@ -437,7 +462,8 @@ export class ListingService {
         const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
-          await adapter.updateInventory(product.sku, quantity);
+          const identifier = getInventoryUpdateIdentifier(listing.connection.marketplace.name, listing, product.sku);
+          await adapter.updateInventory(identifier, quantity);
           updates.push({
             listingId: listing.id,
             status: 'synced',
@@ -470,8 +496,8 @@ export class ListingService {
    * Handle sold out - delist from all marketplaces when inventory reaches 0
    */
   static async handleSoldOut(productId: string, workspaceId: string) {
-    // See syncListingInventory above: the marketplace call needs the
-    // product's own SKU, never listing.externalId.
+    // See getInventoryUpdateIdentifier above: which identifier the
+    // marketplace call needs varies per marketplace.
     const product = await prisma.product.findUnique({
       where: { id: productId },
       select: { sku: true },
@@ -508,7 +534,8 @@ export class ListingService {
         const adapter = await getAuthenticatedAdapter(workspaceId, listing.connection.marketplace.name);
 
         try {
-          await adapter.updateInventory(product.sku, 0);
+          const identifier = getInventoryUpdateIdentifier(listing.connection.marketplace.name, listing, product.sku);
+          await adapter.updateInventory(identifier, 0);
         } catch (error) {
           console.error(`Failed to update marketplace inventory:`, error);
         }
