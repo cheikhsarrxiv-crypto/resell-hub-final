@@ -1,10 +1,13 @@
 /**
  * ListingsSyncService
- * Sync listings from eBay to ResellHub
+ * Sync listings from a marketplace into ResellHub. The adapter and its
+ * client config are resolved generically per marketplace (AdapterFactory /
+ * getMarketplaceAdapterConfig) — callers today only ever pass Marketplace.EBAY
+ * (see the sync-listings cron), Etsy support here is not yet activated by any caller.
  */
 
 import { prisma } from '@/lib/prisma'
-import { EbayAdapter } from './adapters/EbayAdapter'
+import { AdapterFactory, getMarketplaceAdapterConfig } from './AdapterFactory'
 import { MarketplaceConnectionService } from './MarketplaceConnectionService'
 import { RateLimitManager } from './RateLimitManager'
 import { Marketplace } from '@/types/marketplace'
@@ -49,24 +52,21 @@ export class ListingsSyncService {
     })
 
     try {
-      const connService = new MarketplaceConnectionService({
-        clientId: process.env.EBAY_CLIENT_ID || '',
-        clientSecret: process.env.EBAY_CLIENT_SECRET || '',
-        redirectUri: process.env.EBAY_REDIRECT_URI || '',
-        sandboxMode: process.env.EBAY_SANDBOX_MODE !== 'false',
-      })
+      // Config resolved per marketplace (see getMarketplaceAdapterConfig) —
+      // no hardcoded eBay credentials here, so this same code path works
+      // for any marketplace the caller passes in.
+      const config = getMarketplaceAdapterConfig(marketplace)
+      const connService = new MarketplaceConnectionService(config)
 
       // Get access token
       const token = await connService.getAccessToken(workspaceId, marketplace)
 
-      const adapter = new EbayAdapter({
-        clientId: process.env.EBAY_CLIENT_ID || '',
-        clientSecret: process.env.EBAY_CLIENT_SECRET || '',
-        redirectUri: process.env.EBAY_REDIRECT_URI || '',
-        sandboxMode: process.env.EBAY_SANDBOX_MODE !== 'false',
-      })
+      const adapter = AdapterFactory.createAdapter(marketplace, config)
 
-      adapter.setAccessToken(token)
+      // setAccessToken() is adapter-specific (not part of the abstract
+      // MarketplaceAdapter contract) — same cast MarketplaceConnectionService
+      // already uses internally after building an adapter generically.
+      ;(adapter as any).setAccessToken(token)
 
       // Scoped to this single run/workspace: correctly gates the burst of
       // requests a multi-page sync makes for one eBay account. Does not
