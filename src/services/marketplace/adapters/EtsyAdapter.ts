@@ -30,6 +30,7 @@ import {
   MarketplaceListing,
   MarketplaceListingInput,
   MarketplaceOrder,
+  MarketplaceOrderTrackingInfo,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
 import crypto from 'crypto'
@@ -346,20 +347,39 @@ export class EtsyAdapter extends MarketplaceAdapter {
    * tracking is what actually advances a receipt's fulfillment state.
    * Only the "shipped" transition is meaningfully supported here; other
    * status strings are rejected explicitly rather than silently ignored.
+   *
+   * https://developer.etsy.com/documentation/reference#operation/createReceiptShipment
+   * POST /shops/{shop_id}/receipts/{receipt_id}/tracking requires both
+   * tracking_code and carrier_name — Etsy's own docs state the request
+   * body "must include tracking_code ... and carrier_name". Sending it
+   * with empty strings (as this method used to) is exactly the invalid
+   * request this guards against: reject before ever calling Etsy rather
+   * than send tracking info that isn't real.
    */
-  async updateOrderStatus(orderId: string, status: string): Promise<void> {
-    const shopId = await this.requireShopId()
-
+  async updateOrderStatus(
+    orderId: string,
+    status: string,
+    trackingInfo?: MarketplaceOrderTrackingInfo
+  ): Promise<void> {
     if (status !== 'shipped') {
       throw new Error(
         `EtsyAdapter: updateOrderStatus only supports "shipped" (Etsy has no generic order-status endpoint). Received: "${status}"`
       )
     }
 
+    if (!trackingInfo?.trackingNumber || !trackingInfo?.carrier) {
+      throw new Error(
+        'EtsyAdapter: updateOrderStatus("shipped") requires trackingInfo.trackingNumber and trackingInfo.carrier — ' +
+          "Etsy's createReceiptShipment endpoint requires both tracking_code and carrier_name, so this refuses to send an empty/invalid request instead of silently no-op'ing."
+      )
+    }
+
+    const shopId = await this.requireShopId()
+
     try {
       await this.callEtsyApi('POST', `/shops/${shopId}/receipts/${orderId}/tracking`, {
-        tracking_code: '',
-        carrier_name: '',
+        tracking_code: trackingInfo.trackingNumber,
+        carrier_name: trackingInfo.carrier,
       })
     } catch (error) {
       throw ErrorNormalizer.normalize(error, 'etsy')

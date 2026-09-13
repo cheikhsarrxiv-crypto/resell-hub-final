@@ -109,7 +109,11 @@ export interface IMarketplaceAdapter {
   // Order operations
   getOrders(limit?: number, offset?: number): Promise<MarketplaceOrder[]>;
   getOrder(orderId: string): Promise<MarketplaceOrder>;
-  updateOrderStatus(orderId: string, status: string): Promise<void>;
+  // trackingInfo is optional and marketplace-specific: eBay's current
+  // updateOrderStatus doesn't use it, but Etsy's real createReceiptShipment
+  // endpoint requires both fields to mark an order shipped (see
+  // EtsyAdapter.updateOrderStatus) — never send it with empty/missing values.
+  updateOrderStatus(orderId: string, status: string, trackingInfo?: MarketplaceOrderTrackingInfo): Promise<void>;
   
   // Inventory operations
   updateInventory(listingId: string, quantity: number): Promise<void>;
@@ -183,6 +187,18 @@ export interface MarketplaceOrderItem {
   // is nullable there (a listing with no SKU set has transaction.sku ===
   // null), so this stays undefined rather than a placeholder in that case.
   sku?: string;
+}
+
+// Real tracking data, in ResellHub's own vocabulary (mirrors
+// Shipment.trackingNumber/Shipment.carrier in prisma/schema.prisma) — the
+// adapter that needs it (Etsy) translates these into the marketplace's own
+// field names (tracking_code/carrier_name) at the API boundary, the same
+// way Product.sku is translated into each marketplace's own identifier
+// elsewhere. Both fields are required together: a marketplace that needs
+// tracking to mark an order shipped needs both, not one or the other.
+export interface MarketplaceOrderTrackingInfo {
+  trackingNumber: string;
+  carrier: string;
 }
 
 export interface Address {

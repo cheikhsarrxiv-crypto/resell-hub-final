@@ -12,6 +12,7 @@ import {
   MarketplaceListing,
   MarketplaceListingInput,
   MarketplaceOrder,
+  MarketplaceOrderTrackingInfo,
   WebhookPayload,
 } from "@/types/marketplace"
 
@@ -174,8 +175,17 @@ export abstract class MarketplaceAdapter implements IMarketplaceAdapter {
    * 
    * NOTE: Not all status changes are allowed on all platforms
    * Error handling lets caller know what's possible
+   *
+   * trackingInfo is optional and marketplace-specific: not every adapter
+   * needs it (eBay's current implementation ignores it), but one that does
+   * (Etsy) must never call its API with empty/missing tracking fields —
+   * it should reject the call instead.
    */
-  abstract updateOrderStatus(orderId: string, status: string): Promise<void>
+  abstract updateOrderStatus(
+    orderId: string,
+    status: string,
+    trackingInfo?: MarketplaceOrderTrackingInfo
+  ): Promise<void>
 
   /**
    * Update inventory/quantity for listing
