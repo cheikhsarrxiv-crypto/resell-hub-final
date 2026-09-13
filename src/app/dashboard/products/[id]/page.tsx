@@ -38,6 +38,14 @@ interface Product {
       };
     } | null;
   }>;
+  // Source of truth for current sellable stock (see prisma/schema.prisma
+  // on Inventory.available) — product.quantity above is frozen at
+  // creation/last manual edit and never reflects a sale.
+  inventories?: Array<{
+    available: number;
+    reserved: number;
+    quantity: number;
+  }>;
 }
 
 const SYNC_STATUS_COLORS: Record<string, string> = {
@@ -107,6 +115,9 @@ export default function ProductDetailPage() {
   const profit = product.sellingPrice - product.purchasePrice;
   const marginValue = product.purchasePrice > 0 ? (profit / product.purchasePrice) * 100 : 0;
   const margin = marginValue.toFixed(1);
+  // Inventory.available is the source of truth for current stock; falls
+  // back to product.quantity only if a product somehow has no Inventory row.
+  const availableStock = product.inventories?.[0]?.available ?? product.quantity;
 
   return (
     <div className="space-y-6">
@@ -200,14 +211,14 @@ export default function ProductDetailPage() {
               <div className="flex items-center gap-8">
                 <div>
                   <p className="text-sm text-gray-600">Quantity</p>
-                  <p className="text-2xl font-bold">{product.quantity}</p>
+                  <p className="text-2xl font-bold">{availableStock}</p>
                 </div>
                 <div className="flex-1">
                   <div className="w-full bg-gray-200 rounded-full h-2">
                     <div
                       className="bg-[#FF5A1F] h-2 rounded-full"
                       style={{
-                        width: `${Math.min(100, (product.quantity / 100) * 100)}%`,
+                        width: `${Math.min(100, (availableStock / 100) * 100)}%`,
                       }}
                     />
                   </div>

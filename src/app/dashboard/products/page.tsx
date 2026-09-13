@@ -119,7 +119,14 @@ export default function ProductsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleProducts.map((product) => (
+                  {visibleProducts.map((product) => {
+                    // Inventory.available is the source of truth for sellable
+                    // stock (see prisma/schema.prisma) — product.quantity is
+                    // frozen at creation/last manual edit and never reflects
+                    // a sale. Falls back to product.quantity only if a
+                    // product somehow has no Inventory row.
+                    const availableStock = product.inventories?.[0]?.available ?? product.quantity;
+                    return (
                     <tr key={product.id} className="border-b border-white/[0.04] last:border-b-0 hover:bg-white/[0.02] transition-colors">
                       <td className="py-4 pr-4 font-medium text-white">{product.title}</td>
                       <td className="py-4 px-4 hidden md:table-cell text-xs font-mono text-gray-500">{product.sku}</td>
@@ -127,19 +134,20 @@ export default function ProductsPage() {
                       <td className="py-4 px-4 text-right hidden sm:table-cell">
                         <span
                           className={`px-2 py-1 rounded-full text-xs font-medium border ${
-                            product.quantity > 0
+                            availableStock > 0
                               ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                               : 'bg-red-500/10 text-red-400 border-red-500/20'
                           }`}
                         >
-                          {product.quantity}
+                          {availableStock}
                         </span>
                       </td>
                       <td className="py-4 pl-4 text-right text-emerald-400 font-semibold">
                         {formatCurrency(product.sellingPrice - product.purchasePrice - (product.fulfillmentCost || 0))}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

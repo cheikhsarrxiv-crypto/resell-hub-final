@@ -132,6 +132,13 @@ export async function verifyProductAccess(
         include: { connection: { include: { marketplace: true } } },
         orderBy: { createdAt: 'desc' },
       },
+      // Inventory.available is the source of truth for sellable stock —
+      // Product.quantity is only ever set at creation/manual edit and is
+      // never touched by an order (direct or marketplace-synced), so it
+      // drifts stale after the first sale. Included here so every
+      // consumer of this function (the product detail/edit API route)
+      // can display the real number instead of the frozen one.
+      inventories: true,
     },
   });
 

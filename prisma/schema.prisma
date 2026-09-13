@@ -163,7 +163,7 @@ model Product {
   fulfillmentCost Float @default(0)
   fees            Float @default(0)
 
-  quantity Int     @default(1) // DB-level CHECK (quantity >= 0) exists in production (added by the stock_race_fix migration); not expressible in Prisma's schema language, so it's undeclared here — do not remove without also dropping the DB constraint.
+  quantity Int     @default(1) // DB-level CHECK (quantity >= 0) exists in production (added by the stock_race_fix migration); not expressible in Prisma's schema language, so it's undeclared here — do not remove without also dropping the DB constraint. NOT the source of truth for current stock: only set at creation/manual edit, never decremented by a sale — see Inventory.available for the real, live figure.
   location String?
 
   createdAt DateTime  @default(now())
@@ -204,6 +204,13 @@ model ProductImage {
   @@index([isMain]) // For finding main image
 }
 
+// SOURCE OF TRUTH for sellable stock: `available` is what every real sale
+// (direct order via ProductService.reserveInventory, and eBay-synced orders
+// via OrdersSyncService) actually decrements, atomically and race-free.
+// Product.quantity is a separate field only set at product creation/manual
+// edit — it is never touched by a sale, so it goes stale as soon as one
+// happens. UI that shows "current stock" must read Inventory.available
+// (via Product.inventories), never Product.quantity.
 model Inventory {
   id           String    @id @default(cuid())
   productId    String

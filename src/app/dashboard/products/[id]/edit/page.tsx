@@ -41,12 +41,16 @@ export default function EditProductPage() {
 
       if (data.success) {
         const p = data.product;
+        // Prefill with the real current stock (Inventory.available), not
+        // the possibly-stale p.quantity — see prisma/schema.prisma. Falls
+        // back to p.quantity only if the product somehow has no Inventory row.
+        const availableStock = p.inventories?.[0]?.available ?? p.quantity;
         setFormData({
           title: p.title || '',
           description: p.description || '',
           purchasePrice: p.purchasePrice?.toString() || '',
           sellingPrice: p.sellingPrice?.toString() || '',
-          quantity: p.quantity?.toString() || '',
+          quantity: availableStock?.toString() || '',
           category: p.category || '',
         });
       } else {

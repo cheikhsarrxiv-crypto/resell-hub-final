@@ -16,6 +16,16 @@ interface Product {
   sku: string;
   sellingPrice: number;
   quantity: number;
+  // Source of truth for current stock (see prisma/schema.prisma on
+  // Inventory.available) — `quantity` above is frozen at creation/last
+  // manual edit and never reflects a sale.
+  inventories?: Array<{ available: number }>;
+}
+
+// Falls back to product.quantity only if a product somehow has no
+// Inventory row.
+function availableStockFor(product: Product): number {
+  return product.inventories?.[0]?.available ?? product.quantity;
 }
 
 interface MarketplaceConnection {
@@ -75,7 +85,7 @@ function NewListingForm() {
             setProductId(match.id);
             setTitle(match.title);
             setPrice(match.sellingPrice.toString());
-            setQuantity(match.quantity.toString());
+            setQuantity(availableStockFor(match).toString());
           }
         }
       }
@@ -96,7 +106,7 @@ function NewListingForm() {
     if (product) {
       setTitle(product.title);
       setPrice(product.sellingPrice.toString());
-      setQuantity(product.quantity.toString());
+      setQuantity(availableStockFor(product).toString());
     }
   };
 
@@ -354,7 +364,7 @@ function NewListingForm() {
                   <option value="">Select a product</option>
                   {products.map((product) => (
                     <option key={product.id} value={product.id}>
-                      {product.title} — {formatCurrency(product.sellingPrice)} ({product.quantity} in stock)
+                      {product.title} — {formatCurrency(product.sellingPrice)} ({availableStockFor(product)} in stock)
                     </option>
                   ))}
                 </select>
