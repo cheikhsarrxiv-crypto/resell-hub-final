@@ -210,6 +210,7 @@ export interface Address {
   postalCode: string;
   country: string;
   phone?: string;
+  email?: string;
 }
 
 // ============================================================================

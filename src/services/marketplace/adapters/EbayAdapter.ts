@@ -9,6 +9,7 @@
 
 import MarketplaceAdapter from '@/services/marketplace/MarketplaceAdapter'
 import {
+  Address,
   Marketplace,
   MarketplaceAdapterConfig,
   MarketplaceListing,
@@ -424,7 +425,7 @@ export class EbayAdapter extends MarketplaceAdapter {
           price: item.lineItemPrice?.value ? parseFloat(item.lineItemPrice.value) : 0,
           sku: item.sku,
         })),
-        shippingAddress: order.fulfillmentStartInstructions?.[0]?.shippingStep?.shippingAddress,
+        shippingAddress: this.mapShipToAddress(this.findShipToInstruction(order.fulfillmentStartInstructions)?.shippingStep?.shipTo),
       }))
     } catch (error) {
       throw ErrorNormalizer.normalize(error, 'ebay')
@@ -462,7 +463,7 @@ export class EbayAdapter extends MarketplaceAdapter {
           quantity: item.quantity,
           price: item.lineItemPrice?.value ? parseFloat(item.lineItemPrice.value) : 0,
         })),
-        shippingAddress: response.fulfillmentStartInstructions?.[0]?.shippingStep?.shippingAddress,
+        shippingAddress: this.mapShipToAddress(this.findShipToInstruction(response.fulfillmentStartInstructions)?.shippingStep?.shipTo),
       }
     } catch (error) {
       throw ErrorNormalizer.normalize(error, 'ebay')
@@ -614,6 +615,55 @@ export class EbayAdapter extends MarketplaceAdapter {
       'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
       'https://api.ebay.com/oauth/api_scope/sell.account',
     ]
+  }
+
+  /**
+   * An order can carry more than one fulfillmentStartInstruction (e.g. a
+   * Click & Collect / PREPARE_FOR_PICKUP instruction alongside a normal
+   * SHIP_TO one) — https://developer.ebay.com/api-docs/sell/fulfillment/types/sel:FulfillmentInstructionsType.
+   * Always picking index [0] would silently grab the wrong one whenever
+   * SHIP_TO isn't first. Prefer the instruction explicitly typed SHIP_TO;
+   * fall back to the first one that actually has a shipTo container (older
+   * responses may omit fulfillmentInstructionsType); fall back to [0] as a
+   * last resort so a shippable order never loses its address entirely just
+   * because eBay didn't tag the type.
+   */
+  private findShipToInstruction(instructions: any[] | undefined): any {
+    if (!instructions || instructions.length === 0) {
+      return undefined
+    }
+    return (
+      instructions.find((instruction) => instruction.fulfillmentInstructionsType === 'SHIP_TO') ||
+      instructions.find((instruction) => instruction.shippingStep?.shipTo) ||
+      instructions[0]
+    )
+  }
+
+  /**
+   * REAL: Map eBay's shipTo (an ExtendedContact) to ResellHub's own Address
+   * shape. shipTo — not shippingAddress, which doesn't exist on eBay's real
+   * response — lives at fulfillmentStartInstructions[].shippingStep.shipTo.
+   * https://developer.ebay.com/api-docs/sell/fulfillment/types/sel:ExtendedContact
+   * primaryPhone is itself an object ({ phoneNumber }), and eBay does not
+   * return it at all for orders older than 90 days — both are real eBay
+   * behavior, not something to work around here.
+   */
+  private mapShipToAddress(shipTo: any): Address | undefined {
+    if (!shipTo) {
+      return undefined
+    }
+    const contactAddress = shipTo.contactAddress || {}
+    return {
+      name: shipTo.fullName || '',
+      street1: contactAddress.addressLine1 || '',
+      street2: contactAddress.addressLine2 || undefined,
+      city: contactAddress.city || '',
+      state: contactAddress.stateOrProvince || undefined,
+      postalCode: contactAddress.postalCode || '',
+      country: contactAddress.countryCode || '',
+      phone: shipTo.primaryPhone?.phoneNumber || undefined,
+      email: shipTo.email || undefined,
+    }
   }
 
   /**
