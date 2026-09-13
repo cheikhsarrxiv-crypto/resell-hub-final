@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import prisma from '@/lib/prisma';
+import { EmailService } from './EmailService';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   // Use default API version
@@ -372,8 +373,11 @@ export class StripeService {
 
   /**
    * Handle payment failed webhook
-   * IDEMPOTENT: Marks subscription as past_due
-   * NOTIFY: TODO Phase 2.7 - Send email notification
+   * IDEMPOTENT: Marks subscription as past_due and emails the workspace
+   * owner exactly once per failure episode — both guarded by the same
+   * "already past_due" check below, so a second invoice.payment_failed
+   * event for the same ongoing dunning cycle (a distinct Stripe event.id,
+   * so not caught by the route's own webhookLog dedup) is a no-op here too.
    */
   static async handlePaymentFailed(invoice: Stripe.Invoice) {
     try {
@@ -395,7 +399,7 @@ export class StripeService {
       // SECURITY: Verify workspace exists
       const workspace = await prisma.workspace.findUnique({
         where: { id: workspaceId },
-        include: { subscription: true },
+        include: { subscription: true, user: true },
       });
 
       if (!workspace?.subscription) {
@@ -403,7 +407,7 @@ export class StripeService {
         return;
       }
 
-      // IDEMPOTENCE: Only update if not already past_due
+      // IDEMPOTENCE: Only update (and notify) if not already past_due
       if (workspace.subscription.status === 'past_due') {
         console.log(`[StripeService] Subscription already past_due: ${workspace.subscription.id}`);
         return;
@@ -416,7 +420,21 @@ export class StripeService {
       });
 
       console.log(`[StripeService] Payment failed for workspace ${workspaceId}, marked as past_due`);
-      // TODO Phase 2.7: Send email notification to user about failed payment
+
+      // NOTIFY: best-effort — an email provider hiccup must not turn an
+      // already-applied, correct status update into a failed webhook (which
+      // would make Stripe retry delivery of an event we've fully handled).
+      try {
+        const emailResult = await EmailService.sendPaymentFailedNotification(
+          workspace.user.email,
+          (invoice.amount_due ?? 0) / 100
+        );
+        if (!emailResult.success) {
+          console.error('[StripeService] Failed to send payment-failed email:', emailResult.error);
+        }
+      } catch (emailError) {
+        console.error('[StripeService] Payment-failed email threw:', emailError);
+      }
     } catch (error) {
       console.error('[StripeService] Payment failed handler error:', error);
       throw error;
