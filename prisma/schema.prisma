@@ -163,7 +163,7 @@ model Product {
   fulfillmentCost Float @default(0)
   fees            Float @default(0)
 
-  quantity Int     @default(1)
+  quantity Int     @default(1) // DB-level CHECK (quantity >= 0) exists in production (added by the stock_race_fix migration); not expressible in Prisma's schema language, so it's undeclared here — do not remove without also dropping the DB constraint.
   location String?
 
   createdAt DateTime  @default(now())
