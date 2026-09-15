@@ -25,6 +25,7 @@
  * are spied.
  */
 import crypto from 'crypto'
+import { Prisma } from '@prisma/client'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 vi.mock('@/lib/prisma', () => ({
@@ -52,6 +53,13 @@ process.env.ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'http://localho
 process.env.TOKEN_ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY || crypto.randomBytes(32).toString('base64')
 
 const WORKSPACE_ID = 'ws-listings-sync-matching-test'
+
+function uniqueConstraintError() {
+  return new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'test',
+  })
+}
 
 function makeEbayListing(overrides: Partial<any> = {}) {
   return {
@@ -191,5 +199,59 @@ describe('ListingsSyncService — resolves a real Product, never fabricates an i
     expect(result).toEqual({ processed: 2, failed: 0 })
     expect(prisma.listing.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ data: expect.objectContaining({ productId: 'product-SKU-A' }) }))
     expect(prisma.listing.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ data: expect.objectContaining({ productId: 'product-SKU-B' }) }))
+  })
+
+  it('a newly-discovered listing whose (productId, marketplaceConnectionId) already has an active Listing under a different externalId is reconciled, not counted as failed or duplicated', async () => {
+    ;(prisma.product.findUnique as any).mockResolvedValue({ id: 'product-widget-real-id', workspaceId: WORKSPACE_ID, sku: 'SKU-WIDGET' })
+    ;(prisma.marketplaceConnection.findUnique as any).mockResolvedValue({ id: 'connection-ebay-1' })
+    ;(prisma.listing.findFirst as any)
+      .mockResolvedValueOnce(null) // not found by externalId — looks new
+      .mockResolvedValueOnce({ id: 'active-listing-old-external-id' }) // but already active under a different externalId
+    ;(prisma.listing.create as any).mockRejectedValue(uniqueConstraintError())
+    vi.spyOn(EbayAdapter.prototype, 'getListings')
+      .mockResolvedValueOnce([makeEbayListing({ externalId: 'SKU-WIDGET-RELISTED' })])
+      .mockResolvedValueOnce([])
+
+    const service = new ListingsSyncService()
+    const result = await service.syncListings(WORKSPACE_ID, Marketplace.EBAY)
+
+    expect(result).toEqual({ processed: 1, failed: 0 }) // reconciled, never a false failure
+    expect(prisma.listing.update).toHaveBeenCalledWith({
+      where: { id: 'active-listing-old-external-id' },
+      data: expect.objectContaining({
+        title: 'Widget',
+        externalId: 'SKU-WIDGET-RELISTED', // reconciled to the marketplace's current externalId
+        syncStatus: 'synced',
+      }),
+    })
+  })
+
+  it('the unexpected case — a unique constraint violation with no matching active Listing found — still propagates and is counted as failed', async () => {
+    ;(prisma.product.findUnique as any).mockResolvedValue({ id: 'product-widget-real-id', workspaceId: WORKSPACE_ID, sku: 'SKU-WIDGET' })
+    ;(prisma.marketplaceConnection.findUnique as any).mockResolvedValue({ id: 'connection-ebay-1' })
+    ;(prisma.listing.findFirst as any)
+      .mockResolvedValueOnce(null) // not found by externalId
+      .mockResolvedValueOnce(null) // and, unexpectedly, no active listing found either
+    ;(prisma.listing.create as any).mockRejectedValue(uniqueConstraintError())
+    vi.spyOn(EbayAdapter.prototype, 'getListings').mockResolvedValueOnce([makeEbayListing()]).mockResolvedValueOnce([])
+
+    const service = new ListingsSyncService()
+    const result = await service.syncListings(WORKSPACE_ID, Marketplace.EBAY)
+
+    expect(result).toEqual({ processed: 0, failed: 1 }) // same behavior as before this fix
+    expect(prisma.listing.update).not.toHaveBeenCalled()
+  })
+
+  it('a real, unrelated create error (not a unique constraint violation) is still counted as failed, unchanged', async () => {
+    ;(prisma.product.findUnique as any).mockResolvedValue({ id: 'product-widget-real-id', workspaceId: WORKSPACE_ID, sku: 'SKU-WIDGET' })
+    ;(prisma.marketplaceConnection.findUnique as any).mockResolvedValue({ id: 'connection-ebay-1' })
+    ;(prisma.listing.create as any).mockRejectedValue(new Error('Connection to database lost'))
+    vi.spyOn(EbayAdapter.prototype, 'getListings').mockResolvedValueOnce([makeEbayListing()]).mockResolvedValueOnce([])
+
+    const service = new ListingsSyncService()
+    const result = await service.syncListings(WORKSPACE_ID, Marketplace.EBAY)
+
+    expect(result).toEqual({ processed: 0, failed: 1 })
+    expect(prisma.listing.update).not.toHaveBeenCalled()
   })
 })

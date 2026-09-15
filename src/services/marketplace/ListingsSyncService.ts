@@ -6,6 +6,7 @@
  * connected eBay and Etsy accounts here.
  */
 
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/prisma'
 import { AdapterFactory, getMarketplaceAdapterConfig } from './AdapterFactory'
 import { MarketplaceConnectionService } from './MarketplaceConnectionService'
@@ -143,19 +144,61 @@ export class ListingsSyncService {
                 where: { workspaceId_marketplaceId: { workspaceId, marketplaceId: marketplace } },
               })
 
-              await prisma.listing.create({
-                data: {
-                  productId: product.id,
-                  workspaceId,
-                  marketplaceConnectionId: connection?.id,
-                  title: listing.title,
-                  description: listing.description || '',
-                  price: listing.price,
-                  quantity: listing.quantity,
-                  externalId,
-                  syncStatus: 'synced',
-                },
-              })
+              try {
+                await prisma.listing.create({
+                  data: {
+                    productId: product.id,
+                    workspaceId,
+                    marketplaceConnectionId: connection?.id,
+                    title: listing.title,
+                    description: listing.description || '',
+                    price: listing.price,
+                    quantity: listing.quantity,
+                    externalId,
+                    syncStatus: 'synced',
+                  },
+                })
+              } catch (createError) {
+                // The (productId, marketplaceConnectionId) pair already has
+                // an active Listing under a different externalId — e.g. the
+                // item was relisted on the marketplace, or ADKSY already
+                // published it via ListingService.createListing. The
+                // partial unique index (migration
+                // 20260914000000_prevent_duplicate_listing_publication)
+                // correctly rejects a second active row for this pair; this
+                // is not a sync failure, so reconcile the existing row to
+                // the marketplace's current data instead of creating a
+                // duplicate or counting it as failed. Any other error (or
+                // the unexpected case where the row can't be found even
+                // though the constraint fired) still propagates to the
+                // outer catch below, unchanged.
+                if (
+                  createError instanceof Prisma.PrismaClientKnownRequestError &&
+                  createError.code === 'P2002' &&
+                  connection
+                ) {
+                  const activeListing = await prisma.listing.findFirst({
+                    where: { productId: product.id, marketplaceConnectionId: connection.id, deletedAt: null },
+                  })
+                  if (!activeListing) {
+                    throw createError
+                  }
+                  await prisma.listing.update({
+                    where: { id: activeListing.id },
+                    data: {
+                      title: listing.title,
+                      description: listing.description || '',
+                      price: listing.price,
+                      quantity: listing.quantity,
+                      externalId,
+                      syncStatus: 'synced',
+                      updatedAt: new Date(),
+                    },
+                  })
+                } else {
+                  throw createError
+                }
+              }
             }
 
             processed++
