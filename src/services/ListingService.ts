@@ -1,4 +1,5 @@
 import { CreateListingInput, UpdateListingInput } from '@/lib/validations';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { AdapterFactory } from './marketplace/AdapterFactory';
 import { MarketplaceConnectionService } from './marketplace/MarketplaceConnectionService';
@@ -186,6 +187,81 @@ export class ListingService {
           throw new Error(`Marketplace not connected: ${marketplaceId}`);
         }
 
+        // Idempotency guard: never publish the same product to the same
+        // marketplace connection twice. A double click, a client-side
+        // retry after a slow response, or two near-simultaneous requests
+        // must never create two separately-live marketplace listings for
+        // one intent. A listing already 'synced' or currently 'syncing'
+        // for this exact pair means the intent is already satisfied (or
+        // in flight) — return it as-is, never publish again. A 'failed'
+        // one (deletedAt still null) is a retryable slot, not a
+        // duplicate: reuse that same row instead of inserting a new one.
+        const existingListing = await prisma.listing.findFirst({
+          where: {
+            productId: product.id,
+            marketplaceConnectionId: connection.id,
+            deletedAt: null,
+          },
+          include: {
+            connection: { include: { marketplace: true } },
+          },
+        });
+
+        if (existingListing && existingListing.syncStatus !== 'failed') {
+          createdListings.push(existingListing);
+          continue;
+        }
+
+        // Idempotency guard, step 2 (race-safe reservation): claim this
+        // (product, marketplace connection) pair by writing 'syncing'
+        // BEFORE calling the real marketplace API — never after. Once
+        // the corresponding partial unique index is in place
+        // (@@... on (productId, marketplaceConnectionId) WHERE
+        // deletedAt IS NULL — see migration notes), two near-simultaneous
+        // requests can both pass the check above, but only one of their
+        // INSERTs (for a brand-new pair) can win here; the loser never
+        // reaches adapter.createListing, so a real duplicate listing is
+        // never published on the marketplace itself, not just avoided in
+        // the local DB. A previously-'failed' row is claimed by updating
+        // it in place instead of inserting (the constraint would reject a
+        // second row for the same still-not-deleted pair anyway).
+        let reservedListing;
+        try {
+          reservedListing = existingListing
+            ? await prisma.listing.update({
+                where: { id: existingListing.id },
+                data: { syncStatus: 'syncing', syncError: null },
+              })
+            : await prisma.listing.create({
+                data: {
+                  productId: product.id,
+                  workspaceId,
+                  marketplaceConnectionId: connection.id,
+                  title: data.title,
+                  description: data.description,
+                  price: data.price,
+                  quantity: data.quantity,
+                  status: 'active',
+                  syncStatus: 'syncing',
+                },
+              });
+        } catch (error) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            // Lost the race — another request already claimed this pair
+            // a moment ago. Same outcome as the fast-path check above:
+            // return whatever exists now, never publish a duplicate.
+            const raceWinner = await prisma.listing.findFirst({
+              where: { productId: product.id, marketplaceConnectionId: connection.id, deletedAt: null },
+              include: { connection: { include: { marketplace: true } } },
+            });
+            if (raceWinner) {
+              createdListings.push(raceWinner);
+              continue;
+            }
+          }
+          throw error;
+        }
+
         try {
           // Get adapter with the workspace's real OAuth access token loaded
           const adapter = await getAuthenticatedAdapter(workspaceId, connection.marketplace.name);
@@ -201,18 +277,11 @@ export class ListingService {
             category: product.category || undefined,
           });
 
-          // Create listing in database
-          const listing = await prisma.listing.create({
+          // Finalize the reservation now that the marketplace confirms it
+          const listing = await prisma.listing.update({
+            where: { id: reservedListing.id },
             data: {
-              productId: product.id,
-              workspaceId,
-              marketplaceConnectionId: connection.id,
               externalId: listingResponse.externalId,
-              title: data.title,
-              description: data.description,
-              price: data.price,
-              quantity: data.quantity,
-              status: 'active',
               syncStatus: 'synced',
             },
             include: {
@@ -238,17 +307,13 @@ export class ListingService {
             syncError = `${connection.marketplace.displayName} rejected this listing due to an account limit.`;
           }
 
-          // Create listing with error status
-          const listing = await prisma.listing.create({
+          // Mark the reservation as failed rather than leaving it stuck
+          // on "syncing" — a 'failed' row is a retryable slot (see the
+          // guard above), so the next createListing call for this same
+          // pair reuses this exact row instead of being blocked forever.
+          const listing = await prisma.listing.update({
+            where: { id: reservedListing.id },
             data: {
-              productId: product.id,
-              workspaceId,
-              marketplaceConnectionId: connection.id,
-              title: data.title,
-              description: data.description,
-              price: data.price,
-              quantity: data.quantity,
-              status: 'active',
               syncStatus: 'failed',
               syncError,
             },

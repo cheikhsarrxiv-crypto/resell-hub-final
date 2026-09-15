@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@/components/UI/Button';
+import { availableMarketplaces, comingSoonMarketplaces } from './marketplaceAvailability';
 
 interface MarketplacesStepProps {
   data: any;
@@ -11,13 +12,6 @@ export default function MarketplacesStep({ data, onNext, saving }: MarketplacesS
   const [selectedMarketplaces, setSelectedMarketplaces] = useState<string[]>(
     data?.marketplaces || []
   );
-
-  const marketplaces = [
-    { id: 'vinted', name: 'Vinted', description: 'Popular for fashion and second-hand' },
-    { id: 'ebay', name: 'eBay', description: 'Largest e-commerce marketplace' },
-    { id: 'depop', name: 'Depop', description: 'Fashion-focused social marketplace' },
-    { id: 'etsy', name: 'Etsy', description: 'Handmade and vintage items' },
-  ];
 
   const toggleMarketplace = (id: string) => {
     setSelectedMarketplaces((prev) =>
@@ -42,7 +36,8 @@ export default function MarketplacesStep({ data, onNext, saving }: MarketplacesS
       </div>
 
       <div className="space-y-3">
-        {marketplaces.map((marketplace) => (
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Available now</p>
+        {availableMarketplaces.map((marketplace) => (
           <label key={marketplace.id} className="flex items-center gap-4 p-4 border rounded-lg cursor-pointer hover:bg-gray-50">
             <input
               type="checkbox"
@@ -55,6 +50,23 @@ export default function MarketplacesStep({ data, onNext, saving }: MarketplacesS
               <p className="text-sm text-gray-600">{marketplace.description}</p>
             </div>
           </label>
+        ))}
+
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 pt-4">
+          Waiting on official partner access
+        </p>
+        {comingSoonMarketplaces.map((marketplace) => (
+          <div
+            key={marketplace.id}
+            className="flex items-center gap-4 p-4 border rounded-lg bg-gray-50 opacity-70 cursor-not-allowed"
+            title="Not connectable yet — waiting on official partner/API access"
+          >
+            <input type="checkbox" checked={false} disabled className="w-5 h-5 rounded" />
+            <div className="flex-1">
+              <p className="font-medium text-gray-700">{marketplace.name}</p>
+              <p className="text-sm text-gray-500">{marketplace.description} — not connectable yet</p>
+            </div>
+          </div>
         ))}
       </div>
 

@@ -19,10 +19,11 @@ import { NextRequest } from 'next/server'
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
-    marketplaceConnection: { findMany: vi.fn() },
+    marketplaceConnection: { findMany: vi.fn(), findUnique: vi.fn() },
     syncLog: { create: vi.fn(), update: vi.fn(), findFirst: vi.fn() },
     order: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     listing: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    product: { findUnique: vi.fn() },
   },
 }))
 
@@ -75,6 +76,7 @@ function makeListing(id: string) {
     externalId: id,
     status: 'active' as const,
     marketplace: Marketplace.EBAY,
+    sku: `SKU-${id}`,
   }
 }
 
@@ -455,6 +457,14 @@ describe('ListingsSyncService - pagination', () => {
     ;(prisma.syncLog.update as any).mockResolvedValue({})
     ;(prisma.listing.findFirst as any).mockResolvedValue(null)
     ;(prisma.listing.create as any).mockResolvedValue({})
+    // Each discovered listing resolves to a real Product by SKU — see
+    // ListingsSyncService's fix for the fabricated-productId bug.
+    ;(prisma.product.findUnique as any).mockImplementation(async ({ where }: any) => ({
+      id: `product-${where.workspaceId_sku.sku}`,
+      workspaceId: where.workspaceId_sku.workspaceId,
+      sku: where.workspaceId_sku.sku,
+    }))
+    ;(prisma.marketplaceConnection.findUnique as any).mockResolvedValue({ id: 'connection-1' })
     vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
   })
 

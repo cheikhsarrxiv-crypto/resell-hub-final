@@ -244,7 +244,7 @@ describe("Adapter Interface", () => {
     expect(typeof adapter.validateConnection).toBe("function")
   })
 
-  it("Vinted adapter is blocked", async () => {
+  it("Vinted adapter is blocked pending allowlisted Pro Integrations access", async () => {
     const { VintedAdapter } = await import("@/services/marketplace/adapters/VintedAdapter")
 
     const adapter = new VintedAdapter({
@@ -253,8 +253,11 @@ describe("Adapter Interface", () => {
       redirectUri: "http://localhost"
     })
 
-    // All methods should throw
-    expect(() => adapter.getOAuthUrl("state", [])).toThrow("NOT_SUPPORTED")
+    // Methods throw BLOCKED (a real "Vinted Pro Integrations" API exists,
+    // but access requires an allowlisted Vinted Pro account — see
+    // VintedAdapter.ts header comment). Not "NOT_SUPPORTED": that
+    // implied no API exists at all, which is no longer accurate.
+    expect(() => adapter.getOAuthUrl("state", [])).toThrow("BLOCKED")
   })
 
   it("Depop adapter is blocked pending partner access", async () => {

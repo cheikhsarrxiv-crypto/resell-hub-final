@@ -31,6 +31,7 @@ vi.mock('@/lib/prisma', () => ({
     product: { findUnique: vi.fn() },
     inventory: { updateMany: vi.fn(), findUnique: vi.fn() },
     listing: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    marketplaceConnection: { findUnique: vi.fn() },
   },
 }))
 
@@ -114,6 +115,7 @@ function makeListing(overrides: Partial<any> = {}) {
     quantity: 5,
     status: 'active' as const,
     externalId: 'ext-listing-1',
+    sku: 'SKU-1',
     ...overrides,
   }
 }
@@ -195,6 +197,12 @@ describe('ListingsSyncService — uses the adapter and config matching the reque
     ;(prisma.syncLog.update as any).mockResolvedValue({})
     ;(prisma.listing.findFirst as any).mockResolvedValue(null)
     ;(prisma.listing.create as any).mockResolvedValue({ id: 'created-listing-1' })
+    ;(prisma.product.findUnique as any).mockImplementation(async ({ where }: any) => ({
+      id: `product-${where.workspaceId_sku.sku}`,
+      workspaceId: where.workspaceId_sku.workspaceId,
+      sku: where.workspaceId_sku.sku,
+    }))
+    ;(prisma.marketplaceConnection.findUnique as any).mockResolvedValue({ id: 'connection-1' })
 
     vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockImplementation(async function (
       this: any

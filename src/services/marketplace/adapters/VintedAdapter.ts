@@ -1,16 +1,33 @@
 /**
  * VintedAdapter
- * STATUS: NOT_SUPPORTED - DO NOT USE
- * 
- * API Capability Audit findings:
- * - NO OFFICIAL PUBLIC API
- * - Vinted explicitly prohibits third-party automation
- * - ToS violation to use reverse-engineered APIs
- * - CFAA compliance issues with reverse-engineering
- * - Account bans enforced for bot detection
- * 
- * Legal Risk: HIGH
- * This adapter is BLOCKED intentionally.
+ * STATUS: BLOCKED — a real official API exists, but access is
+ * allowlist-only (no self-service registration).
+ *
+ * Audit findings (updated — the previous "no official public API, legal
+ * risk HIGH" comment on this file was outdated):
+ *
+ * CONFIRMED REAL: "Vinted Pro Integrations" is a real, officially
+ * documented API (Items API for inventory sync, an Ontologies mapping
+ * endpoint, a Webhooks API for change notifications, and an Orders API
+ * that includes shipment labels).
+ *
+ * BLOCKED — not a technical or legal limitation, an access one:
+ * - Vinted Pro Integrations is available only to a limited, specifically
+ *   allowlisted set of Vinted Pro business accounts — there is no public
+ *   developer portal, no self-service API key/OAuth registration.
+ * - Without being allowlisted, there is no client_id, no way to obtain
+ *   the exact OAuth endpoints, and no confirmed request/response payload
+ *   schemas to implement against safely.
+ *
+ * DECISION: exactly like DepopAdapter.ts — rather than guess at endpoints
+ * or payload shapes we cannot confirm, or fall back to scraping/reverse
+ * engineering (which this project will not do, regardless of API
+ * availability), this adapter stays a documented placeholder until
+ * Vinted grants Pro Integrations access.
+ *
+ * NEXT STEP: apply for Vinted Pro Integrations access; once granted,
+ * implement this adapter for real following the same pattern as
+ * EbayAdapter.ts / EtsyAdapter.ts.
  */
 
 import MarketplaceAdapter from "@/services/marketplace/MarketplaceAdapter"
@@ -25,18 +42,17 @@ export class VintedAdapter extends MarketplaceAdapter {
 
   private throwNotSupported(): never {
     throw new Error(
-      `VintedAdapter: NOT_SUPPORTED - LEGAL BLOCKING
-      
-      Vinted does not provide an official public API.
-      Any integration violates Vinted's Terms of Service.
-      
-      Reverse-engineering or scraping:
-      - Violates Vinted ToS
-      - May violate CFAA (Computer Fraud and Abuse Act)
-      - Results in account suspension
-      - Creates legal liability
-      
-      Alternative: Monitor https://developers.vinted.com for future API releases.
+      `VintedAdapter: BLOCKED - requires allowlisted Vinted Pro Integrations access
+
+      Vinted does have a real official API ("Vinted Pro Integrations" —
+      items/inventory, orders with shipment labels, webhooks), but it is
+      only available to a limited, specifically allowlisted set of Vinted
+      Pro business accounts. There is no public self-service developer
+      portal or OAuth registration.
+
+      This adapter will not scrape or reverse-engineer Vinted regardless
+      of API availability. Next step: apply for Vinted Pro Integrations
+      access, then implement this adapter for real.
       `
     )
   }

@@ -2,8 +2,8 @@
  * ListingsSyncService
  * Sync listings from a marketplace into ResellHub. The adapter and its
  * client config are resolved generically per marketplace (AdapterFactory /
- * getMarketplaceAdapterConfig) — callers today only ever pass Marketplace.EBAY
- * (see the sync-listings cron), Etsy support here is not yet activated by any caller.
+ * getMarketplaceAdapterConfig) — the sync-listings cron dispatches both
+ * connected eBay and Etsy accounts here.
  */
 
 import { prisma } from '@/lib/prisma'
@@ -110,10 +110,44 @@ export class ListingsSyncService {
                 },
               })
             } else {
+              // A newly-discovered listing must resolve to a REAL Product
+              // by SKU (same primitive OrdersSyncService already uses) —
+              // never a fabricated id. eBay's getListings() returns the
+              // SKU as both id/externalId (its Inventory API is SKU-keyed);
+              // Etsy's getListings() does not currently surface a SKU at
+              // all (it lives in the listing's inventory sub-resource, not
+              // the base listing object), so every newly-discovered Etsy
+              // listing takes this same "no SKU" branch below until that
+              // adapter is extended separately.
+              if (!listing.sku) {
+                console.error(
+                  `[ListingsSyncService] Listing ${externalId} has no SKU — cannot resolve a Product, skipping import`
+                )
+                failed++
+                continue
+              }
+
+              const product = await prisma.product.findUnique({
+                where: { workspaceId_sku: { workspaceId, sku: listing.sku } },
+              })
+
+              if (!product) {
+                console.error(
+                  `[ListingsSyncService] No product found for SKU "${listing.sku}" (listing ${externalId}) in workspace ${workspaceId} — skipping import`
+                )
+                failed++
+                continue
+              }
+
+              const connection = await prisma.marketplaceConnection.findUnique({
+                where: { workspaceId_marketplaceId: { workspaceId, marketplaceId: marketplace } },
+              })
+
               await prisma.listing.create({
                 data: {
-                  productId: `ebay-${listing.id}`,
+                  productId: product.id,
                   workspaceId,
+                  marketplaceConnectionId: connection?.id,
                   title: listing.title,
                   description: listing.description || '',
                   price: listing.price,

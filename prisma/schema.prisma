@@ -375,7 +375,7 @@ model Listing {
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  deletedAt DateTime? // DB-level partial unique index on (productId, marketplaceConnectionId) WHERE "deletedAt" IS NULL exists in production (Listing_active_product_connection_key, added by the prevent_duplicate_listing_publication migration) — prevents two active publications of the same product on the same connection while still allowing republish after a real delist. Not expressible in Prisma's schema language (no partial/filtered unique index support), so undeclared here — do not remove without also dropping the DB index. See ListingService.createListing for the matching application-level reserve-then-publish guard.
 
   product    Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
   workspace  Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
