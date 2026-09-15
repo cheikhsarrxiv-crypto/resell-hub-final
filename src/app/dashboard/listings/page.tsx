@@ -6,15 +6,17 @@ import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCard
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { PageHeader } from '@/components/dashboard/PageHeader';
-import { DashboardLoadingState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness, parseApiListResponse, getListPageState } from '@/lib/dashboardListPageState';
 import Link from 'next/link';
 import { formatCurrency, formatDateTime } from '@/lib/utils';
 import { Plus, Eye, Trash2 } from 'lucide-react';
 
 export default function ListingsPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, loading: workspaceLoading, workspace, error: workspaceError } = useWorkspace();
   const [listings, setListings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [syncStatusFilter, setSyncStatusFilter] = useState<string>('');
 
   useEffect(() => {
@@ -28,18 +30,27 @@ export default function ListingsPage() {
       return;
     }
 
+    setLoading(true);
+    setApiError(null);
+
     try {
       const response = await fetch(`/api/listings?workspaceId=${workspaceId}`);
       const data = await response.json();
-      if (data.success) {
-        setListings(data.listings);
+      const result = parseApiListResponse<any>(response.ok, data, 'listings', 'Failed to load listings. Please try again.');
+      if (result.ok) {
+        setListings(result.items);
+      } else {
+        setApiError(result.error);
       }
     } catch (error) {
       console.error('Failed to fetch listings:', error);
+      setApiError(error instanceof Error ? error.message : 'Failed to load listings. Please try again.');
     } finally {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
 
   const visibleListings = syncStatusFilter
     ? listings.filter((l) => l.syncStatus === syncStatusFilter)
@@ -99,11 +110,28 @@ export default function ListingsPage() {
           <DashboardCardTitle>Your Listings ({visibleListings.length})</DashboardCardTitle>
         </DashboardCardHeader>
         <DashboardCardContent>
-          {loading ? (
-            <DashboardLoadingState message="Loading listings..." />
-          ) : visibleListings.length === 0 ? (
-            <DashboardEmptyState title="No listings yet" description="Create one to get started." />
-          ) : (
+          {(() => {
+            const pageState = getListPageState(workspaceReadiness, loading, apiError, visibleListings.length);
+
+            if (pageState === 'error') {
+              const isWorkspaceError = workspaceReadiness.status === 'error';
+              return (
+                <DashboardErrorState
+                  message={isWorkspaceError ? workspaceReadiness.message : apiError || 'Failed to load listings.'}
+                  onRetry={isWorkspaceError ? () => window.location.reload() : fetchListings}
+                />
+              );
+            }
+
+            if (pageState === 'loading') {
+              return <DashboardLoadingState message="Loading listings..." />;
+            }
+
+            if (pageState === 'empty') {
+              return <DashboardEmptyState title="No listings yet" description="Create one to get started." />;
+            }
+
+            return (
             <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
               <table className="w-full min-w-[720px]">
                 <thead>
@@ -147,7 +175,8 @@ export default function ListingsPage() {
                 </tbody>
               </table>
             </div>
-          )}
+            );
+          })()}
         </DashboardCardContent>
       </DashboardCard>
     </div>

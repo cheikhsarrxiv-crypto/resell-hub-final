@@ -6,15 +6,17 @@ import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCard
 import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
-import { DashboardLoadingState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness, parseApiListResponse, getListPageState } from '@/lib/dashboardListPageState';
 import { ShoppingCart, Eye } from 'lucide-react';
 import { formatCurrency, getStatusLabel, formatDateTime } from '@/lib/utils';
 import Link from 'next/link';
 
 export default function OrdersPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, loading: workspaceLoading, workspace, error: workspaceError } = useWorkspace();
   const [orders, setOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
 
   useEffect(() => {
@@ -28,21 +30,30 @@ export default function OrdersPage() {
       return;
     }
 
+    setLoading(true);
+    setApiError(null);
+
     try {
       let url = `/api/orders?workspaceId=${workspaceId}`;
       if (statusFilter) url += `&status=${statusFilter}`;
 
       const response = await fetch(url);
       const data = await response.json();
-      if (data.success) {
-        setOrders(data.orders);
+      const result = parseApiListResponse<any>(response.ok, data, 'orders', 'Failed to load orders. Please try again.');
+      if (result.ok) {
+        setOrders(result.items);
+      } else {
+        setApiError(result.error);
       }
     } catch (error) {
       console.error('Failed to fetch orders:', error);
+      setApiError(error instanceof Error ? error.message : 'Failed to load orders. Please try again.');
     } finally {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
 
   const statuses = ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
 
@@ -80,15 +91,34 @@ export default function OrdersPage() {
           <DashboardCardTitle>Orders</DashboardCardTitle>
         </DashboardCardHeader>
         <DashboardCardContent>
-          {loading ? (
-            <DashboardLoadingState message="Loading orders..." />
-          ) : orders.length === 0 ? (
-            <DashboardEmptyState
-              title="No orders found"
-              description="Orders will appear here once you make a sale"
-              icon={<ShoppingCart className="w-10 h-10 text-gray-700 mb-4" />}
-            />
-          ) : (
+          {(() => {
+            const pageState = getListPageState(workspaceReadiness, loading, apiError, orders.length);
+
+            if (pageState === 'error') {
+              const isWorkspaceError = workspaceReadiness.status === 'error';
+              return (
+                <DashboardErrorState
+                  message={isWorkspaceError ? workspaceReadiness.message : apiError || 'Failed to load orders.'}
+                  onRetry={isWorkspaceError ? () => window.location.reload() : fetchOrders}
+                />
+              );
+            }
+
+            if (pageState === 'loading') {
+              return <DashboardLoadingState message="Loading orders..." />;
+            }
+
+            if (pageState === 'empty') {
+              return (
+                <DashboardEmptyState
+                  title="No orders found"
+                  description="Orders will appear here once you make a sale"
+                  icon={<ShoppingCart className="w-10 h-10 text-gray-700 mb-4" />}
+                />
+              );
+            }
+
+            return (
             <div className="overflow-x-auto -mx-5 sm:-mx-6 px-5 sm:px-6">
               <table className="w-full text-sm">
                 <thead>
@@ -148,7 +178,8 @@ export default function OrdersPage() {
                 </tbody>
               </table>
             </div>
-          )}
+            );
+          })()}
         </DashboardCardContent>
       </DashboardCard>
     </div>
