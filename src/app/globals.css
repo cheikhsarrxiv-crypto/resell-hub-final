@@ -119,6 +119,19 @@ select:focus {
   }
 }
 
+.landing-float {
+  animation: landingFloat 6s ease-in-out infinite;
+}
+
+@keyframes landingFloat {
+  0%, 100% {
+    transform: rotate(-3deg) translateY(0);
+  }
+  50% {
+    transform: rotate(-3deg) translateY(-8px);
+  }
+}
+
 /* Hero scroll-linked fade/zoom, driven by --hero-p (see HeroStage.tsx) */
 .hero-fade {
   opacity: calc(1 - var(--hero-p, 0) * 1.3);
@@ -137,8 +150,10 @@ select:focus {
   }
 
   .landing-pulse,
-  .landing-drift {
+  .landing-drift,
+  .landing-float {
     animation: none;
+    transform: rotate(-3deg);
   }
 }
 

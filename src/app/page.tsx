@@ -1,7 +1,17 @@
 import Link from 'next/link';
-import { ArrowRight, Layers, ShoppingBag, RefreshCw, PackageCheck } from 'lucide-react';
+import {
+  ArrowRight,
+  Layers,
+  ShoppingBag,
+  RefreshCw,
+  PackageCheck,
+  Boxes,
+  Zap,
+  TrendingUp,
+  ShieldCheck,
+} from 'lucide-react';
 import { LandingNav } from '@/components/landing/LandingNav';
-import { HeroOrb } from '@/components/landing/HeroOrb';
+import { HeroDashboardVisual } from '@/components/landing/HeroDashboardVisual';
 import { HeroStage } from '@/components/landing/HeroStage';
 import { Reveal } from '@/components/landing/Reveal';
 import { displayFont as display, bodyFont as body } from '@/lib/fonts';
@@ -29,6 +39,29 @@ const HOW_IT_WORKS = [
   { n: '03', title: 'List', desc: 'Publish a listing to eBay or Etsy with your price and quantity, live in minutes.' },
   { n: '04', title: 'Sell', desc: 'Orders sync automatically as they come in, from every connected marketplace.' },
   { n: '05', title: 'Fulfill', desc: 'Send the order to your fulfillment partner in one click, then track cost, revenue and profit automatically.' },
+];
+
+const QUICK_BENEFITS = [
+  {
+    icon: Boxes,
+    title: 'Centralize everything',
+    desc: 'Products, stock and orders in one place.',
+  },
+  {
+    icon: Zap,
+    title: 'Automate',
+    desc: 'Listings and orders stay in sync across every connected marketplace.',
+  },
+  {
+    icon: TrendingUp,
+    title: 'Boost your sales',
+    desc: 'Real margin and analytics to guide sharper pricing.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Secure & reliable',
+    desc: 'Secure by design — your data stays protected.',
+  },
 ];
 
 const FEATURES = [
@@ -91,13 +124,10 @@ export default function Home() {
                 style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2.75rem, 7vw, 5.5rem)' }}
               >
                 <Reveal delayMs={80}>
-                  <span className="block text-white">Sell</span>
+                  <span className="block text-white">Sell everywhere.</span>
                 </Reveal>
-                <Reveal delayMs={160}>
-                  <span className="block text-gray-500">Everywhere.</span>
-                </Reveal>
-                <Reveal delayMs={280}>
-                  <span className="block text-white">From One Place.</span>
+                <Reveal delayMs={200}>
+                  <span className="block text-[#FF5A1F]">Run it from one place.</span>
                 </Reveal>
               </h1>
 
@@ -111,7 +141,7 @@ export default function Home() {
                 <div className="flex flex-wrap gap-3">
                   <Link
                     href="/signup"
-                    className="inline-flex items-center gap-2 bg-white text-black font-medium rounded-full px-6 py-3 text-sm hover:bg-gray-200 transition-colors"
+                    className="inline-flex items-center gap-2 bg-[#FF5A1F] text-white font-medium rounded-full px-6 py-3 text-sm hover:bg-[#e64d15] transition-colors"
                   >
                     Get Started <ArrowRight className="w-4 h-4" />
                   </Link>
@@ -125,9 +155,9 @@ export default function Home() {
               </Reveal>
             </div>
 
-            {/* 3D orb: bubble sphere + central mark + orbiting marketplace/process badges */}
-            <div className="hero-fade relative h-[420px] sm:h-[480px] lg:h-[560px]">
-              <HeroOrb />
+            {/* Illustrative dashboard composition + connected-marketplace badges */}
+            <div className="hero-fade relative h-[420px] sm:h-[480px] lg:h-[560px] flex items-center">
+              <HeroDashboardVisual />
             </div>
           </div>
 
@@ -152,6 +182,23 @@ export default function Home() {
             className="landing-drift"
           />
         </svg>
+      </section>
+
+      {/* ============ QUICK BENEFITS ============ */}
+      <section className="relative py-16 sm:py-20 px-6 border-t border-white/[0.06]">
+        <div className="max-w-5xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4">
+          {QUICK_BENEFITS.map((benefit, i) => (
+            <Reveal key={benefit.title} delayMs={i * 80}>
+              <div className="h-full rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+                <div className="w-9 h-9 rounded-lg bg-[#FF5A1F]/10 flex items-center justify-center mb-4">
+                  <benefit.icon className="w-4 h-4 text-[#FF5A1F]" />
+                </div>
+                <h3 className="font-semibold text-white text-sm mb-1.5">{benefit.title}</h3>
+                <p className="text-gray-400 text-xs leading-relaxed">{benefit.desc}</p>
+              </div>
+            </Reveal>
+          ))}
+        </div>
       </section>
 
       {/* ============ ONE PRODUCT. EVERY MARKETPLACE. ============ */}
