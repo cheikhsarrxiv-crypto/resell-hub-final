@@ -10,7 +10,7 @@ interface RevealProps {
 }
 
 /**
- * Scroll-triggered fade/translate/blur reveal. IntersectionObserver-based
+ * Scroll-triggered fade/translate reveal. IntersectionObserver-based
  * rather than a library (no animation dependency exists in this project
  * yet, and this covers every use on the landing page).
  */
@@ -50,10 +50,9 @@ export function Reveal({ children, className, delayMs = 0, as = 'div' }: RevealP
       className={className}
       style={{
         opacity: visible ? 1 : 0,
-        transform: visible ? 'translateY(0) scale(1)' : 'translateY(24px) scale(0.98)',
-        filter: visible ? 'blur(0px)' : 'blur(6px)',
-        transition: `opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1) ${delayMs}ms, transform 0.8s cubic-bezier(0.16, 1, 0.3, 1) ${delayMs}ms, filter 0.8s cubic-bezier(0.16, 1, 0.3, 1) ${delayMs}ms`,
-        willChange: 'opacity, transform, filter',
+        transform: visible ? 'translateY(0)' : 'translateY(10px)',
+        transition: `opacity 0.5s ease-out ${delayMs}ms, transform 0.5s ease-out ${delayMs}ms`,
+        willChange: 'opacity, transform',
       }}
     >
       {children}

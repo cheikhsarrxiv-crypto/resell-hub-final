@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { Sparkles, X, Send } from 'lucide-react';
 
 const WELCOME_MESSAGE =
-  "Hi! I'm ADKSY AI 👋\nI can help you understand ADKSY, manage your products, listings, orders and more.\n\nWhat can I help you with?";
+  'How can I help?\n\nAsk about your products, listings, orders, or anything else in ADKSY.';
 
 type CurrentPage = 'dashboard' | 'products' | 'listings' | 'orders' | 'settings' | 'integrations';
 
@@ -175,7 +175,7 @@ export function AiChatWidget() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask ADKSY AI anything..."
+                placeholder="Ask anything..."
                 rows={1}
                 disabled={sending}
                 className="flex-1 resize-none bg-white/[0.04] border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 disabled:opacity-50 max-h-32"

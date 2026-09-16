@@ -16,9 +16,11 @@ const componentSource = fs.readFileSync(
 );
 
 describe('AiChatWidget — welcome message', () => {
-  it('shows the exact specified greeting as the initial assistant message', () => {
-    expect(componentSource).toContain("I'm ADKSY AI");
-    expect(componentSource).toContain('What can I help you with?');
+  it('presents the assistant as an integrated feature, not a standalone chatbot', () => {
+    expect(componentSource).toContain('How can I help?');
+    // No "I'm an AI" framing and no emoji in the greeting.
+    expect(componentSource).not.toContain("I'm ADKSY AI");
+    expect(componentSource).not.toContain('👋');
   });
 });
 

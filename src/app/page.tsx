@@ -201,44 +201,6 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============ ONE PRODUCT. EVERY MARKETPLACE. ============ */}
-      <section id="product" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
-        <div className="max-w-4xl mx-auto text-center">
-          <Reveal>
-            <h2
-              className="font-bold leading-[1.05] mb-6"
-              style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
-            >
-              ONE PRODUCT.
-              <br />
-              <span className="text-gray-500">EVERY MARKETPLACE.</span>
-            </h2>
-          </Reveal>
-          <Reveal delayMs={120}>
-            <p className="text-gray-400 max-w-lg mx-auto mb-16">
-              Catalog an item once. Publish it wherever your buyers already are.
-            </p>
-          </Reveal>
-        </div>
-
-        <div className="max-w-3xl mx-auto flex flex-wrap items-center justify-center gap-3">
-          {MARKETPLACES.map((m, i) => (
-            <Reveal key={m.name} delayMs={i * 90}>
-              <div
-                className={`px-5 py-3 rounded-full border text-sm font-medium ${
-                  m.status === 'live'
-                    ? 'border-white/20 text-white bg-white/[0.04]'
-                    : 'border-white/10 text-gray-500 border-dashed'
-                }`}
-              >
-                {m.name}
-                {m.status === 'soon' && <span className="ml-2 text-[10px] text-gray-600">soon</span>}
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </section>
-
       {/* ============ HOW ADKSY WORKS ============ */}
       <section id="how-it-works" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
         <div className="max-w-5xl mx-auto">
@@ -279,9 +241,7 @@ export default function Home() {
               className="font-bold leading-[1.05] mb-6"
               style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
             >
-              YOUR RESELLING
-              <br />
-              <span className="text-gray-500">AUTOMATION ENGINE.</span>
+              The busywork, <span className="text-[#FF5A1F]">automated.</span>
             </h2>
           </Reveal>
           <Reveal delayMs={120}>
@@ -295,16 +255,12 @@ export default function Home() {
 
           <Reveal delayMs={220}>
             <div className="flex flex-wrap items-center justify-center gap-3">
-              {['Margin calculated', 'Listing synced', 'Order matched', 'Fulfillment routed'].map((label, i) => (
+              {['Margin calculated', 'Listing synced', 'Order matched', 'Fulfillment routed'].map((label) => (
                 <div
                   key={label}
                   className="flex items-center gap-2 bg-white/[0.03] border border-white/10 rounded-full px-4 py-2"
                 >
-                  <span
-                    className="w-1.5 h-1.5 rounded-full bg-[#FF5A1F] landing-pulse"
-                    style={{ animationDelay: `${i * 0.3}s` }}
-                    aria-hidden="true"
-                  />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#FF5A1F]" aria-hidden="true" />
                   <span className="text-xs text-gray-300">{label}</span>
                 </div>
               ))}
@@ -314,16 +270,14 @@ export default function Home() {
       </section>
 
       {/* ============ MARKETPLACES ============ */}
-      <section id="marketplaces" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
+      <section id="product" className="relative py-28 sm:py-36 px-6 border-t border-white/[0.06]">
         <div className="max-w-4xl mx-auto text-center mb-16">
           <Reveal>
             <h2
               className="font-bold leading-[1.05] mb-6"
               style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}
             >
-              ONE LISTING.
-              <br />
-              <span className="text-gray-500">EVERYWHERE.</span>
+              List once, sell <span className="text-[#FF5A1F]">everywhere.</span>
             </h2>
           </Reveal>
           <Reveal delayMs={120}>
@@ -476,15 +430,13 @@ export default function Home() {
             className="font-bold leading-[0.95] mb-10"
             style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(2.25rem, 7vw, 4.5rem)' }}
           >
-            READY TO
-            <br />
-            <span className="text-gray-500">SELL EVERYWHERE?</span>
+            Ready when you are.
           </h2>
         </Reveal>
         <Reveal delayMs={140}>
           <Link
             href="/signup"
-            className="inline-flex items-center gap-2 bg-white text-black font-medium rounded-full px-8 py-4 text-sm hover:bg-gray-200 transition-colors"
+            className="inline-flex items-center gap-2 bg-[#FF5A1F] text-white font-medium rounded-full px-8 py-4 text-sm hover:bg-[#e64d15] transition-colors"
           >
             Get Started <ArrowRight className="w-4 h-4" />
           </Link>
