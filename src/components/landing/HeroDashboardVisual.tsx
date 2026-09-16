@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import type { ComponentType, ReactNode, SVGProps } from 'react';
+import { EbayLogo, EtsyLogo, VintedLogo } from './MarketplaceLogos';
 
 /**
  * Marketplace automation status mirrors the real OAuth integrations in
@@ -6,12 +7,21 @@ import type { ReactNode } from 'react';
  * under src/services/marketplace/adapters/: eBay and Etsy are real, live
  * integrations; Depop and Vinted are not yet available. Keep "live" vs
  * "soon" honest here — this is marketing copy, not the real dashboard.
+ *
+ * Depop has no official logo asset vendored in this project yet (it isn't
+ * in simple-icons and this environment can't reach Depop's press kit), so
+ * it stays a text badge rather than risk an inaccurate/invented mark.
  */
-const MARKETPLACE_CHIPS: { label: string; status: 'live' | 'soon'; position: string }[] = [
-  { label: 'eBay', status: 'live', position: 'top-[2%] left-[0%] sm:left-[4%]' },
-  { label: 'Etsy', status: 'live', position: 'top-[8%] right-[0%] sm:right-[2%]' },
+const MARKETPLACE_CHIPS: {
+  label: string;
+  status: 'live' | 'soon';
+  position: string;
+  logo?: ComponentType<SVGProps<SVGSVGElement>>;
+}[] = [
+  { label: 'eBay', status: 'live', position: 'top-[2%] left-[0%] sm:left-[4%]', logo: EbayLogo },
+  { label: 'Etsy', status: 'live', position: 'top-[8%] right-[0%] sm:right-[2%]', logo: EtsyLogo },
   { label: 'Depop', status: 'soon', position: 'bottom-[16%] left-[0%]' },
-  { label: 'Vinted', status: 'soon', position: 'bottom-[4%] right-[2%] sm:right-[6%]' },
+  { label: 'Vinted', status: 'soon', position: 'bottom-[4%] right-[2%] sm:right-[6%]', logo: VintedLogo },
 ];
 
 const RECENT_ORDERS: { item: string; marketplace: string; price: string; status: 'shipped' | 'pending' }[] = [
@@ -20,7 +30,40 @@ const RECENT_ORDERS: { item: string; marketplace: string; price: string; status:
   { item: 'Denim jacket', marketplace: 'eBay', price: '€64', status: 'shipped' },
 ];
 
-function MarketplaceChip({ label, status, position }: { label: string; status: 'live' | 'soon'; position: string }) {
+function MarketplaceChip({
+  label,
+  status,
+  position,
+  logo: Logo,
+}: {
+  label: string;
+  status: 'live' | 'soon';
+  position: string;
+  logo?: ComponentType<SVGProps<SVGSVGElement>>;
+}) {
+  // Wordmark logos (eBay, Etsy) need real size to stay legible — a tile,
+  // not a text-height pill. Depop has no logo asset yet, so it keeps the
+  // original text pill rather than an empty or fake icon.
+  if (Logo) {
+    return (
+      <div
+        className={`absolute ${position} w-10 h-10 sm:w-12 sm:h-12 rounded-lg border flex items-center justify-center ${
+          status === 'live'
+            ? 'bg-[#0d0e11] border-white/15 text-gray-100'
+            : 'bg-[#0d0e11] border-white/10 border-dashed text-gray-500'
+        }`}
+      >
+        <Logo className="w-6 h-6 sm:w-7 sm:h-7" />
+        {status === 'live' && (
+          <span
+            className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-[#FF5A1F] ring-2 ring-[#0d0e11]"
+            aria-hidden="true"
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
       className={`absolute ${position} flex items-center gap-1.5 rounded-full border px-2.5 py-1 sm:px-3 sm:py-1.5 whitespace-nowrap ${
@@ -123,7 +166,13 @@ export function HeroDashboardVisual(): ReactNode {
       </div>
 
       {MARKETPLACE_CHIPS.map((chip) => (
-        <MarketplaceChip key={chip.label} label={chip.label} status={chip.status} position={chip.position} />
+        <MarketplaceChip
+          key={chip.label}
+          label={chip.label}
+          status={chip.status}
+          position={chip.position}
+          logo={chip.logo}
+        />
       ))}
     </div>
   );
