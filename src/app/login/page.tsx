@@ -9,8 +9,8 @@ import { Button } from '@/components/UI/Button';
 export default function LoginPage() {
   const router = useRouter();
   const [formData, setFormData] = useState({
-    email: 'demo@reselling.local',
-    password: 'demo1234',
+    email: '',
+    password: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -121,16 +121,6 @@ export default function LoginPage() {
               <Link href="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
                 Sign up
               </Link>
-            </p>
-          </div>
-
-          <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-            <p className="text-xs text-gray-600">
-              <strong>Demo credentials:</strong>
-              <br />
-              Email: demo@reselling.local
-              <br />
-              Password: demo1234
             </p>
           </div>
         </div>

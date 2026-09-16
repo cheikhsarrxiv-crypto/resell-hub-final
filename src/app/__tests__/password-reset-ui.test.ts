@@ -27,9 +27,8 @@ describe('/login — forgot-password link added, no regression', () => {
     expect(loginSource).toContain('router.push(\'/dashboard\')');
   });
 
-  it('still renders the demo-credentials hint box (not removed)', () => {
-    expect(loginSource).toContain('Demo credentials:');
-    expect(loginSource).toContain('demo@reselling.local');
+  it('does not publicly display the demo-credentials hint box', () => {
+    expect(loginSource).not.toContain('Demo credentials:');
   });
 
   it('still offers the signup link (not removed)', () => {
