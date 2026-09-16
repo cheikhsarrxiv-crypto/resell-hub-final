@@ -6,6 +6,7 @@ import { MarketplaceConnectionService } from './marketplace/MarketplaceConnectio
 import { SubscriptionService } from './SubscriptionService';
 import { Marketplace, ErrorType } from '@/types/marketplace';
 import MarketplaceAdapter from './marketplace/MarketplaceAdapter';
+import { buildEtsyListingRequirements } from './marketplace/EtsyListingMapper';
 
 interface MarketplaceOAuthConfig {
   clientId: string;
@@ -266,6 +267,18 @@ export class ListingService {
           // Get adapter with the workspace's real OAuth access token loaded
           const adapter = await getAuthenticatedAdapter(workspaceId, connection.marketplace.name);
 
+          // Etsy requires who_made/when_made/taxonomy_id, resolved from
+          // real product data — this throws (caught below) rather than
+          // publishing with a generic/fabricated category if the product
+          // isn't ready for Etsy yet. No other marketplace is affected.
+          const etsyRequirements =
+            connection.marketplace.name.toLowerCase() === 'etsy'
+              ? buildEtsyListingRequirements({
+                  etsyTaxonomyId: product.etsyTaxonomyId,
+                  etsyWhenMade: product.etsyWhenMade,
+                })
+              : undefined;
+
           // Publish to marketplace
           const listingResponse = await adapter.createListing({
             title: data.title,
@@ -275,6 +288,15 @@ export class ListingService {
             sku: product.sku,
             images: product.images.map((img: any) => img.url),
             category: product.category || undefined,
+            ...(etsyRequirements
+              ? {
+                  etsy: {
+                    whoMade: etsyRequirements.whoMade,
+                    whenMade: etsyRequirements.whenMade,
+                    taxonomyId: etsyRequirements.taxonomyId,
+                  },
+                }
+              : {}),
           });
 
           // Finalize the reservation now that the marketplace confirms it
@@ -299,7 +321,13 @@ export class ListingService {
           // exception message or a stack trace — only known, safe phrasing.
           const rawMessage = error instanceof Error ? error.message : '';
           let syncError = `Couldn't publish to ${connection.marketplace.displayName}. Please try again.`;
-          if (/not connected/i.test(rawMessage)) {
+          if (/no Etsy category/i.test(rawMessage)) {
+            syncError = 'This product has no Etsy category set. Add one in the product\'s Etsy details before publishing to Etsy.';
+          } else if (/no Etsy "when made" era/i.test(rawMessage)) {
+            syncError = 'This product has no Etsy "when made" era set. Add one in the product\'s Etsy details before publishing to Etsy.';
+          } else if (/not a value Etsy's when_made currently accepts/i.test(rawMessage)) {
+            syncError = 'This product\'s Etsy "when made" era is no longer valid. Update it in the product\'s Etsy details.';
+          } else if (/not connected/i.test(rawMessage)) {
             syncError = `${connection.marketplace.displayName} isn't connected. Reconnect it in Settings and try again.`;
           } else if (/unauthorized|token|expired/i.test(rawMessage)) {
             syncError = `Your ${connection.marketplace.displayName} connection has expired. Reconnect it in Settings and try again.`;

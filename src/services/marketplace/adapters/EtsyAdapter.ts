@@ -18,9 +18,9 @@
  *   with other adapters but has no effect here; this is intentional, not
  *   an oversight).
  * - Listings require Etsy-specific taxonomy fields (who_made, when_made,
- *   taxonomy_id) that ADKSY's current product model does not collect.
- *   Documented, sane defaults are used below (see createListing) rather
- *   than fabricating data — flagged clearly as a known limitation.
+ *   taxonomy_id), resolved from real Product data by
+ *   EtsyListingMapper.buildEtsyListingRequirements and passed in via
+ *   MarketplaceListingInput.etsy — this adapter no longer defaults them.
  */
 
 import MarketplaceAdapter from '@/services/marketplace/MarketplaceAdapter'
@@ -231,13 +231,20 @@ export class EtsyAdapter extends MarketplaceAdapter {
    * REAL: Create a new listing (draft) then publish it
    * https://developer.etsy.com/documentation/tutorials/listings
    *
-   * KNOWN LIMITATION: Etsy requires who_made, when_made and taxonomy_id
-   * on every listing (it's a handmade/vintage/craft marketplace). ADKSY's
-   * product model does not currently collect these. Documented defaults
-   * are used below (generic "reseller" values) — real production use
-   * would need these fields added to the product/listing form.
+   * who_made/when_made/taxonomy_id come from the caller (see
+   * EtsyListingMapper.ts / ListingService), derived from real product
+   * data. This adapter no longer defaults them — a missing `listing.etsy`
+   * is a caller bug (ListingService is expected to have already blocked
+   * the publish before reaching here), not something to guess at.
    */
   async createListing(listing: MarketplaceListingInput): Promise<MarketplaceListing> {
+    if (!listing.etsy) {
+      throw new Error(
+        'EtsyAdapter.createListing: missing required Etsy listing fields (who_made/when_made/taxonomy_id). ' +
+          'Callers must resolve these via EtsyListingMapper.buildEtsyListingRequirements before calling createListing — this adapter does not default them.'
+      )
+    }
+
     const shopId = await this.requireShopId()
 
     try {
@@ -246,11 +253,9 @@ export class EtsyAdapter extends MarketplaceAdapter {
         title: listing.title,
         description: listing.description || '',
         price: listing.price,
-        // --- Required by Etsy, not yet modeled in ADKSY's product form ---
-        who_made: 'someone_else', // default: reseller, did not make it
-        when_made: 'made_to_order', // placeholder default — see limitation note above
-        taxonomy_id: 1, // placeholder top-level category — needs real taxonomy mapping
-        // -------------------------------------------------------------
+        who_made: listing.etsy.whoMade,
+        when_made: listing.etsy.whenMade,
+        taxonomy_id: listing.etsy.taxonomyId,
         sku: listing.sku ? [listing.sku] : undefined,
       }
 

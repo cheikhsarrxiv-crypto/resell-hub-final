@@ -20,6 +20,11 @@ interface Product {
   // Inventory.available) — `quantity` above is frozen at creation/last
   // manual edit and never reflects a sale.
   inventories?: Array<{ available: number }>;
+  // Etsy-only — see EtsyListingMapper.ts. Used here only to warn/block
+  // before submitting, not to duplicate ListingService's own server-side
+  // block (see ListingService.createListing's Etsy requirements check).
+  etsyTaxonomyId?: number | null;
+  etsyWhenMade?: string | null;
 }
 
 // Falls back to product.quantity only if a product somehow has no
@@ -100,6 +105,16 @@ function NewListingForm() {
 
   const connectedMarketplaces = connections.filter((c) => c.status === 'connected');
 
+  const selectedProduct = products.find((p) => p.id === productId);
+  const etsySelected = connectedMarketplaces.some(
+    (c) => selectedMarketplaceIds.includes(c.marketplaceId) && c.marketplace.name.toLowerCase() === 'etsy'
+  );
+  // Mirrors ListingService.createListing's own server-side block (see
+  // EtsyListingMapper.buildEtsyListingRequirements) — this is a UX
+  // shortcut to warn before submitting, not a replacement for it.
+  const etsyMissingCategory = etsySelected && !!selectedProduct && !selectedProduct.etsyTaxonomyId;
+  const etsyMissingWhenMade = etsySelected && !!selectedProduct && !selectedProduct.etsyWhenMade;
+
   const handleProductChange = (id: string) => {
     setProductId(id);
     const product = products.find((p) => p.id === id);
@@ -131,6 +146,10 @@ function NewListingForm() {
     }
     if (selectedMarketplaceIds.length === 0) {
       setError('Please select at least one marketplace');
+      return;
+    }
+    if (etsyMissingCategory || etsyMissingWhenMade) {
+      setError('This product is missing Etsy details (category and/or when-made era). Add them on the product page before publishing to Etsy.');
       return;
     }
     if (description.trim().length < 20) {
@@ -401,6 +420,24 @@ function NewListingForm() {
                     ))}
                   </div>
                 )}
+                {(etsyMissingCategory || etsyMissingWhenMade) && (
+                  <div className="mt-2 flex items-start gap-2 bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded-lg text-sm">
+                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <span>
+                      This product is missing{' '}
+                      {etsyMissingCategory && etsyMissingWhenMade
+                        ? 'an Etsy category and a "when made" era'
+                        : etsyMissingCategory
+                        ? 'an Etsy category'
+                        : 'a "when made" era'}
+                      . Etsy requires both for every listing.{' '}
+                      <Link href={`/dashboard/products/${productId}/edit`} className="underline font-medium">
+                        Add it on the product page
+                      </Link>{' '}
+                      before publishing to Etsy.
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Title */}
@@ -474,7 +511,7 @@ function NewListingForm() {
                 <Button
                   variant="primary"
                   type="submit"
-                  disabled={submitting || connectedMarketplaces.length === 0}
+                  disabled={submitting || connectedMarketplaces.length === 0 || etsyMissingCategory || etsyMissingWhenMade}
                   className="flex-1"
                 >
                   {submitting ? 'Publishing...' : 'Publish Listing'}

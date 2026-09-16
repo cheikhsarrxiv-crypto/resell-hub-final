@@ -1,12 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWorkspace } from '@/hooks';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
 import { Button } from '@/components/UI/Button';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
+import { ETSY_WHEN_MADE_OPTIONS } from '@/services/marketplace/EtsyListingMapper';
+
+interface EtsyTaxonomyNode {
+  id: number;
+  fullPath: string;
+}
 
 export default function NewProductPage() {
   const router = useRouter();
@@ -20,7 +26,22 @@ export default function NewProductPage() {
     sellingPrice: '',
     quantity: '',
     category: '',
+    etsyTaxonomyId: '',
+    etsyWhenMade: '',
   });
+  const [etsyTaxonomyNodes, setEtsyTaxonomyNodes] = useState<EtsyTaxonomyNode[]>([]);
+
+  useEffect(() => {
+    fetch('/api/etsy/taxonomy')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) setEtsyTaxonomyNodes(data.nodes);
+      })
+      .catch(() => {
+        // Non-fatal: the product can still be created and edited later
+        // once the Etsy category list is available.
+      });
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,7 +64,6 @@ export default function NewProductPage() {
       setFormError('Quantity must be a valid number.');
       return;
     }
-
     setFormError(null);
     setLoading(true);
     try {
@@ -57,6 +77,8 @@ export default function NewProductPage() {
           sellingPrice: parseFloat(formData.sellingPrice),
           quantity: parseInt(formData.quantity),
           category: formData.category,
+          etsyTaxonomyId: formData.etsyTaxonomyId ? parseInt(formData.etsyTaxonomyId) : undefined,
+          etsyWhenMade: formData.etsyWhenMade || undefined,
           // SKU will be auto-generated on server
         }),
       });
@@ -216,6 +238,53 @@ export default function NewProductPage() {
                   <option value="home">Home</option>
                   <option value="other">Other</option>
                 </select>
+              </div>
+            </div>
+
+            <div className="border-t border-gray-200 pt-6">
+              <h3 className="text-sm font-semibold text-gray-900 mb-1">Etsy details</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Only needed if you plan to publish this product to Etsy. Etsy requires a real
+                category and a "when made" era for every listing — leave these blank if you only
+                sell on eBay.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Etsy category
+                  </label>
+                  <select
+                    value={formData.etsyTaxonomyId}
+                    onChange={(e) => setFormData({ ...formData, etsyTaxonomyId: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">
+                      {etsyTaxonomyNodes.length === 0 ? 'No Etsy categories loaded yet' : 'Select Etsy category'}
+                    </option>
+                    {etsyTaxonomyNodes.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.fullPath}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    When was it made?
+                  </label>
+                  <select
+                    value={formData.etsyWhenMade}
+                    onChange={(e) => setFormData({ ...formData, etsyWhenMade: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">Select when made</option>
+                    {ETSY_WHEN_MADE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 

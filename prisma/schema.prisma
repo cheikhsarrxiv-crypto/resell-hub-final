@@ -178,6 +178,20 @@ model Product {
   // EtsyAdapter). Never used to replace or derive Product.sku.
   supplierSku String?
 
+  // Etsy-specific listing metadata — nullable, unrelated to eBay/Depop/
+  // Vinted. Etsy's createDraftListing requires a real taxonomy_id (there
+  // is no "generic" fallback ID) and a when_made era bucket on every
+  // listing (verified against Etsy's own request schema — see
+  // EtsyListingMapper.ts). etsyWhenMade stores the seller's own bucket
+  // choice directly (one of EtsyListingMapper.ETSY_WHEN_MADE_OPTIONS) —
+  // deliberately not a numeric year ADKSY would have to convert, since
+  // that conversion has no honest answer for years outside the verified
+  // enum. Both fields must be set before a product can be published to
+  // Etsy; ListingService blocks the Etsy publish otherwise rather than
+  // guessing.
+  etsyTaxonomyId Int? // references EtsyTaxonomyNode.id (no FK: the taxonomy table is a reference cache, not app data)
+  etsyWhenMade   String? // one of Etsy's real when_made enum values, chosen by the seller — never inferred
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
@@ -190,6 +204,24 @@ model Product {
 
   @@unique([workspaceId, sku])
   @@index([workspaceId])
+}
+
+// Read-only cache of Etsy's public seller-taxonomy tree
+// (GET /v3/application/seller-taxonomy/nodes). Etsy's taxonomy changes
+// rarely, so this is populated by a one-off script
+// (scripts/fetch-etsy-taxonomy.ts) run with real Etsy API credentials,
+// not fetched live on every product save. `id` is Etsy's own numeric
+// taxonomy node ID, not an ADKSY-generated one — Product.etsyTaxonomyId
+// references it by value, with no DB-level FK (this table can be empty or
+// stale without breaking unrelated app data).
+model EtsyTaxonomyNode {
+  id       Int     @id
+  name     String
+  level    Int
+  parentId Int?
+  fullPath String // human-readable breadcrumb, e.g. "Clothing > Women's Clothing > Dresses" — computed at seed time, not an Etsy API field
+
+  @@index([parentId])
 }
 
 model ProductImage {

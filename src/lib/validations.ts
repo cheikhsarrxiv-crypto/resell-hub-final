@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { ETSY_WHEN_MADE_OPTIONS } from '@/services/marketplace/EtsyListingMapper';
+
+const ETSY_WHEN_MADE_VALUES = ETSY_WHEN_MADE_OPTIONS.map((o) => o.value) as [string, ...string[]];
 
 // Auth
 export const signUpSchema = z.object({
@@ -57,6 +60,11 @@ export const createProductSchema = z.object({
   fulfillmentCost: z.number().min(0).default(0),
   quantity: z.number().min(1, 'Quantity must be at least 1').default(1),
   location: z.string().optional(),
+  // Etsy-only, both optional: required only at Etsy-publish time (enforced
+  // by EtsyListingMapper/ListingService, not here), so a product created
+  // for eBay only is never blocked by these.
+  etsyTaxonomyId: z.number().int().positive().optional(),
+  etsyWhenMade: z.enum(ETSY_WHEN_MADE_VALUES).optional(),
 });
 
 export const updateProductSchema = createProductSchema.partial();

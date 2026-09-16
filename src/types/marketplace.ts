@@ -155,6 +155,13 @@ export interface MarketplaceListingInput {
   category?: string;
   sku?: string;
   images?: string[];
+  // Etsy-only fields (see EtsyListingMapper.ts). Ignored by every other
+  // adapter — eBay/Depop/Vinted never read these.
+  etsy?: {
+    whoMade: string;
+    whenMade: string;
+    taxonomyId: number;
+  };
 }
 
 export interface MarketplaceOrder {
