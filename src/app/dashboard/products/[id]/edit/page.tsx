@@ -18,6 +18,7 @@ export default function EditProductPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -69,22 +70,23 @@ export default function EditProductPage() {
     if (!workspaceId) return;
 
     if (!formData.title.trim()) {
-      alert('Product title is required');
+      setFormError('Product title is required.');
       return;
     }
     if (!formData.purchasePrice || isNaN(parseFloat(formData.purchasePrice))) {
-      alert('Purchase price must be a valid number');
+      setFormError('Purchase price must be a valid number.');
       return;
     }
     if (!formData.sellingPrice || isNaN(parseFloat(formData.sellingPrice))) {
-      alert('Selling price must be a valid number');
+      setFormError('Selling price must be a valid number.');
       return;
     }
     if (!formData.quantity || isNaN(parseInt(formData.quantity))) {
-      alert('Quantity must be a valid number');
+      setFormError('Quantity must be a valid number.');
       return;
     }
 
+    setFormError(null);
     setSaving(true);
     try {
       const response = await fetch(`/api/products/${productId}?workspaceId=${workspaceId}`, {
@@ -104,11 +106,11 @@ export default function EditProductPage() {
         router.push(`/dashboard/products/${productId}`);
       } else {
         const err = await response.json();
-        alert(`Failed to update product: ${err.error || 'Unknown error'}`);
+        setFormError(err.error || 'Failed to update product.');
       }
     } catch (err) {
       console.error('Error:', err);
-      alert('An error occurred while updating the product');
+      setFormError('An error occurred while updating the product.');
     } finally {
       setSaving(false);
     }
@@ -236,6 +238,8 @@ export default function EditProductPage() {
                 </select>
               </div>
             </div>
+
+            {formError && <p className="text-sm text-red-600">{formError}</p>}
 
             <div className="flex gap-4 pt-6 flex-col-reverse sm:flex-row">
               <Link href={`/dashboard/products/${productId}`} className="flex-1">

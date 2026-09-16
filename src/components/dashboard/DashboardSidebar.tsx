@@ -60,14 +60,13 @@ export function DashboardSidebar({ navigation, pathname, isAdmin = false, onNavi
               href={item.href}
               onClick={onNavigate}
               className={cn(
-                'relative flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-xl transition-colors',
+                'relative flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60',
                 isActive ? 'bg-white/[0.06] text-white' : 'text-gray-400 hover:text-white hover:bg-white/[0.03]'
               )}
             >
               {isActive && (
                 <span
                   className="absolute left-0 top-1/2 -translate-y-1/2 h-4 w-[3px] rounded-full bg-[#FF5A1F]"
-                  style={{ boxShadow: '0 0 12px 1px rgba(255,90,31,0.6)' }}
                   aria-hidden="true"
                 />
               )}

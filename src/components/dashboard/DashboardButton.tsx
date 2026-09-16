@@ -23,7 +23,8 @@ export function DashboardButton({
   children,
   ...props
 }: DashboardButtonProps) {
-  const baseClasses = 'font-medium rounded-full transition-colors inline-flex items-center justify-center gap-2';
+  const baseClasses =
+    'font-medium rounded-lg transition-colors inline-flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60';
 
   const variantClasses = {
     primary: 'bg-[#FF5A1F] text-white hover:bg-[#e64f18] disabled:bg-[#FF5A1F]/40',

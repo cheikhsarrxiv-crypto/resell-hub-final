@@ -12,6 +12,7 @@ export default function NewProductPage() {
   const router = useRouter();
   const { workspaceId, isReady } = useWorkspace();
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     title: '',
     description: '',
@@ -27,22 +28,23 @@ export default function NewProductPage() {
 
     // Validation
     if (!formData.title.trim()) {
-      alert('Product title is required');
+      setFormError('Product title is required.');
       return;
     }
     if (!formData.purchasePrice || isNaN(parseFloat(formData.purchasePrice))) {
-      alert('Purchase price must be a valid number');
+      setFormError('Purchase price must be a valid number.');
       return;
     }
     if (!formData.sellingPrice || isNaN(parseFloat(formData.sellingPrice))) {
-      alert('Selling price must be a valid number');
+      setFormError('Selling price must be a valid number.');
       return;
     }
     if (!formData.quantity || isNaN(parseInt(formData.quantity))) {
-      alert('Quantity must be a valid number');
+      setFormError('Quantity must be a valid number.');
       return;
     }
 
+    setFormError(null);
     setLoading(true);
     try {
       const response = await fetch(`/api/products?workspaceId=${workspaceId}`, {
@@ -65,11 +67,11 @@ export default function NewProductPage() {
         router.push(`/dashboard/products/${data.product.id}/images`);
       } else {
         const error = await response.json();
-        alert(`Failed to create product: ${error.error || 'Unknown error'}`);
+        setFormError(error.error || 'Failed to create product.');
       }
     } catch (error) {
       console.error('Error:', error);
-      alert('An error occurred while creating the product');
+      setFormError('An error occurred while creating the product.');
     } finally {
       setLoading(false);
     }
@@ -216,6 +218,8 @@ export default function NewProductPage() {
                 </select>
               </div>
             </div>
+
+            {formError && <p className="text-sm text-red-600">{formError}</p>}
 
             <div className="flex gap-4 pt-6 flex-col-reverse sm:flex-row">
               <Link href="/dashboard/products" className="flex-1">

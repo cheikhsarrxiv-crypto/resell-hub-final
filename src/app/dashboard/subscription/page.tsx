@@ -54,11 +54,15 @@ export default function SubscriptionPage() {
   };
 
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   const startCheckout = async (planId: string) => {
     if (!workspaceId) return;
 
     setCheckoutLoading(planId);
+    setCheckoutNotice(null);
+    setCheckoutError(null);
     try {
       const response = await fetch(`/api/stripe/checkout?workspaceId=${workspaceId}`, {
         method: 'POST',
@@ -73,14 +77,14 @@ export default function SubscriptionPage() {
       } else if (data.alreadySubscribed) {
         // Already have an active subscription — changing plans happens in
         // the billing portal, not through a second Checkout Session.
-        alert('You already have an active subscription. Opening the billing portal to change your plan.');
+        setCheckoutNotice('You already have an active subscription. Redirecting you to the billing portal to change your plan.');
         await openPortal();
       } else {
-        alert('Failed to start checkout. Make sure Stripe is configured.');
+        setCheckoutError("We couldn't start checkout. Please try again in a moment.");
       }
     } catch (error) {
       console.error('Checkout error:', error);
-      alert('An error occurred during checkout');
+      setCheckoutError("We couldn't start checkout. Please try again in a moment.");
     } finally {
       setCheckoutLoading(null);
     }
@@ -100,7 +104,7 @@ export default function SubscriptionPage() {
       }
     } catch (error) {
       console.error('Portal error:', error);
-      alert('Failed to open billing portal');
+      setCheckoutError("We couldn't open the billing portal. Please try again in a moment.");
     }
   };
 
@@ -109,8 +113,20 @@ export default function SubscriptionPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader title="Subscription" description="Manage your plan and billing" />
+
+      {checkoutNotice && (
+        <div className="bg-white/[0.04] border border-white/10 text-gray-300 px-4 py-3 rounded-lg text-sm">
+          {checkoutNotice}
+        </div>
+      )}
+
+      {checkoutError && (
+        <div className="bg-red-500/10 border border-red-500/20 text-red-300 px-4 py-3 rounded-lg text-sm">
+          {checkoutError}
+        </div>
+      )}
 
       {/* Current Plan */}
       {subscription && (
@@ -211,23 +227,6 @@ export default function SubscriptionPage() {
           })}
         </div>
       </div>
-
-      {/* Note */}
-      <DashboardCard className="bg-amber-500/[0.04] border-amber-500/20">
-        <DashboardCardHeader>
-          <DashboardCardTitle className="text-amber-300">Stripe Integration</DashboardCardTitle>
-        </DashboardCardHeader>
-        <DashboardCardContent className="space-y-3">
-          <p className="text-amber-200/80 text-sm">✅ Stripe integration is now available in Phase 2.5!</p>
-          <p className="text-amber-200/80 text-sm">To enable real payments, configure your Stripe keys in .env:</p>
-          <ul className="text-amber-200/80 text-xs space-y-1 ml-4 list-disc">
-            <li>NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY</li>
-            <li>STRIPE_SECRET_KEY</li>
-            <li>STRIPE_WEBHOOK_SECRET</li>
-          </ul>
-          <p className="text-amber-200/80 text-sm">Without these, checkout will show an error message.</p>
-        </DashboardCardContent>
-      </DashboardCard>
     </div>
   );
 }

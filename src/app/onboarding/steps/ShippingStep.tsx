@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button } from '@/components/UI/Button';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
 
 interface ShippingStepProps {
   data: any;
@@ -9,6 +9,7 @@ interface ShippingStepProps {
 
 export default function ShippingStep({ data, onNext, saving }: ShippingStepProps) {
   const [shippingMode, setShippingMode] = useState(data?.shippingMode || '');
+  const [formError, setFormError] = useState<string | null>(null);
 
   const modes = [
     { id: 'manual', title: 'Manual Shipping', description: 'I handle shipping myself' },
@@ -18,16 +19,17 @@ export default function ShippingStep({ data, onNext, saving }: ShippingStepProps
 
   const handleNext = () => {
     if (!shippingMode) {
-      alert('Please select a shipping mode');
+      setFormError('Please select a shipping mode.');
       return;
     }
+    setFormError(null);
     onNext({ shippingMode });
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-gray-600 mb-6">
+        <p className="text-gray-400 mb-6">
           How do you want to handle order fulfillment?
         </p>
       </div>
@@ -36,10 +38,10 @@ export default function ShippingStep({ data, onNext, saving }: ShippingStepProps
         {modes.map((mode) => (
           <label
             key={mode.id}
-            className={`flex items-center gap-4 p-4 border-2 rounded-lg cursor-pointer transition-all ${
+            className={`flex items-center gap-4 p-4 border rounded-lg cursor-pointer transition-colors ${
               shippingMode === mode.id
-                ? 'border-blue-600 bg-blue-50'
-                : 'border-gray-200 hover:border-gray-300'
+                ? 'border-[#FF5A1F]/50 bg-[#FF5A1F]/[0.06]'
+                : 'border-white/10 hover:border-white/20'
             }`}
           >
             <input
@@ -48,24 +50,26 @@ export default function ShippingStep({ data, onNext, saving }: ShippingStepProps
               value={mode.id}
               checked={shippingMode === mode.id}
               onChange={(e) => setShippingMode(e.target.value)}
-              className="w-5 h-5 text-blue-600"
+              className="w-4 h-4 accent-[#FF5A1F]"
             />
             <div>
-              <p className="font-medium text-gray-900">{mode.title}</p>
-              <p className="text-sm text-gray-600">{mode.description}</p>
+              <p className="font-medium text-white">{mode.title}</p>
+              <p className="text-sm text-gray-500">{mode.description}</p>
             </div>
           </label>
         ))}
       </div>
 
+      {formError && <p className="text-sm text-red-400">{formError}</p>}
+
       <div className="flex justify-end gap-4">
-        <Button
+        <DashboardButton
           variant="primary"
           onClick={handleNext}
           disabled={saving || !shippingMode}
         >
           {saving ? 'Saving...' : 'Next'}
-        </Button>
+        </DashboardButton>
       </div>
     </div>
   );

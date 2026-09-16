@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button } from '@/components/UI/Button';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
 
 interface ImportStepProps {
   data: any;
@@ -9,6 +9,7 @@ interface ImportStepProps {
 
 export default function ImportStep({ data, onNext, saving }: ImportStepProps) {
   const [importMethod, setImportMethod] = useState(data?.importMethod || '');
+  const [formError, setFormError] = useState<string | null>(null);
 
   const methods = [
     { id: 'manual', title: 'Manual Input', description: 'Add products one by one' },
@@ -18,16 +19,17 @@ export default function ImportStep({ data, onNext, saving }: ImportStepProps) {
 
   const handleNext = () => {
     if (!importMethod) {
-      alert('Please select an import method');
+      setFormError('Please select an import method.');
       return;
     }
+    setFormError(null);
     onNext({ importMethod });
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <p className="text-gray-600 mb-6">
+        <p className="text-gray-400 mb-6">
           How would you like to import your products?
         </p>
       </div>
@@ -36,10 +38,10 @@ export default function ImportStep({ data, onNext, saving }: ImportStepProps) {
         {methods.map((method) => (
           <label
             key={method.id}
-            className={`flex items-center gap-4 p-4 border-2 rounded-lg cursor-pointer transition-all ${
+            className={`flex items-center gap-4 p-4 border rounded-lg cursor-pointer transition-colors ${
               importMethod === method.id
-                ? 'border-blue-600 bg-blue-50'
-                : 'border-gray-200 hover:border-gray-300'
+                ? 'border-[#FF5A1F]/50 bg-[#FF5A1F]/[0.06]'
+                : 'border-white/10 hover:border-white/20'
             }`}
           >
             <input
@@ -48,24 +50,26 @@ export default function ImportStep({ data, onNext, saving }: ImportStepProps) {
               value={method.id}
               checked={importMethod === method.id}
               onChange={(e) => setImportMethod(e.target.value)}
-              className="w-5 h-5 text-blue-600"
+              className="w-4 h-4 accent-[#FF5A1F]"
             />
             <div>
-              <p className="font-medium text-gray-900">{method.title}</p>
-              <p className="text-sm text-gray-600">{method.description}</p>
+              <p className="font-medium text-white">{method.title}</p>
+              <p className="text-sm text-gray-500">{method.description}</p>
             </div>
           </label>
         ))}
       </div>
 
+      {formError && <p className="text-sm text-red-400">{formError}</p>}
+
       <div className="flex justify-end gap-4">
-        <Button
+        <DashboardButton
           variant="primary"
           onClick={handleNext}
           disabled={saving || !importMethod}
         >
           {saving ? 'Saving...' : 'Next'}
-        </Button>
+        </DashboardButton>
       </div>
     </div>
   );

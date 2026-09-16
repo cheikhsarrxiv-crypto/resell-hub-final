@@ -3,8 +3,13 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useWorkspace } from '@/hooks';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
-import { Button } from '@/components/UI/Button';
+import {
+  DashboardCard,
+  DashboardCardContent,
+  DashboardCardHeader,
+  DashboardCardTitle,
+} from '@/components/dashboard/DashboardCard';
+import { DashboardButton } from '@/components/dashboard/DashboardButton';
 
 // Import steps
 import WelcomeStep from './steps/WelcomeStep';
@@ -101,11 +106,17 @@ export default function OnboardingPage() {
   };
 
   if (loading) {
-    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0a0a0c] text-gray-400 text-sm">Loading...</div>
+    );
   }
 
   if (!onboarding) {
-    return <div className="min-h-screen flex items-center justify-center">Error loading onboarding</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0a0a0c] text-gray-400 text-sm">
+        Error loading onboarding
+      </div>
+    );
   }
 
   const steps = [
@@ -144,43 +155,60 @@ export default function OnboardingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-12">
+    <div className="min-h-screen bg-[#0a0a0c] py-10">
       <div className="max-w-2xl mx-auto px-4">
+        {/* Wordmark */}
+        <div className="flex items-center justify-center gap-2 mb-8">
+          <span className="w-8 h-8 rounded-lg bg-white/[0.06] flex items-center justify-center text-white">
+            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 18 L12 5 L20 18 M7.5 13.5 H16.5"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            </svg>
+          </span>
+          <span className="text-sm font-semibold text-white tracking-tight">ADKSY</span>
+        </div>
+
         {/* Progress */}
-        <div className="mb-8">
+        <div className="mb-6">
           <div className="flex justify-between items-center mb-4">
             {steps.map((step, index) => (
               <div key={step.number} className="flex items-center">
                 <div
-                  className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${
+                  className={`w-9 h-9 rounded-lg flex items-center justify-center font-semibold text-sm ${
                     step.number <= currentStep
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-200 text-gray-600'
+                      ? 'bg-[#FF5A1F] text-white'
+                      : 'bg-white/[0.06] text-gray-500'
                   }`}
                 >
                   {step.number}
                 </div>
                 {index < steps.length - 1 && (
                   <div
-                    className={`h-1 w-12 mx-2 ${
-                      step.number < currentStep ? 'bg-blue-600' : 'bg-gray-200'
+                    className={`h-px w-10 mx-2 ${
+                      step.number < currentStep ? 'bg-[#FF5A1F]' : 'bg-white/[0.08]'
                     }`}
                   />
                 )}
               </div>
             ))}
           </div>
-          <p className="text-center text-gray-600 text-sm">
+          <p className="text-center text-gray-500 text-sm">
             Step {currentStep} of {steps.length}: {steps[currentStep - 1].title}
           </p>
         </div>
 
         {/* Step Card */}
-        <Card className="bg-white shadow-lg">
-          <CardHeader>
-            <CardTitle>{steps[currentStep - 1].title}</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <DashboardCard>
+          <DashboardCardHeader>
+            <DashboardCardTitle>{steps[currentStep - 1].title}</DashboardCardTitle>
+          </DashboardCardHeader>
+          <DashboardCardContent>
             {CurrentStepComponent && (
               <CurrentStepComponent
                 data={onboarding.data}
@@ -190,33 +218,28 @@ export default function OnboardingPage() {
                 isLastStep={currentStep === 7}
               />
             )}
-          </CardContent>
-        </Card>
+          </DashboardCardContent>
+        </DashboardCard>
 
-        {/* Navigation */}
-        <div className="flex justify-between mt-8">
-          <Button
+        {/* Navigation — each step's own form carries its primary action;
+            this bar only ever needs to offer "back" and, on the final
+            step, the completion action. */}
+        <div className="flex justify-between items-center mt-6">
+          <DashboardButton
             variant="outline"
             onClick={goToPreviousStep}
             disabled={currentStep === 1 || saving}
           >
             Previous
-          </Button>
-          <div className="text-sm text-gray-600">
-            {currentStep} / {steps.length}
-          </div>
-          {currentStep === 7 ? (
-            <Button
+          </DashboardButton>
+          {currentStep === 7 && (
+            <DashboardButton
               variant="primary"
               onClick={() => completeOnboarding()}
               disabled={saving}
             >
               {saving ? 'Finishing...' : 'Complete Setup'}
-            </Button>
-          ) : (
-            <Button variant="primary" disabled>
-              (Click Next in form)
-            </Button>
+            </DashboardButton>
           )}
         </div>
       </div>
