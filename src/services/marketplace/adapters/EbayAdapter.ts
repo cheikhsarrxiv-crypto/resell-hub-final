@@ -17,6 +17,7 @@ import {
   MarketplaceOrder,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
+import { logger } from '@/lib/logger'
 
 export class EbayAdapter extends MarketplaceAdapter {
   marketplace = Marketplace.EBAY
@@ -59,6 +60,14 @@ export class EbayAdapter extends MarketplaceAdapter {
 
   /**
    * REAL: Exchange authorization code for tokens
+   *
+   * Phase 10.5 fix: the token exchange must hit the API host's
+   * /identity/v1/oauth2/token endpoint (https://api[.sandbox].ebay.com),
+   * NOT authUrl (https://auth[.sandbox].ebay.com) — that host is reserved
+   * for the browser-facing /oauth2/authorize redirect used by
+   * getOAuthUrl() below. Confirmed by the Phase 10 audit: this previously
+   * called `${this.authUrl}/oauth2/token`, which would fail against real
+   * eBay servers.
    */
   async exchangeAuthCode(code: string): Promise<{
     accessToken: string
@@ -70,7 +79,7 @@ export class EbayAdapter extends MarketplaceAdapter {
     ).toString('base64')
 
     try {
-      const response = await fetch(`${this.authUrl}/oauth2/token`, {
+      const response = await fetch(`${this.baseUrl}/identity/v1/oauth2/token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -85,6 +94,18 @@ export class EbayAdapter extends MarketplaceAdapter {
 
       if (!response.ok) {
         const error = await response.json()
+        // TEMPORARY DEBUG (remove once the Sandbox token-exchange failure
+        // is diagnosed) — logs only eBay's own response fields (never the
+        // request we sent: no client_secret, no authorization code, no
+        // Authorization header, no token). logger.filterSensitiveData
+        // provides a second layer of redaction on top of this explicit
+        // allow-list.
+        logger.error('eBay OAuth token exchange failed', undefined, {
+          status: response.status,
+          ebayError: error.error,
+          ebayErrorDescription: error.error_description,
+          ebayErrorId: error.error_id,
+        })
         throw {
           status: response.status,
           message: error.error_description || 'OAuth code exchange failed',
@@ -107,6 +128,9 @@ export class EbayAdapter extends MarketplaceAdapter {
 
   /**
    * REAL: Refresh expired access token
+   *
+   * Phase 10.5 fix: same endpoint correction as exchangeAuthCode above —
+   * the API host's /identity/v1/oauth2/token, never authUrl.
    */
   async refreshToken(refreshToken: string): Promise<{
     accessToken: string
@@ -117,7 +141,7 @@ export class EbayAdapter extends MarketplaceAdapter {
     ).toString('base64')
 
     try {
-      const response = await fetch(`${this.authUrl}/oauth2/token`, {
+      const response = await fetch(`${this.baseUrl}/identity/v1/oauth2/token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -222,6 +246,34 @@ export class EbayAdapter extends MarketplaceAdapter {
   }
 
   /**
+   * Phase 12C-Prep — rejects a publish attempt BEFORE any HTTP call when a
+   * field this adapter used to silently hardcode/omit is actually missing.
+   * Thrown as a plain {status: 400, message} object — the exact shape
+   * callEbayApi's own error branch already produces — so
+   * ErrorNormalizer.normalizeEbayError's existing statusCode===400 branch
+   * categorizes it as VALIDATION_ERROR without any new error taxonomy.
+   * Never invents a currency/condition/category/marketplace — the caller
+   * (ListingService / the future publish_listing action) must supply real
+   * values, sourced from ListingDraft's own required fields (see
+   * validateEbayDraft in src/lib/listing/listingDraft.ts, which already
+   * enforces this before a confirmation would even be offered).
+   */
+  private validateListingInputForPublish(listing: MarketplaceListingInput): void {
+    const missing: string[] = [];
+    if (!listing.currency) missing.push('currency');
+    if (!listing.condition) missing.push('condition');
+    if (!listing.ebay?.categoryId) missing.push('ebay.categoryId');
+    if (!listing.ebay?.marketplaceId) missing.push('ebay.marketplaceId');
+
+    if (missing.length > 0) {
+      throw {
+        status: 400,
+        message: `EbayAdapter.createListing: missing required field(s): ${missing.join(', ')}. Nothing was sent to eBay.`,
+      }
+    }
+  }
+
+  /**
    * REAL: Create new listing on eBay
    * https://developer.ebay.com/docs/sell/inventory/create-item
    */
@@ -233,26 +285,57 @@ export class EbayAdapter extends MarketplaceAdapter {
     }
 
     try {
+      // A pre-flight validation failure must be normalized exactly like
+      // any other eBay error (see this method's own try/catch), so it's
+      // deliberately inside this try block, not before it.
+      this.validateListingInputForPublish(listing)
+      const currency = listing.currency!
+      const condition = listing.condition!
+      const categoryId = listing.ebay!.categoryId
+      const marketplaceId = listing.ebay!.marketplaceId
+
       // Step 1: Create inventory item
-      const inventoryBody = {
+      //
+      // VERIFICATION NOTE (Phase 12C-Prep): developer.ebay.com is
+      // egress-blocked in this sandbox (confirmed: CONNECT returns 403),
+      // so this shape — product.{title,description,imageUrls} +
+      // availability.shipToLocationAvailability.quantity + a top-level
+      // condition — is based on well-established, stable, general eBay
+      // Sell Inventory API knowledge (createOrReplaceInventoryItem), NOT
+      // verified here against a live or vendored spec the way
+      // EtsyListingMapper.ts's fields were (see that file's own header
+      // comment for the technique used there). The PRIOR code's flat
+      // {title, description, price, quantity} body was itself never
+      // verified either — eBay's real inventory_item resource does not
+      // accept price/quantity at the top level at all (price belongs on
+      // the Offer, quantity under availability), so this is a correction,
+      // not a regression, but still: spot-check against eBay's sandbox
+      // docs before any real publish attempt in Phase 12C.
+      const inventoryBody: Record<string, any> = {
         sku: listing.sku || `SKU-${Date.now()}`,
-        title: listing.title,
-        description: listing.description,
-        price: {
-          currency: 'EUR',
-          value: listing.price.toString(),
+        product: {
+          title: listing.title,
+          description: listing.description,
+          // Only sent when the draft actually has images — eBay's own
+          // requirements for image URLs (reachability, format, count)
+          // are not re-validated here; this only ever forwards what the
+          // caller already has, never fabricates a placeholder image.
+          ...(listing.images && listing.images.length > 0 ? { imageUrls: listing.images } : {}),
         },
-        quantity: {
-          value: listing.quantity,
+        availability: {
+          shipToLocationAvailability: {
+            quantity: listing.quantity,
+          },
         },
-        condition: 'USED_GOOD',
+        condition,
       }
 
       const createResponse = await this.callEbayApi(
         'POST',
         '/sell/inventory/v1/inventory_item',
         this.accessToken,
-        inventoryBody
+        inventoryBody,
+        marketplaceId
       )
 
       const sku = createResponse.sku || inventoryBody.sku
@@ -261,11 +344,12 @@ export class EbayAdapter extends MarketplaceAdapter {
       // until the offer is explicitly published in step 3 below)
       const offerBody = {
         sku: sku,
-        marketplaceId: 'EBAY_FR',
+        marketplaceId,
         format: 'FIXED_PRICE',
+        categoryId: String(categoryId),
         pricingSummary: {
           price: {
-            currency: 'EUR',
+            currency,
             value: listing.price.toString(),
           },
         },
@@ -275,7 +359,8 @@ export class EbayAdapter extends MarketplaceAdapter {
         'POST',
         '/sell/inventory/v1/offer',
         this.accessToken,
-        offerBody
+        offerBody,
+        marketplaceId
       )
 
       const offerId = offerResponse.offerId
@@ -292,7 +377,9 @@ export class EbayAdapter extends MarketplaceAdapter {
       const publishResponse = await this.callEbayApi(
         'POST',
         `/sell/inventory/v1/offer/${offerId}/publish`,
-        this.accessToken
+        this.accessToken,
+        undefined,
+        marketplaceId
       )
 
       return {
@@ -324,13 +411,20 @@ export class EbayAdapter extends MarketplaceAdapter {
     }
 
     try {
+      // Phase 12C-Prep: a price update with no currency is never sent with
+      // a silently invented one — the caller must say what currency the
+      // new price is in.
+      if (listing.price !== undefined && !listing.currency) {
+        throw { status: 400, message: 'EbayAdapter.updateListing: price given without currency. Nothing was sent to eBay.' }
+      }
+
       const updateBody: any = {}
 
       if (listing.title) updateBody.title = listing.title
       if (listing.description) updateBody.description = listing.description
-      if (listing.price) {
+      if (listing.price !== undefined) {
         updateBody.price = {
-          currency: 'EUR',
+          currency: listing.currency,
           value: listing.price.toString(),
         }
       }
@@ -668,19 +762,29 @@ export class EbayAdapter extends MarketplaceAdapter {
 
   /**
    * REAL: Make authenticated API call to eBay
+   *
+   * Phase 12C-Prep: `marketplaceId` is now an explicit parameter, defaulted
+   * to 'EBAY_FR' only for call sites that don't pass one (getOrders,
+   * getListings, updateOrderStatus, etc. — unchanged, out of this phase's
+   * scope). createListing/updateListing now always pass the real target
+   * marketplace explicitly, so the header eBay actually uses to route the
+   * request can never silently diverge from the marketplaceId sent in the
+   * request body itself (previously always 'EBAY_FR' regardless of intent
+   * — see createListing's own comment).
    */
   private async callEbayApi(
     method: string,
     endpoint: string,
     token: string,
-    body?: Record<string, any>
+    body?: Record<string, any>,
+    marketplaceId: string = 'EBAY_FR'
   ): Promise<any> {
     const url = `${this.baseUrl}${endpoint}`
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
-      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_FR',
+      'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
     }
 
     try {
@@ -704,7 +808,17 @@ export class EbayAdapter extends MarketplaceAdapter {
       const text = await response.text()
       return text ? JSON.parse(text) : {}
     } catch (error) {
-      throw ErrorNormalizer.normalize(error, 'ebay')
+      // Phase 12C-Prep fix: re-throws the raw error as-is, NOT normalized
+      // here. Every caller of this private method already wraps it in its
+      // own try/catch that calls ErrorNormalizer.normalize(error, 'ebay')
+      // — normalizing here too meant that object got normalized TWICE
+      // (once here, once again by the caller), and the second pass loses
+      // markers the first pass didn't preserve (e.g. `error.code` for a
+      // network failure is not carried onto a NormalizedError), so a real
+      // ETIMEDOUT/ECONNREFUSED could get miscategorized as a generic 5xx
+      // SERVER_ERROR instead of NETWORK_ERROR by the time it reached the
+      // caller. Normalizing exactly once, at the outer catch, fixes this.
+      throw error
     }
   }
 }
