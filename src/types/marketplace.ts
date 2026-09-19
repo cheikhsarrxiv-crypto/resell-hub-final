@@ -155,12 +155,40 @@ export interface MarketplaceListingInput {
   category?: string;
   sku?: string;
   images?: string[];
+  /**
+   * Phase 12C-Prep — ISO 4217. Previously EbayAdapter hardcoded 'EUR'
+   * regardless of what was actually passed in; it now requires this field
+   * and throws a clear validation error rather than silently assuming
+   * EUR. Every adapter that cares about currency should read this, never
+   * invent one.
+   */
+  currency?: string;
+  /**
+   * Phase 12C-Prep — marketplace-specific condition value (e.g. eBay's
+   * 'USED_GOOD'/'NEW'/...). Previously EbayAdapter hardcoded 'USED_GOOD'
+   * for every listing; it now requires this field explicitly.
+   */
+  condition?: string;
   // Etsy-only fields (see EtsyListingMapper.ts). Ignored by every other
   // adapter — eBay/Depop/Vinted never read these.
   etsy?: {
     whoMade: string;
     whenMade: string;
     taxonomyId: number;
+  };
+  /**
+   * Phase 12C-Prep — eBay-only fields, mirroring the `etsy` field above.
+   * Ignored by every other adapter. EbayAdapter.createListing requires
+   * both: categoryId is eBay's own numeric category id (never invented —
+   * must come from real category data), and marketplaceId is the target
+   * eBay country marketplace (e.g. 'EBAY_FR', 'EBAY_GB') the offer and
+   * the X-EBAY-C-MARKETPLACE-ID header both use — previously hardcoded to
+   * 'EBAY_FR' everywhere, which meant a listing could silently publish to
+   * the wrong country's marketplace regardless of what was intended.
+   */
+  ebay?: {
+    categoryId: number;
+    marketplaceId: string;
   };
 }
 
