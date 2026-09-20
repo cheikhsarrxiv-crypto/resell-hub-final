@@ -1,6 +1,6 @@
 import { AgentToolDefinition, AgentToolCategory } from './tools/types';
 import { getOrderTool, getOrdersTool } from './tools/orderTools';
-import { getListingTool } from './tools/listingTools';
+import { getListingTool, getListingsTool } from './tools/listingTools';
 import { getShipmentTool } from './tools/shipmentTools';
 import { getCustomerTool } from './tools/customerTools';
 import { getProductTool } from './tools/productTools';
@@ -32,6 +32,7 @@ const TOOLS: AgentToolDefinition[] = [
   getOrderTool,
   getOrdersTool,
   getListingTool,
+  getListingsTool,
   getShipmentTool,
   getCustomerTool,
   getProductTool,

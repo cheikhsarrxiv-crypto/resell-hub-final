@@ -9,9 +9,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { getListingMock, inventoryFindUniqueMock } = vi.hoisted(() => ({
+const { getListingMock, inventoryFindUniqueMock, listingFindManyMock, listingCountMock, productFindFirstMock } = vi.hoisted(() => ({
   getListingMock: vi.fn(),
   inventoryFindUniqueMock: vi.fn(),
+  listingFindManyMock: vi.fn(),
+  listingCountMock: vi.fn(),
+  productFindFirstMock: vi.fn(),
 }));
 
 vi.mock('@/services/ListingService', () => ({
@@ -21,11 +24,13 @@ vi.mock('@/services/ListingService', () => ({
 vi.mock('@/lib/prisma', () => ({
   prisma: {
     inventory: { findUnique: inventoryFindUniqueMock },
+    listing: { findMany: listingFindManyMock, count: listingCountMock },
+    product: { findFirst: productFindFirstMock },
   },
 }));
 
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
-import { getListingTool } from '@/services/ai/tools/listingTools';
+import { getListingTool, getListingsTool } from '@/services/ai/tools/listingTools';
 
 function makeListing(overrides: Record<string, any> = {}) {
   return {
@@ -303,5 +308,298 @@ describe('get_listing tool definition', () => {
     expect(serialized).not.toContain('real-encrypted-refresh');
     expect(serialized).not.toContain('real-seller-id');
     expect(serialized).not.toContain('seller@example.com');
+  });
+});
+
+/**
+ * Real behavioral tests for get_listings — lists/searches multiple
+ * listings (never a single-id lookup, that's get_listing above). Same
+ * workspace-isolation and secret-non-leakage guarantees, via a `select`
+ * (never a full `include`) that structurally cannot pull
+ * MarketplaceConnection's apiKey/apiSecret/oauth token fields.
+ */
+function makeListingRow(overrides: Record<string, any> = {}) {
+  return {
+    id: 'listing-1',
+    productId: 'product-1',
+    title: 'Prada Cut Out Sneakers',
+    price: 449,
+    quantity: 1,
+    status: 'active',
+    syncStatus: 'synced',
+    externalId: 'EBAY-EXT-1',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-02T00:00:00Z'),
+    product: { sku: 'SKU-PRADA-1' },
+    connection: { marketplace: { name: 'ebay', displayName: 'eBay' } },
+    ...overrides,
+  };
+}
+
+describe('get_listings tool definition', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('is registered in AiToolRegistry as a read tool — auto-executable, no confirmation', () => {
+    const tool = AiToolRegistry.get('get_listings');
+    expect(tool).toBeDefined();
+    expect(tool?.category).toBe('read');
+    expect(AiToolRegistry.isAutoExecutable('read')).toBe(true);
+  });
+
+  it('1. workspace isolation — the where clause always includes the caller workspaceId', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-A', {});
+
+    expect(listingFindManyMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: 'ws-A' }) }));
+    expect(listingCountMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: 'ws-A' }) }));
+  });
+
+  it('2. no listing -> found: false, empty listings, zeroed counts', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result).toEqual({ found: false, listings: [], totalListings: 0, returnedListings: 0 });
+  });
+
+  it('3. a single listing is returned', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.found).toBe(true);
+    expect(result.listings).toHaveLength(1);
+    expect(result.listings[0].listingId).toBe('listing-1');
+  });
+
+  it('4. multiple listings are all returned', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow({ id: 'listing-1' }), makeListingRow({ id: 'listing-2' })]);
+    listingCountMock.mockResolvedValue(2);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.listings.map((l: any) => l.listingId)).toEqual(['listing-1', 'listing-2']);
+  });
+
+  it('5. listings are requested in descending createdAt order (same convention as ListingService.getListings)', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    await getListingsTool.handler('ws-1', {});
+
+    expect(listingFindManyMock).toHaveBeenCalledWith(expect.objectContaining({ orderBy: { createdAt: 'desc' } }));
+  });
+
+  it('6. default limit (20) is applied when limit is omitted', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', {});
+
+    expect(listingFindManyMock).toHaveBeenCalledWith(expect.objectContaining({ take: 20 }));
+  });
+
+  it('7. a custom limit is applied, and a value above the max of 50 is rejected at validation', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { limit: 5 });
+    expect(listingFindManyMock).toHaveBeenCalledWith(expect.objectContaining({ take: 5 }));
+
+    expect(getListingsTool.inputSchema.safeParse({ limit: 51 }).success).toBe(false);
+    expect(getListingsTool.inputSchema.safeParse({ limit: 50 }).success).toBe(true);
+  });
+
+  it('8. marketplace filter is applied through the MarketplaceConnection relation', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { marketplace: 'ebay' as any });
+
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.connection).toEqual({ marketplaceId: 'ebay' });
+  });
+
+  it('rejects an unknown marketplace value', () => {
+    expect(getListingsTool.inputSchema.safeParse({ marketplace: 'amazon' }).success).toBe(false);
+  });
+
+  it('9. status filter is applied directly on Listing.status', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { status: 'active' });
+
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.status).toBe('active');
+  });
+
+  it('rejects an unknown/invented status value', () => {
+    expect(getListingsTool.inputSchema.safeParse({ status: 'archived' }).success).toBe(false);
+  });
+
+  it('10. syncStatus filter is applied directly on Listing.syncStatus, independently of status', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { syncStatus: 'failed' });
+
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.syncStatus).toBe('failed');
+    expect(where).not.toHaveProperty('status');
+  });
+
+  it('rejects an unknown/invented syncStatus value', () => {
+    expect(getListingsTool.inputSchema.safeParse({ syncStatus: 'pending' }).success).toBe(false);
+  });
+
+  it('11. productId filter is applied directly, scoped by workspaceId in the same where', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { productId: 'product-1' });
+
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.productId).toBe('product-1');
+    expect(where.workspaceId).toBe('ws-1');
+    expect(productFindFirstMock).not.toHaveBeenCalled();
+  });
+
+  it('12. sku filter resolves to a productId in the SAME workspace before querying listings', async () => {
+    productFindFirstMock.mockResolvedValue({ id: 'product-1' });
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    await getListingsTool.handler('ws-1', { sku: 'SKU-PRADA-1' });
+
+    expect(productFindFirstMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { workspaceId: 'ws-1', sku: 'SKU-PRADA-1', deletedAt: null } })
+    );
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.productId).toBe('product-1');
+  });
+
+  it('an unknown sku -> found: false, never a global/unscoped listing query', async () => {
+    productFindFirstMock.mockResolvedValue(null);
+
+    const result: any = await getListingsTool.handler('ws-1', { sku: 'DOES-NOT-EXIST' });
+
+    expect(result).toEqual({ found: false, listings: [], totalListings: 0, returnedListings: 0 });
+    expect(listingFindManyMock).not.toHaveBeenCalled();
+  });
+
+  it('13. combination of filters (status + syncStatus + marketplace) are all applied together', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    await getListingsTool.handler('ws-1', { status: 'active', syncStatus: 'synced', marketplace: 'etsy' as any });
+
+    const where = listingFindManyMock.mock.calls[0][0].where;
+    expect(where.status).toBe('active');
+    expect(where.syncStatus).toBe('synced');
+    expect(where.connection).toEqual({ marketplaceId: 'etsy' });
+  });
+
+  it('14. totalListings reports the REAL total count, even beyond the returned page size', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(37);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.totalListings).toBe(37);
+  });
+
+  it('15. returnedListings reflects the actual number of listings in this page', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow({ id: 'listing-1' }), makeListingRow({ id: 'listing-2' })]);
+    listingCountMock.mockResolvedValue(2);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.returnedListings).toBe(2);
+  });
+
+  it('16. found=false when no listing matches', async () => {
+    listingFindManyMock.mockResolvedValue([]);
+    listingCountMock.mockResolvedValue(0);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.found).toBe(false);
+  });
+
+  it('17. the Product relation is joined in the same query (no follow-up query)', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    await getListingsTool.handler('ws-1', {});
+
+    expect(listingFindManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ product: { select: { sku: true } } }) })
+    );
+  });
+
+  it('18. SKU comes from the joined Product, never invented', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow({ product: { sku: 'SKU-XYZ' } })]);
+    listingCountMock.mockResolvedValue(1);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+
+    expect(result.listings[0].sku).toBe('SKU-XYZ');
+  });
+
+  it('19. single query for listings+product+connection (no N+1), plus one separate count aggregate', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow(), makeListingRow({ id: 'listing-2' })]);
+    listingCountMock.mockResolvedValue(2);
+
+    await getListingsTool.handler('ws-1', {});
+
+    expect(listingFindManyMock).toHaveBeenCalledTimes(1);
+    expect(listingCountMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('20. never selects/returns MarketplaceConnection secret fields (select is a hard structural boundary, not just a formatter allow-list)', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    await getListingsTool.handler('ws-1', {});
+
+    const args = listingFindManyMock.mock.calls[0][0];
+    expect(JSON.stringify(args.select)).not.toMatch(/apiKey|apiSecret|oauth|refreshToken|sellerId|accountEmail/i);
+  });
+
+  it('21. no secret ever appears in the output, and no profit/margin is invented', async () => {
+    listingFindManyMock.mockResolvedValue([makeListingRow()]);
+    listingCountMock.mockResolvedValue(1);
+
+    const result: any = await getListingsTool.handler('ws-1', {});
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toMatch(/apiKey|apiSecret|token|secret|password/i);
+    expect(serialized).not.toMatch(/profit|margin/i);
+  });
+
+  it('cross-workspace: a productId belonging to another workspace never leaks a listing (workspaceId stays in the same where)', async () => {
+    listingFindManyMock.mockImplementation(async ({ where }: any) => (where.workspaceId === 'ws-A' ? [makeListingRow()] : []));
+    listingCountMock.mockImplementation(async ({ where }: any) => (where.workspaceId === 'ws-A' ? 1 : 0));
+
+    const result: any = await getListingsTool.handler('ws-B', { productId: 'product-1' });
+
+    expect(result.found).toBe(false);
+  });
+
+  it('registered correctly in AiToolRegistry (get() returns the real tool definition)', () => {
+    expect(AiToolRegistry.get('get_listings')).toBe(getListingsTool);
+  });
+
+  it('classified "read"', () => {
+    expect(getListingsTool.category).toBe('read');
+  });
+
+  it('auto-executable without confirmation', () => {
+    expect(AiToolRegistry.isAutoExecutable(getListingsTool.category)).toBe(true);
   });
 });

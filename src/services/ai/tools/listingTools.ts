@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { ListingService } from '@/services/ListingService';
+import { Marketplace } from '@/types/marketplace';
 import { AgentToolDefinition } from './types';
 
 const getListingInputSchema = z.object({
@@ -132,5 +133,166 @@ export const getListingTool: AgentToolDefinition<{ listingId: string }> = {
     });
 
     return { found: true, listing: formatListingForAgent(listing, inventory) };
+  },
+};
+
+// Both declared directly on Listing's own schema comment (the only source
+// of truth here — unlike Order.status, there is no separate mapper type to
+// cross-check against). 'active'/'delisted'/'sold_out' are confirmed
+// written by ListingService (createListing/deleteListing/handleSoldOut);
+// 'paused' is declared but not yet written by any code path today — kept
+// since it's the schema's own documented value, not invented for this tool.
+const LISTING_STATUSES = ['active', 'delisted', 'sold_out', 'paused'] as const;
+// Confirmed written by ListingService.createListing (syncing/synced/failed)
+// and the schema's own default (not_synced).
+const LISTING_SYNC_STATUSES = ['not_synced', 'syncing', 'synced', 'failed'] as const;
+
+const MAX_LIMIT = 50;
+const DEFAULT_LIMIT = 20;
+
+const getListingsInputSchema = z.object({
+  // Listing has no marketplace string of its own (unlike Order.marketplace)
+  // — the only real source is its MarketplaceConnection relation, whose
+  // marketplaceId is a direct, always-reliable FK (never the ambiguous
+  // "unresolved listingId" situation Order/AnalyticsService has), so
+  // filtering through it here never silently drops a listing.
+  marketplace: z.nativeEnum(Marketplace).optional(),
+  status: z.enum(LISTING_STATUSES).optional(),
+  syncStatus: z.enum(LISTING_SYNC_STATUSES).optional(),
+  productId: z.string().min(1).optional(),
+  sku: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+});
+
+type GetListingsInput = z.infer<typeof getListingsInputSchema>;
+
+export const getListingsTool: AgentToolDefinition<GetListingsInput> = {
+  name: 'get_listings',
+  description:
+    "Search/list existing listings in the reseller's own workspace with real, supported filters, to answer questions like \"show my listings\", " +
+    '"my eBay listings", "which listings are in error?", "which listings are out of sync?", "my listings for this product". ' +
+    `Returns up to ${DEFAULT_LIMIT} listings by default (max ${MAX_LIMIT}), most recently created first; totalListings is the real total count even ` +
+    'if it exceeds the returned page. ' +
+    'status filters on the listing\'s own lifecycle (active/delisted/sold_out/paused); syncStatus filters on marketplace sync state ' +
+    '(not_synced/syncing/synced/failed) — these are two different, independent fields, never conflated. ' +
+    'marketplace filters on the listing\'s real MarketplaceConnection, never guessed. productId/sku narrow to a single product\'s listings ' +
+    "(sku is resolved to a product in this workspace first; an unknown sku returns { found: false }, never another workspace's product). " +
+    'For a single already-known listing id, use get_listing instead. ' +
+    'Never returns OAuth tokens, API credentials, or any other MarketplaceConnection secret, nor invented profit/margin figures.',
+  category: 'read',
+  inputSchema: getListingsInputSchema,
+  jsonSchema: {
+    type: 'object',
+    properties: {
+      marketplace: {
+        type: 'string',
+        enum: Object.values(Marketplace),
+        description: 'Restrict to listings connected to this marketplace. Omit to include every marketplace.',
+      },
+      status: {
+        type: 'string',
+        enum: LISTING_STATUSES as unknown as string[],
+        description: 'Restrict to this listing lifecycle status. Omit to include every status.',
+      },
+      syncStatus: {
+        type: 'string',
+        enum: LISTING_SYNC_STATUSES as unknown as string[],
+        description: 'Restrict to this marketplace sync status. Omit to include every sync status.',
+      },
+      productId: { type: 'string', description: 'Restrict to listings for this ADKSY product id.' },
+      sku: { type: 'string', description: "Restrict to listings for the product with this SKU, in this workspace." },
+      limit: {
+        type: 'number',
+        description: `Maximum number of listings to return, most recently created first. Defaults to ${DEFAULT_LIMIT}, max ${MAX_LIMIT}.`,
+      },
+    },
+  },
+  async handler(workspaceId, input) {
+    const limit = input.limit ?? DEFAULT_LIMIT;
+
+    let productId = input.productId;
+
+    if (!productId && input.sku) {
+      // Same (workspaceId, sku) compound key ProductService/other tools
+      // already resolve a SKU through — never a bare sku lookup that could
+      // match another workspace's product.
+      const product = await prisma.product.findFirst({
+        where: { workspaceId, sku: input.sku, deletedAt: null },
+        select: { id: true },
+      });
+
+      if (!product) {
+        return { found: false, listings: [], totalListings: 0, returnedListings: 0 };
+      }
+
+      productId = product.id;
+    }
+
+    const where = {
+      workspaceId,
+      deletedAt: null,
+      ...(productId ? { productId } : {}),
+      ...(input.status ? { status: input.status } : {}),
+      ...(input.syncStatus ? { syncStatus: input.syncStatus } : {}),
+      ...(input.marketplace ? { connection: { marketplaceId: input.marketplace } } : {}),
+    };
+
+    // Single query, product/connection joined via `select` (never a full
+    // `include`, which on MarketplaceConnection would pull apiKey/
+    // apiSecret/encryptedOauthToken/encryptedRefreshToken — see
+    // formatListingForAgent's own header comment on that exact risk) — no
+    // per-listing follow-up query. The real total count is a separate
+    // aggregate query, same Promise.all([findMany, count]) pattern as
+    // ListingService.getListings/get_orders/get_customer_orders.
+    const [listings, totalListings] = await Promise.all([
+      prisma.listing.findMany({
+        where,
+        select: {
+          id: true,
+          productId: true,
+          title: true,
+          price: true,
+          quantity: true,
+          status: true,
+          syncStatus: true,
+          externalId: true,
+          createdAt: true,
+          updatedAt: true,
+          product: { select: { sku: true } },
+          connection: { select: { marketplace: { select: { name: true, displayName: true } } } },
+        },
+        // Same order ListingService.getListings already uses — reused
+        // rather than inventing a different default sort for this tool.
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      }),
+      prisma.listing.count({ where }),
+    ]);
+
+    if (listings.length === 0) {
+      return { found: false, listings: [], totalListings: 0, returnedListings: 0 };
+    }
+
+    return {
+      found: true,
+      listings: listings.map((listing) => ({
+        listingId: listing.id,
+        productId: listing.productId,
+        title: listing.title,
+        price: listing.price,
+        quantity: listing.quantity,
+        status: listing.status,
+        syncStatus: listing.syncStatus,
+        externalId: listing.externalId ?? null,
+        marketplace: listing.connection
+          ? { name: listing.connection.marketplace.name, displayName: listing.connection.marketplace.displayName }
+          : null,
+        sku: listing.product.sku ?? null,
+        createdAt: listing.createdAt.toISOString(),
+        updatedAt: listing.updatedAt.toISOString(),
+      })),
+      totalListings,
+      returnedListings: listings.length,
+    };
   },
 };

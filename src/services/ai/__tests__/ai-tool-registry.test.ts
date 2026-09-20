@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
 import { getOrderTool, getOrdersTool } from '@/services/ai/tools/orderTools';
-import { getListingTool } from '@/services/ai/tools/listingTools';
+import { getListingTool, getListingsTool } from '@/services/ai/tools/listingTools';
 import { getShipmentTool } from '@/services/ai/tools/shipmentTools';
 import { getCustomerTool } from '@/services/ai/tools/customerTools';
 import { getProductTool } from '@/services/ai/tools/productTools';
@@ -22,6 +22,7 @@ describe('AiToolRegistry.list / get', () => {
     expect(names).toContain('get_order');
     expect(names).toContain('get_orders');
     expect(names).toContain('get_listing');
+    expect(names).toContain('get_listings');
     expect(names).toContain('get_shipment');
     expect(names).toContain('get_customer');
     expect(names).toContain('get_product');
@@ -82,6 +83,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real get_listing tool definition', () => {
     expect(AiToolRegistry.get('get_listing')).toBe(getListingTool);
+  });
+
+  it('get() returns the real get_listings tool definition', () => {
+    expect(AiToolRegistry.get('get_listings')).toBe(getListingsTool);
   });
 
   it('get() returns the real get_shipment tool definition', () => {
@@ -242,6 +247,37 @@ describe('get_customer_orders tool definition', () => {
   it('accepts a valid customerId input', () => {
     const result = getCustomerOrdersTool.inputSchema.safeParse({ customerId: 'buyer-123' });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('get_listings tool definition', () => {
+  it('is categorized as read (side-effect-free)', () => {
+    expect(getListingsTool.category).toBe('read');
+  });
+
+  it('accepts an empty input (all filters optional)', () => {
+    const result = getListingsTool.inputSchema.safeParse({});
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an unknown status value', () => {
+    const result = getListingsTool.inputSchema.safeParse({ status: 'archived' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an unknown syncStatus value', () => {
+    const result = getListingsTool.inputSchema.safeParse({ syncStatus: 'pending' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an unknown marketplace value', () => {
+    const result = getListingsTool.inputSchema.safeParse({ marketplace: 'amazon' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a limit above the maximum of 50', () => {
+    const result = getListingsTool.inputSchema.safeParse({ limit: 51 });
+    expect(result.success).toBe(false);
   });
 });
 
