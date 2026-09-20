@@ -5,6 +5,7 @@ import { getShipmentTool } from './tools/shipmentTools';
 import { getCustomerTool } from './tools/customerTools';
 import { getProductTool } from './tools/productTools';
 import { getInventoryTool } from './tools/inventoryTools';
+import { getCustomerOrdersTool } from './tools/customerOrderTools';
 import { searchProductsTool } from './tools/sourcingTools';
 import { calculateMarginTool } from './tools/pricingTools';
 import { simulateEngageActionTool, publishListingTool, publishEtsyListingTool } from './tools/actionTools';
@@ -33,6 +34,7 @@ const TOOLS: AgentToolDefinition[] = [
   getCustomerTool,
   getProductTool,
   getInventoryTool,
+  getCustomerOrdersTool,
   searchProductsTool,
   calculateMarginTool,
   simulateEngageActionTool,
