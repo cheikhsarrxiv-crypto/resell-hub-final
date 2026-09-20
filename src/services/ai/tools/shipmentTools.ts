@@ -24,6 +24,18 @@ const getShipmentInputSchema = z.object({
  * `estimatedDelivery`/`actualDelivery`/`status` are the real Shipment
  * columns; TrackingEvent's own `timestamp`s are the real source for
  * "when" something happened, never a fabricated `shippedAt`.
+ *
+ * Shipment-hardening audit finding: a real marketplace-synced order (via
+ * OrdersSyncService) NEVER gets a FulfillmentOrder/Shipment at all — that
+ * pipeline never touches those tables. Its own Order.status (mapped from
+ * the real marketplace status via StatusMapper: pending/confirmed/shipped/
+ * partially_shipped/delivered/cancelled/failed) is nonetheless real,
+ * non-invented data that can genuinely answer "has it shipped?"/"is it
+ * delivered?" even with zero carrier/tracking detail available — so it's
+ * always included here (orderStatus), never withheld just because no
+ * granular Shipment row exists. It is a DIFFERENT, coarser signal than
+ * Shipment.status (which only exists for ADKSY-fulfilled orders) —
+ * exposed separately, never conflated into one fabricated "status".
  */
 function formatShipmentForAgent(order: NonNullable<Awaited<ReturnType<typeof OrderService.getOrder>>>) {
   const fulfillmentOrder = order.fulfillmentOrder;
@@ -31,10 +43,11 @@ function formatShipmentForAgent(order: NonNullable<Awaited<ReturnType<typeof Ord
   if (!fulfillmentOrder) {
     return {
       orderId: order.id,
+      orderStatus: order.status,
       hasShipment: false,
       reason:
         order.fulfillmentType === 'self'
-          ? 'This order is self-fulfilled — ADKSY does not track shipment/tracking data for self-fulfilled orders.'
+          ? "This order has no ADKSY-tracked fulfillment/shipment (self-fulfilled, or synced directly from a marketplace) — no carrier/tracking detail is available, but orderStatus reflects its real, last-known status."
           : 'No fulfillment order exists yet for this order.',
       fulfillment: null,
       shipment: null,
@@ -46,11 +59,15 @@ function formatShipmentForAgent(order: NonNullable<Awaited<ReturnType<typeof Ord
 
   return {
     orderId: order.id,
+    orderStatus: order.status,
     hasShipment: Boolean(shipment),
     reason: shipment ? undefined : 'A fulfillment order exists but no shipment has been created for it yet.',
     fulfillment: {
       status: fulfillmentOrder.status,
       partner: fulfillmentOrder.partner.name,
+      // The fulfillment partner's own reference for this order — real,
+      // stored data (FulfillmentOrder.externalOrderId), never invented.
+      externalOrderId: fulfillmentOrder.externalOrderId ?? null,
     },
     shipment: shipment
       ? {
@@ -77,9 +94,11 @@ export const getShipmentTool: AgentToolDefinition<{ orderId: string }> = {
   name: 'get_shipment',
   description:
     "Look up shipping/tracking information for a single existing order belonging to the reseller's own workspace, by its ADKSY order id — " +
-    'to answer factual questions like where a package is, its carrier, tracking number/URL, shipment status, or estimated/actual delivery. ' +
+    'to answer factual questions like where a package is, its carrier, tracking number/URL, shipment status, whether it has shipped, or estimated/actual delivery. ' +
     'Read-only — never contacts a carrier or a marketplace, never modifies an order, never triggers fulfillment, never requires confirmation. ' +
-    'A self-fulfilled order or one whose fulfillment order has no shipment yet legitimately has no shipment data — this is reported explicitly ' +
+    "orderStatus (the order's own real status, e.g. shipped/delivered — accurate even for a marketplace-synced order with no ADKSY fulfillment/shipment " +
+    'tracking at all) is always returned, separate from the more detailed shipment.status which only exists when ADKSY actually tracked a shipment. ' +
+    'A self-fulfilled order or one whose fulfillment order has no shipment yet legitimately has no detailed shipment data — this is reported explicitly ' +
     '(hasShipment: false, with a reason), never fabricated. Only returns fields that are actually stored in ADKSY: there is no shipping service, ' +
     'pickup point/locker, or shipping label field in this system, and no single "shipped at" timestamp — use the real trackingEvents history instead. ' +
     "Returns { found: false } if the order doesn't exist in this workspace — never another workspace's order.",

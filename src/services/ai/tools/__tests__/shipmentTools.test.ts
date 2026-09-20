@@ -21,10 +21,12 @@ function makeOrder(overrides: Record<string, any> = {}) {
   return {
     id: 'order-1',
     workspaceId: 'ws-1',
+    status: 'shipped',
     fulfillmentType: 'automatic',
     fulfillmentOrder: {
       status: 'shipped',
       partner: { name: 'ShipMock France' },
+      externalOrderId: 'FUL-123456',
       shipment: {
         status: 'in_transit',
         carrier: 'La Poste',
@@ -67,8 +69,9 @@ describe('get_shipment tool definition', () => {
     const result: any = await getShipmentTool.handler('ws-1', { orderId: 'order-1' });
 
     expect(result.found).toBe(true);
+    expect(result.orderStatus).toBe('shipped');
     expect(result.hasShipment).toBe(true);
-    expect(result.fulfillment).toEqual({ status: 'shipped', partner: 'ShipMock France' });
+    expect(result.fulfillment).toEqual({ status: 'shipped', partner: 'ShipMock France', externalOrderId: 'FUL-123456' });
     expect(result.shipment).toEqual({
       status: 'in_transit',
       carrier: 'La Poste',
@@ -120,6 +123,17 @@ describe('get_shipment tool definition', () => {
     expect(result.trackingEvents).toEqual([]);
   });
 
+  it('AUDIT: a marketplace-synced order with no FulfillmentOrder still reports its real orderStatus (e.g. "shipped") — never withheld just because no detailed Shipment/tracking exists', async () => {
+    getOrderMock.mockResolvedValue(makeOrder({ status: 'delivered', fulfillmentType: 'self', fulfillmentOrder: null }));
+
+    const result: any = await getShipmentTool.handler('ws-1', { orderId: 'order-1' });
+
+    expect(result.orderStatus).toBe('delivered');
+    expect(result.hasShipment).toBe(false);
+    // orderStatus is a DIFFERENT signal than shipment.status — never conflated.
+    expect(result.shipment).toBeNull();
+  });
+
   it('a fulfillment order exists but no shipment has been created yet -> hasShipment:false with a distinct reason, never invented tracking', async () => {
     const order = makeOrder();
     order.fulfillmentOrder.shipment = null;
@@ -130,9 +144,19 @@ describe('get_shipment tool definition', () => {
     expect(result.found).toBe(true);
     expect(result.hasShipment).toBe(false);
     expect(result.reason).toMatch(/no shipment has been created/i);
-    expect(result.fulfillment).toEqual({ status: 'shipped', partner: 'ShipMock France' });
+    expect(result.fulfillment).toEqual({ status: 'shipped', partner: 'ShipMock France', externalOrderId: 'FUL-123456' });
     expect(result.shipment).toBeNull();
     expect(result.trackingEvents).toEqual([]);
+  });
+
+  it('FulfillmentOrder.externalOrderId is returned as null when genuinely absent, never invented', async () => {
+    const order = makeOrder();
+    order.fulfillmentOrder.externalOrderId = null;
+    getOrderMock.mockResolvedValue(order);
+
+    const result: any = await getShipmentTool.handler('ws-1', { orderId: 'order-1' });
+
+    expect(result.fulfillment.externalOrderId).toBeNull();
   });
 
   it('optional shipment fields absent -> come back null, never invented (no shipping service/pickup point/label fields exist at all)', async () => {
