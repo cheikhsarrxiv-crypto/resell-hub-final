@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
-import { getOrderTool } from '@/services/ai/tools/orderTools';
+import { getOrderTool, getOrdersTool } from '@/services/ai/tools/orderTools';
 import { getListingTool } from '@/services/ai/tools/listingTools';
 import { getShipmentTool } from '@/services/ai/tools/shipmentTools';
 import { getCustomerTool } from '@/services/ai/tools/customerTools';
@@ -20,6 +20,7 @@ describe('AiToolRegistry.list / get', () => {
   it('lists get_order, get_listing, get_shipment, get_customer, get_product, get_inventory, get_customer_orders, get_sales_summary, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
     const names = AiToolRegistry.list().map((t) => t.name);
     expect(names).toContain('get_order');
+    expect(names).toContain('get_orders');
     expect(names).toContain('get_listing');
     expect(names).toContain('get_shipment');
     expect(names).toContain('get_customer');
@@ -73,6 +74,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real get_order tool definition', () => {
     expect(AiToolRegistry.get('get_order')).toBe(getOrderTool);
+  });
+
+  it('get() returns the real get_orders tool definition', () => {
+    expect(AiToolRegistry.get('get_orders')).toBe(getOrdersTool);
   });
 
   it('get() returns the real get_listing tool definition', () => {
@@ -237,6 +242,32 @@ describe('get_customer_orders tool definition', () => {
   it('accepts a valid customerId input', () => {
     const result = getCustomerOrdersTool.inputSchema.safeParse({ customerId: 'buyer-123' });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('get_orders tool definition', () => {
+  it('is categorized as read (side-effect-free)', () => {
+    expect(getOrdersTool.category).toBe('read');
+  });
+
+  it('accepts an empty input (all filters optional)', () => {
+    const result = getOrdersTool.inputSchema.safeParse({});
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an unknown status value', () => {
+    const result = getOrdersTool.inputSchema.safeParse({ statuses: ['refunded'] });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an unknown marketplace value', () => {
+    const result = getOrdersTool.inputSchema.safeParse({ marketplace: 'amazon' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a limit above the maximum of 50', () => {
+    const result = getOrdersTool.inputSchema.safeParse({ limit: 51 });
+    expect(result.success).toBe(false);
   });
 });
 
