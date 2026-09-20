@@ -1,5 +1,33 @@
 import prisma from '@/lib/prisma';
 
+/**
+ * Real Stripe subscription.status values that currently grant full plan
+ * access (an ALLOW-list, not a deny-list, so any unrecognized/future/
+ * invalid status fails closed by construction — see getSubscription below).
+ *
+ * - 'active': normal, full access.
+ * - 'trialing': same as active — that is the entire point of a trial.
+ *   Never actually produced today (createCheckoutSession sets no
+ *   trial_period_days anywhere), kept for forward-compatibility with
+ *   Stripe's real semantics rather than omitted.
+ * - 'past_due': a grace period, not a lockout. Stripe's own automatic
+ *   payment retries ("dunning") are still in flight at this point, and
+ *   ADKSY's own existing behavior already treats it this way —
+ *   StripeService.handlePaymentFailed only emails a warning, it never
+ *   downgrades the plan. AdminMetricsService's own real-revenue queries
+ *   independently corroborate this exact classification (its own comment:
+ *   "Get active subscriptions (not canceled, not free)" — matched by
+ *   `status: { in: ['active', 'past_due'] }`).
+ *
+ * Every other real status — 'canceled' (already downgraded to the Free
+ * plan by handleSubscriptionDeleted, but refused here too as a defensive
+ * backstop independent of that), 'unpaid' (Stripe's retries are actually
+ * exhausted, unlike 'past_due'), 'incomplete'/'incomplete_expired' (the
+ * subscription's very first payment never succeeded — access was never
+ * really granted), 'paused', and anything unrecognized — is refused.
+ */
+export const ACCESS_GRANTING_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing', 'past_due']);
+
 export class SubscriptionService {
   /**
    * Get all available plans
@@ -15,8 +43,24 @@ export class SubscriptionService {
     }
   }
 
+  /** Whether a real Stripe subscription.status currently grants plan access — see ACCESS_GRANTING_SUBSCRIPTION_STATUSES's own comment for the reasoning per status. */
+  static isAccessGrantingStatus(status: string): boolean {
+    return ACCESS_GRANTING_SUBSCRIPTION_STATUSES.has(status);
+  }
+
   /**
-   * Get current subscription for workspace
+   * Get current subscription for workspace.
+   *
+   * Fail-closed by construction: a real Subscription row whose `status` is
+   * not in ACCESS_GRANTING_SUBSCRIPTION_STATUSES (canceled/unpaid/
+   * incomplete/incomplete_expired/paused/unrecognized) is treated exactly
+   * like "no subscription at all" for plan/feature purposes — the EFFECTIVE
+   * plan used by every caller (hasFeature/getPlanLimits/isLimitReached, all
+   * of which resolve through this method) falls back to the real Free plan
+   * rather than the stale paid plan the row's own planId still points at.
+   * The real subscription row (status, currentPeriodEnd, stripeSubscriptionId,
+   * etc.) is still returned for display purposes — only which Plan gates
+   * features/limits changes.
    */
   static async getSubscription(workspaceId: string) {
     try {
@@ -41,6 +85,21 @@ export class SubscriptionService {
           status: 'active',
           currentPeriodStart: new Date(),
           currentPeriodEnd: null,
+        };
+      }
+
+      if (!this.isAccessGrantingStatus(workspace.subscription.status)) {
+        const freePlan = await prisma.plan.findUnique({ where: { name: 'free' } });
+        // Deliberately never falls back to workspace.subscription.plan (the
+        // stale paid plan) if the Free plan lookup itself fails — that
+        // would silently re-grant paid access in a pathological state.
+        // hasFeature/getPlanLimits already treat a null plan as "no
+        // access" (see their own `if (!subscription?.plan) ...` checks),
+        // so plan: null here fails closed correctly.
+        return {
+          ...workspace.subscription,
+          plan: freePlan,
+          planId: freePlan?.id ?? null,
         };
       }
 
