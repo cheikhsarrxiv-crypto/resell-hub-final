@@ -1,10 +1,157 @@
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import { prisma } from '@/lib/prisma';
 import { AgentToolDefinition } from './types';
 import { findLatestDraft } from './listingDraftTools';
 import { validateEbayDraft, mapDraftToEbayInput, validateEtsyDraft, mapDraftToEtsyInput } from '@/lib/listing/listingDraft';
 import { ListingService, getAuthenticatedAdapter } from '@/services/ListingService';
 import { isRealEbayPublishEnabled, describeEbayEnvironment } from './ebayPublishGuard';
 import { isRealEtsyPublishEnabled, describeEtsyEnvironment } from './etsyPublishGuard';
+
+/**
+ * Persistence-architecture audit (see the "Architecture A" report) — a
+ * successful adapter.createListing() previously never created a local
+ * Listing row at all. Fixed here by reusing ONLY two things that already
+ * exist and are correct, never by reimplementing them differently:
+ * - the DB-level partial unique index on (productId, marketplaceConnectionId)
+ *   WHERE deletedAt IS NULL (see prisma/schema.prisma's Listing model
+ *   comment) — the real anti-duplicate-publish guard, no new migration.
+ * - the exact reserve-before-call ('syncing') / update-after-result
+ *   ('synced' or 'failed') state machine ListingService.createListing
+ *   already uses for the human dashboard's publish flow — mirrored here
+ *   rather than imported, since ListingService.createListing builds its
+ *   own (currently incomplete for eBay — a separate, pre-existing bug not
+ *   fixed here) payload from Product fields, while this pipeline's payload
+ *   always comes from the already-validated ListingDraft.
+ *
+ * Architecture A (validated): publish_listing/publish_etsy_listing require
+ * a real, existing, workspace-owned productId — never a Product created on
+ * the fly from a sourced item (that would require inventing purchasePrice/
+ * location/currency, which this project never does). sourceUrl identifies
+ * where the item was FOUND (the draft's own source), never an ADKSY
+ * Product — those are permanently separate identifier spaces.
+ */
+async function loadPublishableProduct(
+  workspaceId: string,
+  productId: string
+): Promise<{ product: { id: string; sku: string } } | { error: string }> {
+  const product = await prisma.product.findFirst({
+    where: { id: productId, workspaceId, deletedAt: null },
+    select: { id: true, sku: true },
+  });
+  if (!product) {
+    return { error: "Product not found in this workspace. Publishing requires an existing ADKSY product — sourceUrl never identifies one on its own." };
+  }
+  return { product };
+}
+
+async function loadMarketplaceConnectionForPublish(
+  workspaceId: string,
+  marketplaceName: string,
+  marketplaceDisplayName: string
+): Promise<{ connection: { id: string } } | { error: string }> {
+  const connection = await prisma.marketplaceConnection.findFirst({
+    where: { workspaceId, marketplaceId: marketplaceName },
+    select: { id: true },
+  });
+  if (!connection) {
+    return { error: `No ${marketplaceDisplayName} connection found for this workspace. Connect ${marketplaceDisplayName} in Settings before publishing.` };
+  }
+  return { connection };
+}
+
+interface ReservedListingFields {
+  title: string;
+  description: string;
+  price: number;
+  quantity: number;
+}
+
+interface ReserveListingResult {
+  listing: { id: string; externalId: string | null; status: string };
+  /** true when an already synced/syncing Listing for this exact (product, connection) pair was found — no adapter call should happen, this IS the idempotent replay. */
+  alreadyPublished: boolean;
+}
+
+/**
+ * Mirrors ListingService.createListing's own reserve-then-publish guard
+ * exactly (see that method's own comments): a Listing already 'synced' or
+ * 'syncing' for this (productId, connectionId) pair means the intent is
+ * already satisfied — returned as-is, the real adapter call is NEVER made
+ * again. A 'failed' row is a retryable slot, reused in place rather than
+ * inserting a duplicate. The DB's own partial unique index
+ * (Listing_active_product_connection_key) is the real, race-safe backstop
+ * if two requests somehow reach the insert at the same time.
+ */
+async function reserveListingForPublish(
+  workspaceId: string,
+  productId: string,
+  connectionId: string,
+  fields: ReservedListingFields
+): Promise<ReserveListingResult> {
+  const existingListing = await prisma.listing.findFirst({
+    where: { productId, marketplaceConnectionId: connectionId, deletedAt: null },
+  });
+
+  if (existingListing && existingListing.syncStatus !== 'failed') {
+    return { listing: existingListing, alreadyPublished: true };
+  }
+
+  try {
+    const reserved = existingListing
+      ? await prisma.listing.update({
+          where: { id: existingListing.id },
+          data: { syncStatus: 'syncing', syncError: null, ...fields },
+        })
+      : await prisma.listing.create({
+          data: {
+            productId,
+            workspaceId,
+            marketplaceConnectionId: connectionId,
+            status: 'active',
+            syncStatus: 'syncing',
+            ...fields,
+          },
+        });
+    return { listing: reserved, alreadyPublished: false };
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      // Lost a race — another request already claimed this exact pair a
+      // moment ago. Same outcome as the fast-path check above: return
+      // whatever exists now, never publish a duplicate.
+      const raceWinner = await prisma.listing.findFirst({ where: { productId, marketplaceConnectionId: connectionId, deletedAt: null } });
+      if (raceWinner) return { listing: raceWinner, alreadyPublished: true };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Listing.syncError is documented (see the schema's own comment) as "short,
+ * user-facing message... Never raw exceptions/stack traces" — a fixed,
+ * generic message here follows that exact rule the same way
+ * ListingService.createListing's own catch block does, without
+ * reimplementing its Etsy-specific regex branches (irrelevant here: this
+ * pipeline's Etsy fields come from the already-validated draft, never from
+ * buildEtsyListingRequirements/Product).
+ */
+async function markListingFailed(listingId: string, marketplaceDisplayName: string) {
+  return prisma.listing.update({
+    where: { id: listingId },
+    data: { syncStatus: 'failed', syncError: `Couldn't publish to ${marketplaceDisplayName}. Please try again.` },
+  }).catch(() => undefined); // best-effort bookkeeping — never masks the real error, which the caller still throws/propagates
+}
+
+async function markListingSynced(listingId: string, externalId: string | undefined) {
+  // A "successful" createListing with no real externalId is not actually
+  // usable (nothing to look the listing up by later) — treated as a
+  // failure here rather than silently marking 'synced' with a missing id,
+  // same principle as EbayAdapter.createListing's own missing-offerId check.
+  if (!externalId) {
+    throw new Error('Marketplace createListing succeeded but returned no externalId.');
+  }
+  return prisma.listing.update({ where: { id: listingId }, data: { externalId, syncStatus: 'synced' } });
+}
 
 /**
  * Phase 12C-Offline — no policy (payment/return/fulfillment) storage or
@@ -64,24 +211,33 @@ export const simulateEngageActionTool: AgentToolDefinition<{ note?: string }> = 
 
 const publishListingInputSchema = z.object({
   sourceUrl: z.string().url(),
+  // Architecture A (persistence audit) — required: a real, existing,
+  // workspace-owned ADKSY Product to attach the resulting Listing to.
+  // sourceUrl identifies where the item was FOUND, never an ADKSY Product
+  // — those stay permanently separate identifier spaces. No Product is
+  // ever created here; publishing without one already existing is refused.
+  productId: z.string().min(1, 'productId is required'),
 });
 
 /**
  * Phase 12C-Offline — connects the real pipeline:
  * generate_listing_draft -> edit_listing_draft -> (preview) -> confirm ->
- * (handler) execute. `sourceUrl` is the ONLY input — never a raw
- * marketplaceId/categoryId/workspaceId the model or client could supply
- * directly; those all come from the already-revalidated ListingDraft
- * (see findLatestDraft, the exact same conversation-history revalidation
- * generate_listing_draft/edit_listing_draft already use — a sourceUrl
- * that never produced a draft IN THIS CONVERSATION is rejected, never
- * accepted on trust).
+ * (handler) execute. `sourceUrl`/`productId` are the ONLY inputs — never a
+ * raw marketplaceId/categoryId/workspaceId the model or client could
+ * supply directly; the marketplace payload fields all come from the
+ * already-revalidated ListingDraft (see findLatestDraft, the exact same
+ * conversation-history revalidation generate_listing_draft/
+ * edit_listing_draft already use — a sourceUrl that never produced a draft
+ * IN THIS CONVERSATION is rejected, never accepted on trust), while
+ * productId is independently verified against this exact workspace.
  *
  * Still 'engage' — never auto-executed (see AiToolRegistry.isAutoExecutable).
  * preview() builds the real payload (mapDraftToEbayInput) and stores it
  * verbatim as the confirmable AgentAction's summary, so what the reseller
  * confirms is exactly what handler() would send — never a separately
- * hand-written preview that could drift from reality.
+ * hand-written preview that could drift from reality. preview() never
+ * writes to the database — only handler(), after confirmation, reserves/
+ * persists the Listing (see reserveListingForPublish above).
  *
  * ABSOLUTE SAFEGUARD: handler() only ever reaches getAuthenticatedAdapter/
  * adapter.createListing when isRealEbayPublishEnabled() is true —
@@ -89,14 +245,18 @@ const publishListingInputSchema = z.object({
  * never set anywhere in this codebase or by any test. In every
  * environment where that variable is unset (every environment this was
  * developed and tested in), handler() returns a clearly-labeled
- * simulation and never imports/calls anything network-capable.
+ * simulation and never imports/calls anything network-capable, and never
+ * touches the Listing table either.
  */
-export const publishListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
+export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; productId: string }> = {
   name: 'publish_listing',
   description:
-    'Propose publishing the listing draft already prepared for sourceUrl (via generate_listing_draft/edit_listing_draft) IN THIS CONVERSATION to its target eBay marketplace. ' +
-    "sourceUrl must match a draft this conversation already produced — never accepted on trust. Requires the reseller's explicit confirmation before anything happens. " +
+    'Propose publishing the listing draft already prepared for sourceUrl (via generate_listing_draft/edit_listing_draft) IN THIS CONVERSATION to its target eBay marketplace, ' +
+    'attaching it to an existing ADKSY product (productId). ' +
+    "sourceUrl must match a draft this conversation already produced — never accepted on trust; productId must be a real, existing product in this workspace " +
+    "— sourceUrl alone never identifies one (it only says where the item was found). Requires the reseller's explicit confirmation before anything happens. " +
     'The draft must be fully ready for eBay (see validateEbayDraft) or this is rejected with the specific reason. ' +
+    "The SKU actually sent to eBay is always the product's own real SKU, never a value from the draft. " +
     'Payment/return/fulfillment policies are not yet managed by ADKSY — always flagged as requiring manual verification, never assumed. ' +
     'Never claim a listing was really published unless the result explicitly says so.',
   category: 'engage',
@@ -108,8 +268,12 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
         type: 'string',
         description: 'The sourceUrl of the product whose draft to publish — must already have a ready draft in this conversation.',
       },
+      productId: {
+        type: 'string',
+        description: 'The ADKSY product id (Product.id) this listing is for — must already exist in this workspace. Never inferred from sourceUrl.',
+      },
     },
-    required: ['sourceUrl'],
+    required: ['sourceUrl', 'productId'],
   },
   async preview(workspaceId, input, context) {
     if (!context) return { error: 'Missing conversation context' };
@@ -129,6 +293,13 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
       return { error: 'Listing draft could not be mapped to a valid eBay payload.' };
     }
 
+    const productResult = await loadPublishableProduct(workspaceId, input.productId);
+    if ('error' in productResult) return { error: productResult.error };
+    const { product } = productResult;
+
+    const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'ebay', 'eBay');
+    if ('error' in connectionResult) return { error: connectionResult.error };
+
     const realPublishEnabled = isRealEbayPublishEnabled();
 
     return {
@@ -136,6 +307,10 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
       marketplace: 'eBay',
       environment: describeEbayEnvironment(),
       ...ebayInput,
+      // The real product's own SKU — never the draft's — exactly what
+      // handler() will really send (see this tool's own header comment).
+      sku: product.sku,
+      productId: product.id,
       policyStatus: EBAY_POLICY_STATUS,
       missingPolicies: EBAY_MISSING_POLICIES,
       simulatedOnly: !realPublishEnabled,
@@ -162,34 +337,78 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
       return { error: 'Listing draft could not be mapped to a valid eBay payload.' };
     }
 
+    const productResult = await loadPublishableProduct(workspaceId, input.productId);
+    if ('error' in productResult) return { error: productResult.error };
+    const { product } = productResult;
+
+    const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'ebay', 'eBay');
+    if ('error' in connectionResult) return { error: connectionResult.error };
+    const { connection } = connectionResult;
+
+    // Real product SKU, never the draft's own — see this tool's header
+    // comment and the persistence-architecture audit (needed so a future
+    // order synced by SKU can actually resolve back to this product).
+    const payload = { ...ebayInput, sku: product.sku };
+
     if (!isRealEbayPublishEnabled()) {
       return {
         simulated: true,
         reason: 'Real eBay publishing is disabled in this environment (ENABLE_REAL_EBAY_PUBLISH is not set to "true").',
-        wouldHaveSent: ebayInput,
+        wouldHaveSent: payload,
         message: 'Simulation only — no real marketplace call was made.',
       };
     }
 
-    // Real path — never exercised in this environment (the flag above is
-    // always false here; see the Phase 12C-Offline report's own "zero
-    // real eBay call" confirmation). Any failure here (auth, validation,
-    // network) propagates unmodified to AiActionService.confirmAndExecute's
-    // own catch, which already logs it safely and stores only a generic,
-    // secret-free error message — never a second, ad-hoc error handler
-    // here that could diverge from that guarantee.
-    const adapter = await getAuthenticatedAdapter(workspaceId, 'ebay');
-    const result = await adapter.createListing(ebayInput as any);
-    return {
-      published: true,
-      externalId: result.externalId,
-      status: result.status,
-    };
+    const { listing: reserved, alreadyPublished } = await reserveListingForPublish(workspaceId, product.id, connection.id, {
+      title: ebayInput.title as string,
+      description: ebayInput.description as string,
+      price: ebayInput.price as number,
+      quantity: ebayInput.quantity as number,
+    });
+
+    if (alreadyPublished) {
+      // Idempotent replay: this exact (product, connection) pair is
+      // already synced/syncing — the real adapter call is NEVER repeated.
+      return {
+        published: true,
+        listingId: reserved.id,
+        externalId: reserved.externalId,
+        status: reserved.status,
+        alreadyPublished: true,
+      };
+    }
+
+    try {
+      // Real path — never exercised in this environment (the flag above is
+      // always false here; see the Phase 12C-Offline report's own "zero
+      // real eBay call" confirmation). Any failure here (auth, validation,
+      // network) propagates unmodified to AiActionService.confirmAndExecute's
+      // own catch, which already logs it safely and stores only a generic,
+      // secret-free error message — never a second, ad-hoc error handler
+      // here that could diverge from that guarantee. The Listing row is
+      // still marked 'failed' first (see markListingFailed) — local
+      // bookkeeping only, never masking or replacing the real error.
+      const adapter = await getAuthenticatedAdapter(workspaceId, 'ebay');
+      const result = await adapter.createListing(payload as any);
+      const finalListing = await markListingSynced(reserved.id, result.externalId);
+      return {
+        published: true,
+        listingId: finalListing.id,
+        externalId: result.externalId,
+        status: result.status,
+      };
+    } catch (error) {
+      await markListingFailed(reserved.id, 'eBay');
+      throw error;
+    }
   },
 };
 
 const publishEtsyListingInputSchema = z.object({
   sourceUrl: z.string().url(),
+  // Architecture A (persistence audit) — same rule as publish_listing:
+  // required, real, existing, workspace-owned Product. Never created here.
+  productId: z.string().min(1, 'productId is required'),
 });
 
 /**
@@ -210,12 +429,15 @@ const publishEtsyListingInputSchema = z.object({
  * complexity, and would risk the two pipelines becoming coupled — this
  * keeps the working eBay tool completely untouched.
  */
-export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> = {
+export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; productId: string }> = {
   name: 'publish_etsy_listing',
   description:
-    'Propose publishing the listing draft already prepared for sourceUrl (via generate_listing_draft/edit_listing_draft) IN THIS CONVERSATION to Etsy. ' +
-    "sourceUrl must match a draft this conversation already produced — never accepted on trust. Requires the reseller's explicit confirmation before anything happens. " +
+    'Propose publishing the listing draft already prepared for sourceUrl (via generate_listing_draft/edit_listing_draft) IN THIS CONVERSATION to Etsy, ' +
+    'attaching it to an existing ADKSY product (productId). ' +
+    "sourceUrl must match a draft this conversation already produced — never accepted on trust; productId must be a real, existing product in this workspace " +
+    "— sourceUrl alone never identifies one. Requires the reseller's explicit confirmation before anything happens. " +
     'The draft must be fully ready for Etsy (see validateEtsyDraft — requires who_made/when_made/taxonomy_id, never guessed) or this is rejected with the specific reason. ' +
+    "The SKU actually sent to Etsy is always the product's own real SKU, never a value from the draft. " +
     'Never claim a listing was really published unless the result explicitly says so.',
   category: 'engage',
   inputSchema: publishEtsyListingInputSchema,
@@ -226,8 +448,12 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> 
         type: 'string',
         description: 'The sourceUrl of the product whose draft to publish — must already have a ready draft in this conversation.',
       },
+      productId: {
+        type: 'string',
+        description: 'The ADKSY product id (Product.id) this listing is for — must already exist in this workspace. Never inferred from sourceUrl.',
+      },
     },
-    required: ['sourceUrl'],
+    required: ['sourceUrl', 'productId'],
   },
   async preview(workspaceId, input, context) {
     if (!context) return { error: 'Missing conversation context' };
@@ -247,6 +473,13 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> 
       return { error: 'Listing draft could not be mapped to a valid Etsy payload.' };
     }
 
+    const productResult = await loadPublishableProduct(workspaceId, input.productId);
+    if ('error' in productResult) return { error: productResult.error };
+    const { product } = productResult;
+
+    const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'etsy', 'Etsy');
+    if ('error' in connectionResult) return { error: connectionResult.error };
+
     const realPublishEnabled = isRealEtsyPublishEnabled();
 
     return {
@@ -254,6 +487,8 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> 
       marketplace: 'Etsy',
       environment: describeEtsyEnvironment(),
       ...etsyInput,
+      sku: product.sku,
+      productId: product.id,
       simulatedOnly: !realPublishEnabled,
       message: realPublishEnabled
         ? 'Confirming this action will attempt a real Etsy publish in this environment.'
@@ -278,28 +513,62 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> 
       return { error: 'Listing draft could not be mapped to a valid Etsy payload.' };
     }
 
+    const productResult = await loadPublishableProduct(workspaceId, input.productId);
+    if ('error' in productResult) return { error: productResult.error };
+    const { product } = productResult;
+
+    const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'etsy', 'Etsy');
+    if ('error' in connectionResult) return { error: connectionResult.error };
+    const { connection } = connectionResult;
+
+    const payload = { ...etsyInput, sku: product.sku };
+
     if (!isRealEtsyPublishEnabled()) {
       return {
         simulated: true,
         reason: 'Real Etsy publishing is disabled in this environment (ENABLE_REAL_ETSY_PUBLISH is not set to "true").',
-        wouldHaveSent: etsyInput,
+        wouldHaveSent: payload,
         message: 'Simulation only — no real marketplace call was made.',
       };
     }
 
-    // Real path — never exercised in this environment (the flag above is
-    // always false here). Any failure here (auth, validation, network)
-    // propagates unmodified to AiActionService.confirmAndExecute's own
-    // catch, which already logs it safely and stores only a generic,
-    // secret-free error message — never a second, ad-hoc error handler
-    // here that could diverge from that guarantee.
-    const adapter = await getAuthenticatedAdapter(workspaceId, 'etsy');
-    const result = await adapter.createListing(etsyInput as any);
-    return {
-      published: true,
-      externalId: result.externalId,
-      status: result.status,
-    };
+    const { listing: reserved, alreadyPublished } = await reserveListingForPublish(workspaceId, product.id, connection.id, {
+      title: etsyInput.title as string,
+      description: etsyInput.description as string,
+      price: etsyInput.price as number,
+      quantity: etsyInput.quantity as number,
+    });
+
+    if (alreadyPublished) {
+      return {
+        published: true,
+        listingId: reserved.id,
+        externalId: reserved.externalId,
+        status: reserved.status,
+        alreadyPublished: true,
+      };
+    }
+
+    try {
+      // Real path — never exercised in this environment (the flag above is
+      // always false here). Any failure here (auth, validation, network)
+      // propagates unmodified to AiActionService.confirmAndExecute's own
+      // catch, which already logs it safely and stores only a generic,
+      // secret-free error message — never a second, ad-hoc error handler
+      // here that could diverge from that guarantee.
+      const adapter = await getAuthenticatedAdapter(workspaceId, 'etsy');
+      const result = await adapter.createListing(payload as any);
+      const finalListing = await markListingSynced(reserved.id, result.externalId);
+      return {
+        published: true,
+        listingId: finalListing.id,
+        externalId: result.externalId,
+        status: result.status,
+      };
+    } catch (error) {
+      await markListingFailed(reserved.id, 'Etsy');
+      throw error;
+    }
   },
 };
 

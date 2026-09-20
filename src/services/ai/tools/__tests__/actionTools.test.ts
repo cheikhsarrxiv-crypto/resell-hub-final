@@ -21,6 +21,22 @@ interface FakeRow {
 let rows: FakeRow[] = [];
 let rowIdCounter = 0;
 let clock = 0;
+let listingIdCounter = 0;
+
+// Persistence-architecture audit — real Product/MarketplaceConnection/
+// Listing tables, backed by simple in-memory maps (same style as
+// publish-listing-pipeline-integration.test.ts's agentAction store), so
+// publish_listing/publish_etsy_listing's new productId requirement and
+// their reserve-then-publish Listing bookkeeping can be exercised for
+// real, never just stubbed to always succeed.
+const { productStore, connectionStore, listingStore } = vi.hoisted(() => ({
+  productStore: new Map<string, any>(),
+  connectionStore: new Map<string, any>(), // key: `${workspaceId}:${marketplaceId}`
+  listingStore: new Map<string, any>(),
+}));
+
+const DEFAULT_PRODUCT_ID = 'product-1';
+const DEFAULT_PRODUCT_SKU = 'SKU-REAL-PRODUCT-1';
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
@@ -39,6 +55,45 @@ vi.mock('@/lib/prisma', () => ({
           .filter((r) => r.conversationId === where.conversationId)
           .filter((r) => !roleFilter || roleFilter.includes(r.role))
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+      }),
+    },
+    product: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const product = productStore.get(where.id);
+        if (!product || product.workspaceId !== where.workspaceId) return null;
+        if (where.deletedAt === null && product.deletedAt) return null;
+        return { id: product.id, sku: product.sku };
+      }),
+    },
+    marketplaceConnection: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const connection = connectionStore.get(`${where.workspaceId}:${where.marketplaceId}`);
+        return connection ? { id: connection.id } : null;
+      }),
+    },
+    listing: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        for (const listing of listingStore.values()) {
+          if (
+            listing.productId === where.productId &&
+            listing.marketplaceConnectionId === where.marketplaceConnectionId &&
+            (where.deletedAt === undefined || listing.deletedAt === where.deletedAt)
+          ) {
+            return { ...listing };
+          }
+        }
+        return null;
+      }),
+      create: vi.fn(async ({ data }: any) => {
+        const row = { id: `listing-${++listingIdCounter}`, externalId: null, deletedAt: null, ...data };
+        listingStore.set(row.id, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where, data }: any) => {
+        const row = listingStore.get(where.id);
+        if (!row) throw new Error('Listing not found');
+        Object.assign(row, data);
+        return { ...row };
       }),
     },
   },
@@ -184,8 +239,14 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
     rows = [];
     rowIdCounter = 0;
     clock = 0;
+    listingIdCounter = 0;
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_EBAY_PUBLISH;
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
+    productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
+    connectionStore.set('ws-1:ebay', { id: 'conn-ebay-1' });
   });
 
   afterEach(() => {
@@ -199,13 +260,15 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
     expect(AiToolRegistry.isAutoExecutable('engage')).toBe(false);
   });
 
-  it('input schema requires sourceUrl (a real URL), never a raw workspaceId/marketplaceId', () => {
+  it('input schema requires sourceUrl (a real URL) AND productId, never a raw workspaceId/marketplaceId', () => {
     expect(publishListingTool.inputSchema.safeParse({}).success).toBe(false);
-    expect(publishListingTool.inputSchema.safeParse({ sourceUrl: 'not-a-url' }).success).toBe(false);
-    expect(publishListingTool.inputSchema.safeParse({ sourceUrl: 'https://ebay.example/item/1' }).success).toBe(true);
+    expect(publishListingTool.inputSchema.safeParse({ sourceUrl: 'not-a-url', productId: DEFAULT_PRODUCT_ID }).success).toBe(false);
+    expect(publishListingTool.inputSchema.safeParse({ sourceUrl: 'https://ebay.example/item/1' }).success).toBe(false); // productId now required
+    expect(publishListingTool.inputSchema.safeParse({ sourceUrl: 'https://ebay.example/item/1', productId: DEFAULT_PRODUCT_ID }).success).toBe(true);
 
     const parsed = publishListingTool.inputSchema.safeParse({
       sourceUrl: 'https://ebay.example/item/1',
+      productId: DEFAULT_PRODUCT_ID,
       workspaceId: 'ws-ATTACKER',
       marketplaceId: 'EBAY_US',
     });
@@ -216,9 +279,11 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
     }
   });
 
+  const withProduct = { productId: DEFAULT_PRODUCT_ID };
+
   describe('preview() — built from the real, already-revalidated draft, never a separate hand-written summary', () => {
     it('rejects a sourceUrl with no draft in this conversation', async () => {
-      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/no listing draft found/i);
     });
 
@@ -228,14 +293,14 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       pushToolCall('conv-1', 'tu-gen', 'generate_listing_draft', {}, generated);
       // No price/category/marketplaceId ever set — not ready.
 
-      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/not ready for eBay/i);
     });
 
     it('when ready, returns exactly mapDraftToEbayInput\'s fields plus policy/environment metadata — preview matches what handler() would send', async () => {
       await seedReadyDraft('conv-1');
 
-      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(summary.title).toBeDefined();
       expect(summary.price).toBe(449);
@@ -245,50 +310,94 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       expect(summary.missingPolicies).toContain('paymentPolicyId');
     });
 
+    it('overrides the draft\'s own sku with the real product\'s sku, and includes productId', async () => {
+      await seedReadyDraft('conv-1');
+
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(summary.sku).toBe(DEFAULT_PRODUCT_SKU);
+      expect(summary.productId).toBe(DEFAULT_PRODUCT_ID);
+    });
+
     it('marks itself simulatedOnly:true when ENABLE_REAL_EBAY_PUBLISH is unset (the default in every environment this was built in)', async () => {
       await seedReadyDraft('conv-1');
-      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.simulatedOnly).toBe(true);
     });
 
     it('cross-conversation: a sourceUrl with a draft only in a DIFFERENT conversation is rejected', async () => {
       await seedReadyDraft('conv-OTHER');
 
-      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/no listing draft found/i);
     });
 
     it('preview() never calls getAuthenticatedAdapter — it must never itself execute anything', async () => {
       await seedReadyDraft('conv-1');
-      await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+    });
+
+    it('preview() never writes to the Listing table — no mutation during proposal', async () => {
+      await seedReadyDraft('conv-1');
+      await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('ARCHITECTURE A: a productId that does not exist in this workspace is refused — sourceUrl alone never identifies a Product', async () => {
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/product not found/i);
+    });
+
+    it('ARCHITECTURE A: a productId belonging to ANOTHER workspace is refused, never leaked', async () => {
+      productStore.set('product-other-ws', { id: 'product-other-ws', workspaceId: 'ws-OTHER', sku: 'SKU-OTHER', deletedAt: null });
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'product-other-ws' }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/product not found/i);
+    });
+
+    it('a deleted product is refused', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), deletedAt: new Date() });
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/product not found/i);
+    });
+
+    it('no eBay MarketplaceConnection for this workspace is refused, with an actionable message', async () => {
+      connectionStore.clear();
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/no ebay connection/i);
     });
   });
 
   describe('handler() — the absolute safeguard against a real eBay call', () => {
-    it('with ENABLE_REAL_EBAY_PUBLISH unset (default): returns a simulation and NEVER calls getAuthenticatedAdapter/createListing', async () => {
+    it('with ENABLE_REAL_EBAY_PUBLISH unset (default): returns a simulation and NEVER calls getAuthenticatedAdapter/createListing, never touches Listing', async () => {
       await seedReadyDraft('conv-1');
 
-      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.simulated).toBe(true);
       expect(result.wouldHaveSent).toBeDefined();
+      expect(result.wouldHaveSent.sku).toBe(DEFAULT_PRODUCT_SKU);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
       expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
     });
 
     it('with ENABLE_REAL_EBAY_PUBLISH set to anything OTHER than the exact string "true": still simulates, never calls the adapter', async () => {
       process.env.ENABLE_REAL_EBAY_PUBLISH = 'TRUE'; // wrong case — must not be treated as enabled
       await seedReadyDraft('conv-1');
 
-      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.simulated).toBe(true);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
 
     it('rejects a sourceUrl with no draft in this conversation, before any adapter/config code runs', async () => {
-      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(result.error).toMatch(/no listing draft found/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
@@ -298,43 +407,103 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
       pushToolCall('conv-1', 'tu-gen', 'generate_listing_draft', {}, generated);
 
-      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(result.error).toMatch(/not ready for eBay/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
 
+    it('ARCHITECTURE A: an unknown/cross-workspace productId is refused before any adapter call, before any Listing write', async () => {
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/product not found/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('no eBay connection is refused before any adapter call', async () => {
+      connectionStore.clear();
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/no ebay connection/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+    });
+
     describe('the real path — ONLY reachable with ENABLE_REAL_EBAY_PUBLISH="true" AND a fully mocked adapter (never real network)', () => {
-      it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload, and returns the real result shape', async () => {
+      it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload (real product SKU, not the draft\'s), and returns the real result shape', async () => {
         process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
         createListingMock.mockResolvedValue({ externalId: 'EBAY-LISTING-1', status: 'active' });
         await seedReadyDraft('conv-1');
 
-        const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+        const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
         expect(getAuthenticatedAdapterMock).toHaveBeenCalledWith('ws-1', 'ebay');
         expect(createListingMock).toHaveBeenCalledTimes(1);
         const [sentPayload] = createListingMock.mock.calls[0];
         expect(sentPayload.price).toBe(449);
         expect(sentPayload.ebay).toEqual({ categoryId: 15709, marketplaceId: 'EBAY_GB' });
-        expect(result).toEqual({ published: true, externalId: 'EBAY-LISTING-1', status: 'active' });
+        expect(sentPayload.sku).toBe(DEFAULT_PRODUCT_SKU);
+        expect(result).toEqual({ published: true, listingId: expect.any(String), externalId: 'EBAY-LISTING-1', status: 'active' });
       });
 
-      it('AUDIT FINDING (publish_listing hardening pass, documented not fixed): a successful real publish creates NO local Listing/Product row — ' +
-        'the result has no listingId/productId at all, only the raw eBay externalId. get_listing/get_listings/update_listing and order sync (which ' +
-        'resolves Order.listingId by matching an existing Listing row) would never see this listing. Left as-is: fixing it would mean deciding how to ' +
-        'fabricate a Product from a sourced (never ADKSY-owned) item, which is a real product/business decision, not a bug fix — see the audit report.',
-        async () => {
-          process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
-          createListingMock.mockResolvedValue({ externalId: 'EBAY-LISTING-1', status: 'active' });
-          await seedReadyDraft('conv-1');
+      it('FIXED (persistence-architecture audit): a successful real publish creates a real, synced Listing row — workspaceId, productId, ' +
+        'marketplaceConnectionId, externalId, syncStatus all correct, so get_listing/get_listings/update_listing and order sync can now see it', async () => {
+        process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+        createListingMock.mockResolvedValue({ externalId: 'EBAY-LISTING-1', status: 'active' });
+        await seedReadyDraft('conv-1');
 
-          const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+        const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
-          expect(result).not.toHaveProperty('listingId');
-          expect(result).not.toHaveProperty('productId');
-          expect(Object.keys(result).sort()).toEqual(['externalId', 'published', 'status']);
-        }
-      );
+        const listing = listingStore.get(result.listingId);
+        expect(listing).toBeDefined();
+        expect(listing.workspaceId).toBe('ws-1');
+        expect(listing.productId).toBe(DEFAULT_PRODUCT_ID);
+        expect(listing.marketplaceConnectionId).toBe('conn-ebay-1');
+        expect(listing.externalId).toBe('EBAY-LISTING-1');
+        expect(listing.syncStatus).toBe('synced');
+        expect(listing.status).toBe('active');
+        expect(listing.deletedAt).toBeNull();
+      });
+
+      it('idempotence: confirming the SAME (product, connection) pair a second time never re-calls the real adapter — replays the existing synced Listing', async () => {
+        process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+        createListingMock.mockResolvedValue({ externalId: 'EBAY-LISTING-1', status: 'active' });
+        await seedReadyDraft('conv-1');
+
+        const first: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+        const second: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+        expect(createListingMock).toHaveBeenCalledTimes(1); // never called twice
+        expect(second.alreadyPublished).toBe(true);
+        expect(second.listingId).toBe(first.listingId);
+        expect(listingStore.size).toBe(1); // no duplicate Listing row
+      });
+
+      it('a failed publish leaves the Listing row in a retryable "failed" state, and a later successful retry reuses the SAME row (no duplicate)', async () => {
+        process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+        createListingMock.mockRejectedValueOnce({ type: 'VALIDATION_ERROR', message: 'eBay rejected the offer', statusCode: 400 });
+        await seedReadyDraft('conv-1');
+
+        await expect(
+          publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+        ).rejects.toBeTruthy();
+
+        expect(listingStore.size).toBe(1);
+        const failedListing = Array.from(listingStore.values())[0];
+        expect(failedListing.syncStatus).toBe('failed');
+        expect(failedListing.syncError).not.toMatch(/eBay rejected the offer/); // never the raw marketplace message
+        expect(failedListing.syncError).not.toMatch(/token|secret/i);
+
+        createListingMock.mockResolvedValueOnce({ externalId: 'EBAY-LISTING-RETRY', status: 'active' });
+        const retryResult: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+        expect(retryResult.listingId).toBe(failedListing.id); // same row reused, never a duplicate
+        expect(listingStore.size).toBe(1);
+        expect(listingStore.get(failedListing.id).syncStatus).toBe('synced');
+      });
 
       it('a failure from the real adapter propagates (never swallowed into a fake success)', async () => {
         process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
@@ -342,7 +511,7 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
         await seedReadyDraft('conv-1');
 
         await expect(
-          publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' })
+          publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
         ).rejects.toBeTruthy();
       });
     });
@@ -354,13 +523,21 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     rows = [];
     rowIdCounter = 0;
     clock = 0;
+    listingIdCounter = 0;
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
+    productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
+    connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
   });
+
+  const withProduct = { productId: DEFAULT_PRODUCT_ID };
 
   it('is registered in AiToolRegistry as an engage tool — never auto-executed', () => {
     const tool = AiToolRegistry.get('publish_etsy_listing');
@@ -369,15 +546,16 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     expect(AiToolRegistry.isAutoExecutable('engage')).toBe(false);
   });
 
-  it('input schema requires sourceUrl (a real URL), never a raw workspaceId', () => {
+  it('input schema requires sourceUrl (a real URL) AND productId, never a raw workspaceId', () => {
     expect(publishEtsyListingTool.inputSchema.safeParse({}).success).toBe(false);
-    expect(publishEtsyListingTool.inputSchema.safeParse({ sourceUrl: 'not-a-url' }).success).toBe(false);
-    expect(publishEtsyListingTool.inputSchema.safeParse({ sourceUrl: 'https://etsy.example/item/1' }).success).toBe(true);
+    expect(publishEtsyListingTool.inputSchema.safeParse({ sourceUrl: 'not-a-url', productId: DEFAULT_PRODUCT_ID }).success).toBe(false);
+    expect(publishEtsyListingTool.inputSchema.safeParse({ sourceUrl: 'https://etsy.example/item/1' }).success).toBe(false); // productId now required
+    expect(publishEtsyListingTool.inputSchema.safeParse({ sourceUrl: 'https://etsy.example/item/1', productId: DEFAULT_PRODUCT_ID }).success).toBe(true);
   });
 
   describe('preview()', () => {
     it('rejects a sourceUrl with no draft in this conversation', async () => {
-      const summary = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/no listing draft found/i);
     });
 
@@ -387,14 +565,14 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       pushToolCall('conv-1', 'tu-gen', 'generate_listing_draft', {}, generated);
       // No taxonomyId/whenMade/whoMade ever set — not ready.
 
-      const summary = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/not ready for etsy/i);
     });
 
     it('when ready, returns exactly mapDraftToEtsyInput\'s fields plus environment metadata — preview matches what handler() would send', async () => {
       await seedReadyEtsyDraft('conv-1');
 
-      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(summary.title).toBeDefined();
       expect(summary.price).toBe(449);
@@ -404,37 +582,74 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       expect(summary.policyStatus).toBeUndefined();
     });
 
+    it('overrides the draft\'s own sku with the real product\'s sku, and includes productId', async () => {
+      await seedReadyEtsyDraft('conv-1');
+
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(summary.sku).toBe(DEFAULT_PRODUCT_SKU);
+      expect(summary.productId).toBe(DEFAULT_PRODUCT_ID);
+    });
+
     it('marks itself simulatedOnly:true when ENABLE_REAL_ETSY_PUBLISH is unset (the default in every environment this was built in)', async () => {
       await seedReadyEtsyDraft('conv-1');
-      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.simulatedOnly).toBe(true);
     });
 
     it('preview() never calls getAuthenticatedAdapter — it must never itself execute anything', async () => {
       await seedReadyEtsyDraft('conv-1');
-      await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+    });
+
+    it('preview() never writes to the Listing table — no mutation during proposal', async () => {
+      await seedReadyEtsyDraft('conv-1');
+      await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('ARCHITECTURE A: a productId that does not exist in this workspace is refused', async () => {
+      await seedReadyEtsyDraft('conv-1');
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/product not found/i);
+    });
+
+    it('ARCHITECTURE A: a productId belonging to ANOTHER workspace is refused, never leaked', async () => {
+      productStore.set('product-other-ws', { id: 'product-other-ws', workspaceId: 'ws-OTHER', sku: 'SKU-OTHER', deletedAt: null });
+      await seedReadyEtsyDraft('conv-1');
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'product-other-ws' }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/product not found/i);
+    });
+
+    it('no Etsy MarketplaceConnection for this workspace is refused, with an actionable message', async () => {
+      connectionStore.clear();
+      await seedReadyEtsyDraft('conv-1');
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/no etsy connection/i);
     });
   });
 
   describe('handler() — the absolute safeguard against a real Etsy call', () => {
-    it('with ENABLE_REAL_ETSY_PUBLISH unset (default): returns a simulation and NEVER calls getAuthenticatedAdapter/createListing', async () => {
+    it('with ENABLE_REAL_ETSY_PUBLISH unset (default): returns a simulation and NEVER calls getAuthenticatedAdapter/createListing, never touches Listing', async () => {
       await seedReadyEtsyDraft('conv-1');
 
-      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.simulated).toBe(true);
       expect(result.wouldHaveSent).toBeDefined();
+      expect(result.wouldHaveSent.sku).toBe(DEFAULT_PRODUCT_SKU);
       expect(JSON.stringify(result)).not.toMatch(/"published"\s*:\s*true/);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
       expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
     });
 
     it('with ENABLE_REAL_ETSY_PUBLISH set to anything OTHER than the exact string "true": still simulates, never calls the adapter', async () => {
       process.env.ENABLE_REAL_ETSY_PUBLISH = 'TRUE'; // wrong case — must not be treated as enabled
       await seedReadyEtsyDraft('conv-1');
 
-      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.simulated).toBe(true);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
@@ -444,7 +659,7 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
       await seedReadyEtsyDraft('conv-1');
 
-      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.simulated).toBe(true);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
@@ -452,7 +667,7 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     });
 
     it('rejects a sourceUrl with no draft in this conversation, before any adapter/config code runs', async () => {
-      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(result.error).toMatch(/no listing draft found/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
@@ -462,41 +677,98 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
       pushToolCall('conv-1', 'tu-gen', 'generate_listing_draft', {}, generated);
 
-      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(result.error).toMatch(/not ready for etsy/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
 
+    it('ARCHITECTURE A: an unknown/cross-workspace productId is refused before any adapter call, before any Listing write', async () => {
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/product not found/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('no Etsy connection is refused before any adapter call', async () => {
+      connectionStore.clear();
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/no etsy connection/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+    });
+
     describe('the real path — ONLY reachable with ENABLE_REAL_ETSY_PUBLISH="true" AND a fully mocked adapter (never real network)', () => {
-      it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload, and returns the real result shape', async () => {
+      it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload (real product SKU), and returns the real result shape', async () => {
         process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
         createListingMock.mockResolvedValue({ externalId: 'ETSY-LISTING-1', status: 'active' });
         await seedReadyEtsyDraft('conv-1');
 
-        const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+        const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
         expect(getAuthenticatedAdapterMock).toHaveBeenCalledWith('ws-1', 'etsy');
         expect(createListingMock).toHaveBeenCalledTimes(1);
         const [sentPayload] = createListingMock.mock.calls[0];
         expect(sentPayload.price).toBe(449);
         expect(sentPayload.etsy).toEqual({ whoMade: 'i_did', whenMade: '2020_2025', taxonomyId: 1234 });
-        expect(result).toEqual({ published: true, externalId: 'ETSY-LISTING-1', status: 'active' });
+        expect(sentPayload.sku).toBe(DEFAULT_PRODUCT_SKU);
+        expect(result).toEqual({ published: true, listingId: expect.any(String), externalId: 'ETSY-LISTING-1', status: 'active' });
       });
 
-      it('AUDIT FINDING (publish_listing hardening pass, documented not fixed): a successful real publish creates NO local Listing/Product row — ' +
-        'same gap as publish_listing (eBay), see that test\'s own comment and the audit report for why this is documented rather than fixed here.',
-        async () => {
-          process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
-          createListingMock.mockResolvedValue({ externalId: 'ETSY-LISTING-1', status: 'active' });
-          await seedReadyEtsyDraft('conv-1');
+      it('FIXED (persistence-architecture audit): a successful real publish creates a real, synced Listing row', async () => {
+        process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+        createListingMock.mockResolvedValue({ externalId: 'ETSY-LISTING-1', status: 'active' });
+        await seedReadyEtsyDraft('conv-1');
 
-          const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+        const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
 
-          expect(result).not.toHaveProperty('listingId');
-          expect(result).not.toHaveProperty('productId');
-          expect(Object.keys(result).sort()).toEqual(['externalId', 'published', 'status']);
-        }
-      );
+        const listing = listingStore.get(result.listingId);
+        expect(listing).toBeDefined();
+        expect(listing.workspaceId).toBe('ws-1');
+        expect(listing.productId).toBe(DEFAULT_PRODUCT_ID);
+        expect(listing.marketplaceConnectionId).toBe('conn-etsy-1');
+        expect(listing.externalId).toBe('ETSY-LISTING-1');
+        expect(listing.syncStatus).toBe('synced');
+      });
+
+      it('idempotence: confirming the SAME (product, connection) pair a second time never re-calls the real adapter', async () => {
+        process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+        createListingMock.mockResolvedValue({ externalId: 'ETSY-LISTING-1', status: 'active' });
+        await seedReadyEtsyDraft('conv-1');
+
+        const first: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+        const second: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+        expect(createListingMock).toHaveBeenCalledTimes(1);
+        expect(second.alreadyPublished).toBe(true);
+        expect(second.listingId).toBe(first.listingId);
+        expect(listingStore.size).toBe(1);
+      });
+
+      it('a failed publish leaves the Listing row "failed" (retryable), and a later successful retry reuses the SAME row', async () => {
+        process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+        createListingMock.mockRejectedValueOnce({ type: 'VALIDATION_ERROR', message: 'Etsy rejected the listing', statusCode: 400 });
+        await seedReadyEtsyDraft('conv-1');
+
+        await expect(
+          publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+        ).rejects.toBeTruthy();
+
+        expect(listingStore.size).toBe(1);
+        const failedListing = Array.from(listingStore.values())[0];
+        expect(failedListing.syncStatus).toBe('failed');
+        expect(failedListing.syncError).not.toMatch(/Etsy rejected the listing/);
+
+        createListingMock.mockResolvedValueOnce({ externalId: 'ETSY-LISTING-RETRY', status: 'active' });
+        const retryResult: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+        expect(retryResult.listingId).toBe(failedListing.id);
+        expect(listingStore.size).toBe(1);
+      });
 
       it('a failure from the real adapter propagates (never swallowed into a fake success)', async () => {
         process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
@@ -504,7 +776,7 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
         await seedReadyEtsyDraft('conv-1');
 
         await expect(
-          publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' })
+          publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
         ).rejects.toBeTruthy();
       });
     });

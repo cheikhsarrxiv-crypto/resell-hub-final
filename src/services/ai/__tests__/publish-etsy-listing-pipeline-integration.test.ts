@@ -21,7 +21,7 @@ interface FakeMessageRow {
   createdAt: Date;
 }
 
-const { messageRows, actionStore, conversationOwners, createListingMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
+const { messageRows, actionStore, conversationOwners, productStore, connectionStore, listingStore, createListingMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
   const createListingMock = vi.fn();
   const getAuthenticatedAdapterMock = vi.fn(async (_workspaceId: string, _marketplaceName: string) => ({
     createListing: createListingMock,
@@ -30,6 +30,10 @@ const { messageRows, actionStore, conversationOwners, createListingMock, getAuth
     messageRows: [] as FakeMessageRow[],
     actionStore: new Map<string, any>(),
     conversationOwners: new Map<string, string>(),
+    // Persistence-architecture audit — see publish-listing-pipeline-integration.test.ts's own comment.
+    productStore: new Map<string, any>(),
+    connectionStore: new Map<string, any>(),
+    listingStore: new Map<string, any>(),
     createListingMock,
     getAuthenticatedAdapterMock,
   };
@@ -38,6 +42,7 @@ const { messageRows, actionStore, conversationOwners, createListingMock, getAuth
 let rowIdCounter = 0;
 let clock = 0;
 let actionIdCounter = 0;
+let listingIdCounter = 0;
 
 function matchesAction(row: any, where: any): boolean {
   if (where.id !== undefined && row.id !== where.id) return false;
@@ -102,6 +107,45 @@ vi.mock('@/lib/prisma', () => ({
         return { ...row };
       }),
     },
+    product: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const product = productStore.get(where.id);
+        if (!product || product.workspaceId !== where.workspaceId) return null;
+        if (where.deletedAt === null && product.deletedAt) return null;
+        return { id: product.id, sku: product.sku };
+      }),
+    },
+    marketplaceConnection: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const connection = connectionStore.get(`${where.workspaceId}:${where.marketplaceId}`);
+        return connection ? { id: connection.id } : null;
+      }),
+    },
+    listing: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        for (const listing of listingStore.values()) {
+          if (
+            listing.productId === where.productId &&
+            listing.marketplaceConnectionId === where.marketplaceConnectionId &&
+            (where.deletedAt === undefined || listing.deletedAt === where.deletedAt)
+          ) {
+            return { ...listing };
+          }
+        }
+        return null;
+      }),
+      create: vi.fn(async ({ data }: any) => {
+        const row = { id: `listing-${++listingIdCounter}`, externalId: null, deletedAt: null, ...data };
+        listingStore.set(row.id, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where, data }: any) => {
+        const row = listingStore.get(where.id);
+        if (!row) throw new Error('Listing not found');
+        Object.assign(row, data);
+        return { ...row };
+      }),
+    },
   },
 }));
 
@@ -151,8 +195,18 @@ const sourcedItem: NormalizedSourcingResult = {
   authenticityStatus: 'claimed',
 };
 
+function productIdFor(workspaceId: string) {
+  return `product-${workspaceId}`;
+}
+
+function seedPublishableProduct(workspaceId: string) {
+  productStore.set(productIdFor(workspaceId), { id: productIdFor(workspaceId), workspaceId, sku: `SKU-${workspaceId}`, deletedAt: null });
+  connectionStore.set(`${workspaceId}:etsy`, { id: `conn-etsy-${workspaceId}` });
+}
+
 async function seedReadyEtsyDraft(conversationId: string, workspaceId = 'ws-1') {
   conversationOwners.set(conversationId, workspaceId);
+  seedPublishableProduct(workspaceId);
   pushToolCall(conversationId, 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
   const generated: any = await generateListingDraftTool.handler(
     workspaceId,
@@ -170,7 +224,7 @@ async function seedReadyEtsyDraft(conversationId: string, workspaceId = 'ws-1') 
 
 async function proposeEtsyPublish(workspaceId: string, conversationId: string, toolUseId = 'tu-publish') {
   const tool = AiToolRegistry.get('publish_etsy_listing')!;
-  const input = { sourceUrl: sourcedItem.sourceUrl };
+  const input = { sourceUrl: sourcedItem.sourceUrl, productId: productIdFor(workspaceId) };
   const preview = await tool.preview!(workspaceId, input, { conversationId, userId: 'user-1' });
   return AiActionService.proposeAction({
     workspaceId,
@@ -189,9 +243,13 @@ describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionServ
     messageRows.length = 0; // messageRows is a const binding (from vi.hoisted) — clear in place, never reassign
     actionStore.clear();
     conversationOwners.clear();
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
     rowIdCounter = 0;
     clock = 0;
     actionIdCounter = 0;
+    listingIdCounter = 0;
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
   });
@@ -222,7 +280,7 @@ describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionServ
     const confirmed = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
 
     expect(confirmed?.status).toBe('COMPLETED');
-    expect(confirmed?.result).toEqual({ published: true, externalId: 'ETSY-1', status: 'active' });
+    expect(confirmed?.result).toEqual({ published: true, listingId: expect.any(String), externalId: 'ETSY-1', status: 'active' });
     expect(getAuthenticatedAdapterMock).toHaveBeenCalledWith('ws-1', 'etsy');
   });
 

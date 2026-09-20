@@ -21,7 +21,7 @@ interface FakeMessageRow {
   createdAt: Date;
 }
 
-const { messageRows, actionStore, conversationOwners, createListingMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
+const { messageRows, actionStore, conversationOwners, productStore, connectionStore, listingStore, createListingMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
   const createListingMock = vi.fn();
   const getAuthenticatedAdapterMock = vi.fn(async (_workspaceId: string, _marketplaceName: string) => ({
     createListing: createListingMock,
@@ -34,6 +34,13 @@ const { messageRows, actionStore, conversationOwners, createListingMock, getAuth
     // tests exercise the NEW findToolResultsByName ownership check for
     // real, not just assert against an always-matching stub.
     conversationOwners: new Map<string, string>(),
+    // Persistence-architecture audit — real Product/MarketplaceConnection/
+    // Listing tables, needed now that publish_listing requires a real
+    // productId and persists a Listing on success (see actionTools.ts's
+    // reserveListingForPublish).
+    productStore: new Map<string, any>(),
+    connectionStore: new Map<string, any>(), // key: `${workspaceId}:${marketplaceId}`
+    listingStore: new Map<string, any>(),
     createListingMock,
     getAuthenticatedAdapterMock,
   };
@@ -42,6 +49,7 @@ const { messageRows, actionStore, conversationOwners, createListingMock, getAuth
 let rowIdCounter = 0;
 let clock = 0;
 let actionIdCounter = 0;
+let listingIdCounter = 0;
 
 function matchesAction(row: any, where: any): boolean {
   if (where.id !== undefined && row.id !== where.id) return false;
@@ -106,6 +114,45 @@ vi.mock('@/lib/prisma', () => ({
         return { ...row };
       }),
     },
+    product: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const product = productStore.get(where.id);
+        if (!product || product.workspaceId !== where.workspaceId) return null;
+        if (where.deletedAt === null && product.deletedAt) return null;
+        return { id: product.id, sku: product.sku };
+      }),
+    },
+    marketplaceConnection: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        const connection = connectionStore.get(`${where.workspaceId}:${where.marketplaceId}`);
+        return connection ? { id: connection.id } : null;
+      }),
+    },
+    listing: {
+      findFirst: vi.fn(async ({ where }: any) => {
+        for (const listing of listingStore.values()) {
+          if (
+            listing.productId === where.productId &&
+            listing.marketplaceConnectionId === where.marketplaceConnectionId &&
+            (where.deletedAt === undefined || listing.deletedAt === where.deletedAt)
+          ) {
+            return { ...listing };
+          }
+        }
+        return null;
+      }),
+      create: vi.fn(async ({ data }: any) => {
+        const row = { id: `listing-${++listingIdCounter}`, externalId: null, deletedAt: null, ...data };
+        listingStore.set(row.id, row);
+        return { ...row };
+      }),
+      update: vi.fn(async ({ where, data }: any) => {
+        const row = listingStore.get(where.id);
+        if (!row) throw new Error('Listing not found');
+        Object.assign(row, data);
+        return { ...row };
+      }),
+    },
   },
 }));
 
@@ -155,8 +202,19 @@ const sourcedItem: NormalizedSourcingResult = {
   authenticityStatus: 'claimed',
 };
 
+function productIdFor(workspaceId: string) {
+  return `product-${workspaceId}`;
+}
+
+/** Seeds a real, existing Product + eBay MarketplaceConnection for this workspace (Architecture A — required by publish_listing). */
+function seedPublishableProduct(workspaceId: string) {
+  productStore.set(productIdFor(workspaceId), { id: productIdFor(workspaceId), workspaceId, sku: `SKU-${workspaceId}`, deletedAt: null });
+  connectionStore.set(`${workspaceId}:ebay`, { id: `conn-ebay-${workspaceId}` });
+}
+
 async function seedReadyDraft(conversationId: string, workspaceId = 'ws-1') {
   conversationOwners.set(conversationId, workspaceId);
+  seedPublishableProduct(workspaceId);
   pushToolCall(conversationId, 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
   const generated: any = await generateListingDraftTool.handler(
     workspaceId,
@@ -174,7 +232,7 @@ async function seedReadyDraft(conversationId: string, workspaceId = 'ws-1') {
 
 async function proposePublish(workspaceId: string, conversationId: string, toolUseId = 'tu-publish') {
   const tool = AiToolRegistry.get('publish_listing')!;
-  const input = { sourceUrl: sourcedItem.sourceUrl };
+  const input = { sourceUrl: sourcedItem.sourceUrl, productId: productIdFor(workspaceId) };
   const preview = await tool.preview!(workspaceId, input, { conversationId, userId: 'user-1' });
   return AiActionService.proposeAction({
     workspaceId,
@@ -193,9 +251,13 @@ describe('publish_listing — end-to-end pipeline via the REAL AiActionService',
     messageRows.length = 0; // messageRows is a const binding (from vi.hoisted) — clear in place, never reassign
     actionStore.clear();
     conversationOwners.clear();
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
     rowIdCounter = 0;
     clock = 0;
     actionIdCounter = 0;
+    listingIdCounter = 0;
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_EBAY_PUBLISH;
   });
@@ -233,11 +295,10 @@ describe('publish_listing — end-to-end pipeline via the REAL AiActionService',
       expect(b).not.toBeNull();
     });
 
-    it('AUDIT FINDING (publish_listing hardening pass, documented not fixed): TWO separately proposed publish_listing actions for the ' +
-      'SAME sourceUrl are NOT deduped against each other — ADKSY\'s idempotency (idempotencyKey = conversationId:toolUseId) only prevents replaying ' +
-      'the SAME tool_use twice, never a second, distinct tool_use for the same draft. Confirming both really calls the real eBay adapter twice — a ' +
-      'direct consequence of publish_listing never persisting a local Listing row to check against (see actionTools.test.ts\'s own "creates NO local ' +
-      'Listing/Product row" test and the audit report).',
+    it('FIXED (persistence-architecture audit): TWO separately proposed publish_listing actions for the SAME (product, connection) pair ' +
+      '(a distinct tool_use each — e.g. the model asked again) are now deduped through the persisted Listing row itself, never the real eBay adapter twice. ' +
+      'Previously (before this fix) this called createListing twice, since nothing local existed to check against — see actionTools.test.ts\'s own ' +
+      'idempotence tests for the unit-level version of this guarantee.',
       async () => {
         process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
         createListingMock.mockResolvedValue({ externalId: 'EBAY-1', status: 'active' });
@@ -246,10 +307,13 @@ describe('publish_listing — end-to-end pipeline via the REAL AiActionService',
         const first = await proposePublish('ws-1', 'conv-1', 'tu-publish-1');
         const second = await proposePublish('ws-1', 'conv-1', 'tu-publish-2'); // a distinct tool_use, e.g. the model asked again
 
-        await AiActionService.confirmAndExecute('ws-1', 'user-1', first.id);
-        await AiActionService.confirmAndExecute('ws-1', 'user-1', second.id);
+        const firstResult = await AiActionService.confirmAndExecute('ws-1', 'user-1', first.id);
+        const secondResult = await AiActionService.confirmAndExecute('ws-1', 'user-1', second.id);
 
-        expect(createListingMock).toHaveBeenCalledTimes(2); // two real listings would really be created on eBay
+        expect(createListingMock).toHaveBeenCalledTimes(1); // real adapter call happens only once now
+        expect((firstResult?.result as any).published).toBe(true);
+        expect((secondResult?.result as any).alreadyPublished).toBe(true);
+        expect(listingStore.size).toBe(1); // no duplicate Listing row
       }
     );
 
