@@ -9,7 +9,7 @@ import { getCustomerOrdersTool } from './tools/customerOrderTools';
 import { getSalesSummaryTool } from './tools/salesSummaryTools';
 import { searchProductsTool } from './tools/sourcingTools';
 import { calculateMarginTool } from './tools/pricingTools';
-import { simulateEngageActionTool, publishListingTool, publishEtsyListingTool, updateListingTool } from './tools/actionTools';
+import { simulateEngageActionTool, publishListingTool, publishEtsyListingTool, updateListingTool, sendToFulfillmentTool } from './tools/actionTools';
 import { generateListingDraftTool, editListingDraftTool } from './tools/listingDraftTools';
 
 /**
@@ -45,6 +45,7 @@ const TOOLS: AgentToolDefinition[] = [
   publishListingTool,
   publishEtsyListingTool,
   updateListingTool,
+  sendToFulfillmentTool,
   generateListingDraftTool,
   editListingDraftTool,
 ];

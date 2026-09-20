@@ -5,6 +5,9 @@ import { AgentToolDefinition } from './types';
 import { findLatestDraft } from './listingDraftTools';
 import { validateEbayDraft, mapDraftToEbayInput, validateEtsyDraft, mapDraftToEtsyInput } from '@/lib/listing/listingDraft';
 import { ListingService, getAuthenticatedAdapter } from '@/services/ListingService';
+import { OrderService } from '@/services/OrderService';
+import { FulfillmentService } from '@/services/FulfillmentService';
+import { SubscriptionService } from '@/services/SubscriptionService';
 import { isRealEbayPublishEnabled, describeEbayEnvironment } from './ebayPublishGuard';
 import { isRealEtsyPublishEnabled, describeEtsyEnvironment } from './etsyPublishGuard';
 
@@ -784,5 +787,179 @@ export const updateListingTool: AgentToolDefinition<UpdateListingInput> = {
         quantity: updated.quantity,
       },
     };
+  },
+};
+
+/**
+ * send_to_fulfillment — proposes sending an existing order to ADKSY's own
+ * fulfillment pipeline. 'engage': creates a real, persistent FulfillmentOrder
+ * and flips the order's own status/fulfillmentType — a real, visible
+ * business effect, never auto-executed.
+ *
+ * AUDIT (this tool's own, verified against the real
+ * FulfillmentService.sendToFulfillment before writing any of this):
+ * - Reuses FulfillmentService.sendToFulfillment AS-IS — its plan gate
+ *   (SubscriptionService.hasFeature(workspaceId, 'fulfillmentEnabled')),
+ *   its Order lookup ({id, workspaceId} — workspace isolation already
+ *   enforced there), its "already has a FulfillmentOrder" pre-check, and
+ *   its partner lookup are never reimplemented here.
+ * - Double-fulfillment guard: FulfillmentOrder.orderId is @unique in the
+ *   Prisma schema (prisma/schema.prisma) — a real, race-safe DB-level
+ *   backstop. Two concurrent confirmations for the same order can each
+ *   pass the service's own pre-check, but only ONE prisma.fulfillmentOrder.create
+ *   ever succeeds; the loser's raw Prisma error is deliberately NOT
+ *   pattern-matched below (never turned into the friendly "already
+ *   created" message) — it propagates to AiActionService's own generic,
+ *   already-safe catch, exactly like any other unexpected failure.
+ * - sendToFulfillment does NOT check Order.status (a cancelled/failed
+ *   order is not blocked by the service itself) and does NOT touch
+ *   Inventory/stock at all (no reservation, no stock check — that only
+ *   ever happens at Order-creation time via ProductService.reserveInventory).
+ *   Never invented here: this tool surfaces the order's real status in
+ *   preview so the reseller can judge, but never adds a new blocking rule
+ *   the real service doesn't itself enforce.
+ * - Explicitly out of scope (per this task): never calls
+ *   simulateOrderAccepted/Processing/Shipped/Delivered — this tool stops at
+ *   the real sendToFulfillment call.
+ */
+const sendToFulfillmentInputSchema = z.object({
+  orderId: z.string().min(1, 'orderId is required'),
+  // Optional: FulfillmentPartner is a global (non-workspace-scoped) list —
+  // auto-resolved only when exactly one active partner exists (see
+  // resolveFulfillmentPartner), never guessed among several, mirroring
+  // OrdersSyncService's own "only when exactly one candidate" discipline.
+  partnerId: z.string().min(1).optional(),
+});
+
+type SendToFulfillmentInput = z.infer<typeof sendToFulfillmentInputSchema>;
+
+// The exact, real business-error messages FulfillmentService.sendToFulfillment
+// throws today (verified against its source) — never guessed. Anything else
+// (e.g. a raw Prisma race error) is deliberately NOT matched here, so it
+// propagates unmodified to AiActionService's own safe, generic catch.
+const KNOWN_FULFILLMENT_ERRORS = new Set([
+  'Fulfillment is not included in your current plan',
+  'Order not found',
+  'Fulfillment order already created',
+  'Fulfillment partner not found',
+]);
+
+async function resolveFulfillmentPartner(
+  partnerId: string | undefined
+): Promise<{ partner: { id: string; name: string; country: string; costPerOrder: number; processingTime: number; deliveryTime: number } } | { error: string }> {
+  if (partnerId) {
+    const partner = await prisma.fulfillmentPartner.findUnique({ where: { id: partnerId } });
+    if (!partner || partner.status !== 'active') {
+      return { error: 'Fulfillment partner not found or not active.' };
+    }
+    return { partner };
+  }
+
+  const activePartners = await prisma.fulfillmentPartner.findMany({ where: { status: 'active' } });
+  if (activePartners.length === 0) {
+    return { error: 'No active fulfillment partner is configured for this workspace.' };
+  }
+  if (activePartners.length > 1) {
+    return { error: 'Multiple fulfillment partners are available — specify partnerId to choose one.' };
+  }
+  return { partner: activePartners[0] };
+}
+
+export const sendToFulfillmentTool: AgentToolDefinition<SendToFulfillmentInput> = {
+  name: 'send_to_fulfillment',
+  description:
+    "Propose sending an existing order in the reseller's own workspace to ADKSY's own fulfillment pipeline (FulfillmentService.sendToFulfillment), " +
+    'creating a real FulfillmentOrder and moving the order to fulfillmentType "automatic" / status "processing". ' +
+    "Requires the reseller's explicit confirmation before anything happens. If the order already has a fulfillment order, or fulfillment is not " +
+    "included in the workspace's current plan, this is rejected with the specific reason — never silently retried or worked around. " +
+    'Does not check inventory/stock (the real service does not either) and does not check the order\'s own status — both are surfaced as real, ' +
+    'factual context in the proposal, never used to invent a new blocking rule the real service does not enforce. ' +
+    'Never simulates acceptance, processing, shipping, or delivery — those remain separate, explicitly-simulated capabilities, not real fulfillment.',
+  category: 'engage',
+  inputSchema: sendToFulfillmentInputSchema,
+  jsonSchema: {
+    type: 'object',
+    properties: {
+      orderId: { type: 'string', description: 'The ADKSY order id (Order.id) to send to fulfillment.' },
+      partnerId: {
+        type: 'string',
+        description: 'The fulfillment partner id to use. Omit if only one active partner exists — it will be used automatically.',
+      },
+    },
+    required: ['orderId'],
+  },
+  async preview(workspaceId, input) {
+    const order = await OrderService.getOrder(input.orderId, workspaceId);
+    if (!order) {
+      return { error: 'Order not found in this workspace.' };
+    }
+
+    const partnerResult = await resolveFulfillmentPartner(input.partnerId);
+    if ('error' in partnerResult) return { error: partnerResult.error };
+    const { partner } = partnerResult;
+
+    // Read-only — the exact same check sendToFulfillment itself makes,
+    // surfaced here purely so a doomed-from-the-start proposal isn't shown
+    // as if it would succeed. Never a second, divergent gate.
+    const fulfillmentEnabled = await SubscriptionService.hasFeature(workspaceId, 'fulfillmentEnabled');
+
+    const alreadyHasFulfillmentOrder = Boolean(order.fulfillmentOrder);
+
+    return {
+      action: 'send_to_fulfillment',
+      orderId: order.id,
+      orderStatus: order.status,
+      alreadyHasFulfillmentOrder,
+      fulfillmentEnabledForPlan: fulfillmentEnabled,
+      partner: {
+        id: partner.id,
+        name: partner.name,
+        country: partner.country,
+        costPerOrder: partner.costPerOrder,
+        processingTime: partner.processingTime,
+        deliveryTime: partner.deliveryTime,
+      },
+      items: order.items.map((item) => ({ productId: item.productId, title: item.title, quantity: item.quantity })),
+      message: !fulfillmentEnabled
+        ? "This workspace's current plan does not include fulfillment — confirming this will fail."
+        : alreadyHasFulfillmentOrder
+          ? 'This order already has a fulfillment order — confirming this will fail (no duplicate is ever created).'
+          : `Confirming this will create a real fulfillment order with ${partner.name} and move this order to "processing".`,
+    };
+  },
+  async handler(workspaceId, input) {
+    const order = await OrderService.getOrder(input.orderId, workspaceId);
+    if (!order) {
+      return { error: 'Order not found in this workspace.' };
+    }
+
+    const partnerResult = await resolveFulfillmentPartner(input.partnerId);
+    if ('error' in partnerResult) return { error: partnerResult.error };
+    const { partner } = partnerResult;
+
+    try {
+      // The real, unmodified service — never reimplemented here. Its own
+      // plan gate, workspace-scoped order lookup, and existing-fulfillment-
+      // order check all run exactly as they do for the human dashboard flow.
+      const fulfillmentOrder = await FulfillmentService.sendToFulfillment(input.orderId, workspaceId, partner.id);
+
+      return {
+        success: true,
+        fulfillmentOrderId: fulfillmentOrder.id,
+        orderId: input.orderId,
+        partner: partner.name,
+        status: fulfillmentOrder.status,
+      };
+    } catch (error) {
+      if (error instanceof Error && KNOWN_FULFILLMENT_ERRORS.has(error.message)) {
+        return { error: error.message };
+      }
+      // Unexpected (e.g. a lost race against another concurrent
+      // confirmation hitting the DB's own unique constraint) — propagates
+      // unmodified to AiActionService.confirmAndExecute's own catch, which
+      // already logs it safely and stores only a generic, secret-free
+      // error message. Never a second, ad-hoc error handler here.
+      throw error;
+    }
   },
 };

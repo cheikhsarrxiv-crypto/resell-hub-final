@@ -15,7 +15,7 @@ import { getProductTool } from '@/services/ai/tools/productTools';
 import { getInventoryTool } from '@/services/ai/tools/inventoryTools';
 import { getCustomerOrdersTool } from '@/services/ai/tools/customerOrderTools';
 import { getSalesSummaryTool } from '@/services/ai/tools/salesSummaryTools';
-import { updateListingTool } from '@/services/ai/tools/actionTools';
+import { updateListingTool, sendToFulfillmentTool } from '@/services/ai/tools/actionTools';
 
 describe('AiToolRegistry.list / get', () => {
   it('lists get_order, get_listing, get_shipment, get_customer, get_product, get_inventory, get_customer_orders, get_sales_summary, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
@@ -43,6 +43,7 @@ describe('AiToolRegistry.list / get', () => {
     // update_listing is another real 'engage' action — see actionTools.ts
     // for the per-marketplace capability audit behind its confirmation preview.
     expect(names).toContain('update_listing');
+    expect(names).toContain('send_to_fulfillment');
     // Phase 12B: draft preparation tools — always 'write' (never 'engage'),
     // since a draft has no external effect until publish_listing confirms.
     expect(names).toContain('generate_listing_draft');
@@ -65,10 +66,11 @@ describe('AiToolRegistry.list / get', () => {
     expect(AiToolRegistry.get('not_a_real_tool')).toBeUndefined();
   });
 
-  it('publish_listing, publish_etsy_listing, update_listing and simulate_engage_action are categorized "engage" — never auto-executable', () => {
+  it('publish_listing, publish_etsy_listing, update_listing, send_to_fulfillment and simulate_engage_action are categorized "engage" — never auto-executable', () => {
     expect(AiToolRegistry.get('publish_listing')?.category).toBe('engage');
     expect(AiToolRegistry.get('publish_etsy_listing')?.category).toBe('engage');
     expect(AiToolRegistry.get('update_listing')?.category).toBe('engage');
+    expect(AiToolRegistry.get('send_to_fulfillment')?.category).toBe('engage');
     expect(AiToolRegistry.get('simulate_engage_action')?.category).toBe('engage');
   });
 
@@ -120,6 +122,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real update_listing tool definition', () => {
     expect(AiToolRegistry.get('update_listing')).toBe(updateListingTool);
+  });
+
+  it('get() returns the real send_to_fulfillment tool definition', () => {
+    expect(AiToolRegistry.get('send_to_fulfillment')).toBe(sendToFulfillmentTool);
   });
 });
 
@@ -289,6 +295,25 @@ describe('update_listing tool definition', () => {
 
   it('accepts a valid partial change', () => {
     expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { price: 49 } }).success).toBe(true);
+  });
+});
+
+describe('send_to_fulfillment tool definition', () => {
+  it('is categorized as engage — never auto-executable, always requires confirmation', () => {
+    expect(sendToFulfillmentTool.category).toBe('engage');
+    expect(AiToolRegistry.isAutoExecutable('engage')).toBe(false);
+  });
+
+  it('has a preview() — required for every engage tool', () => {
+    expect(typeof sendToFulfillmentTool.preview).toBe('function');
+  });
+
+  it('rejects an input missing orderId', () => {
+    expect(sendToFulfillmentTool.inputSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('accepts orderId alone (partnerId optional)', () => {
+    expect(sendToFulfillmentTool.inputSchema.safeParse({ orderId: 'order-1' }).success).toBe(true);
   });
 });
 
