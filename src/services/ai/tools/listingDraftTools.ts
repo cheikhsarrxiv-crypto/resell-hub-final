@@ -8,6 +8,7 @@ import {
   type ListingDraftFields,
 } from '@/lib/listing/listingDraft';
 import { ListingGenerationService } from '@/services/listing/ListingGenerationService';
+import { isValidEtsyWhenMade } from '@/services/marketplace/EtsyListingMapper';
 import { AgentToolDefinition } from './types';
 import { findToolResultsByName } from './conversationToolResults';
 
@@ -116,7 +117,15 @@ const editableFieldsPatchSchema = z
     condition: z.string().max(100),
     size: z.string().max(50),
     etsyTaxonomyId: z.number().int().positive(),
-    etsyWhenMade: z.string().max(50),
+    // Audit finding (publish_listing hardening pass): previously any
+    // string up to 50 chars was accepted here, so a typo'd/invented
+    // etsyWhenMade could pass generate/edit_listing_draft's own validation
+    // and only fail once it actually reached a real Etsy API call. Now
+    // validated against the SAME real, Etsy-schema-verified list
+    // ListingService.createListing's own error mapping already references
+    // (EtsyListingMapper.ETSY_WHEN_MADE_OPTIONS) — never a separately
+    // invented list.
+    etsyWhenMade: z.string().max(50).refine(isValidEtsyWhenMade, { message: "Not a value Etsy's when_made currently accepts" }),
     etsyWhoMade: z.string().max(50),
     // Phase 12C-Prep — eBay-only, real, required fields for a ready eBay
     // draft (see EbayAdapter.validateListingInputForPublish). Never

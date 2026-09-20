@@ -319,6 +319,23 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
         expect(result).toEqual({ published: true, externalId: 'EBAY-LISTING-1', status: 'active' });
       });
 
+      it('AUDIT FINDING (publish_listing hardening pass, documented not fixed): a successful real publish creates NO local Listing/Product row — ' +
+        'the result has no listingId/productId at all, only the raw eBay externalId. get_listing/get_listings/update_listing and order sync (which ' +
+        'resolves Order.listingId by matching an existing Listing row) would never see this listing. Left as-is: fixing it would mean deciding how to ' +
+        'fabricate a Product from a sourced (never ADKSY-owned) item, which is a real product/business decision, not a bug fix — see the audit report.',
+        async () => {
+          process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+          createListingMock.mockResolvedValue({ externalId: 'EBAY-LISTING-1', status: 'active' });
+          await seedReadyDraft('conv-1');
+
+          const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+
+          expect(result).not.toHaveProperty('listingId');
+          expect(result).not.toHaveProperty('productId');
+          expect(Object.keys(result).sort()).toEqual(['externalId', 'published', 'status']);
+        }
+      );
+
       it('a failure from the real adapter propagates (never swallowed into a fake success)', async () => {
         process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
         createListingMock.mockRejectedValue({ type: 'VALIDATION_ERROR', message: 'eBay rejected the offer', statusCode: 400 });
@@ -465,6 +482,21 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
         expect(sentPayload.etsy).toEqual({ whoMade: 'i_did', whenMade: '2020_2025', taxonomyId: 1234 });
         expect(result).toEqual({ published: true, externalId: 'ETSY-LISTING-1', status: 'active' });
       });
+
+      it('AUDIT FINDING (publish_listing hardening pass, documented not fixed): a successful real publish creates NO local Listing/Product row — ' +
+        'same gap as publish_listing (eBay), see that test\'s own comment and the audit report for why this is documented rather than fixed here.',
+        async () => {
+          process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+          createListingMock.mockResolvedValue({ externalId: 'ETSY-LISTING-1', status: 'active' });
+          await seedReadyEtsyDraft('conv-1');
+
+          const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+
+          expect(result).not.toHaveProperty('listingId');
+          expect(result).not.toHaveProperty('productId');
+          expect(Object.keys(result).sort()).toEqual(['externalId', 'published', 'status']);
+        }
+      );
 
       it('a failure from the real adapter propagates (never swallowed into a fake success)', async () => {
         process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
