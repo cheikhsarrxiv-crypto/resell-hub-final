@@ -8,11 +8,13 @@
 import { describe, it, expect } from 'vitest';
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
 import { getOrderTool } from '@/services/ai/tools/orderTools';
+import { getListingTool } from '@/services/ai/tools/listingTools';
 
 describe('AiToolRegistry.list / get', () => {
-  it('lists get_order, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
+  it('lists get_order, get_listing, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
     const names = AiToolRegistry.list().map((t) => t.name);
     expect(names).toContain('get_order');
+    expect(names).toContain('get_listing');
     expect(names).toContain('search_products');
     expect(names).toContain('calculate_margin');
     // Phase 12A: publish_listing exists as a real, confirmable 'engage'
@@ -60,6 +62,10 @@ describe('AiToolRegistry.list / get', () => {
   it('get() returns the real get_order tool definition', () => {
     expect(AiToolRegistry.get('get_order')).toBe(getOrderTool);
   });
+
+  it('get() returns the real get_listing tool definition', () => {
+    expect(AiToolRegistry.get('get_listing')).toBe(getListingTool);
+  });
 });
 
 describe('AiToolRegistry.toAnthropicTools', () => {
@@ -98,6 +104,22 @@ describe('get_order tool definition', () => {
 
   it('accepts a valid orderId input', () => {
     const result = getOrderTool.inputSchema.safeParse({ orderId: 'order-123' });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('get_listing tool definition', () => {
+  it('is categorized as read (side-effect-free)', () => {
+    expect(getListingTool.category).toBe('read');
+  });
+
+  it('rejects an input missing listingId', () => {
+    const result = getListingTool.inputSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid listingId input', () => {
+    const result = getListingTool.inputSchema.safeParse({ listingId: 'listing-123' });
     expect(result.success).toBe(true);
   });
 });
