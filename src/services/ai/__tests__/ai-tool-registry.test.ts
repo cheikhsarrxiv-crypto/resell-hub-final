@@ -11,14 +11,16 @@ import { getOrderTool } from '@/services/ai/tools/orderTools';
 import { getListingTool } from '@/services/ai/tools/listingTools';
 import { getShipmentTool } from '@/services/ai/tools/shipmentTools';
 import { getCustomerTool } from '@/services/ai/tools/customerTools';
+import { getProductTool } from '@/services/ai/tools/productTools';
 
 describe('AiToolRegistry.list / get', () => {
-  it('lists get_order, get_listing, get_shipment, get_customer, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
+  it('lists get_order, get_listing, get_shipment, get_customer, get_product, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
     const names = AiToolRegistry.list().map((t) => t.name);
     expect(names).toContain('get_order');
     expect(names).toContain('get_listing');
     expect(names).toContain('get_shipment');
     expect(names).toContain('get_customer');
+    expect(names).toContain('get_product');
     expect(names).toContain('search_products');
     expect(names).toContain('calculate_margin');
     // Phase 12A: publish_listing exists as a real, confirmable 'engage'
@@ -77,6 +79,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real get_customer tool definition', () => {
     expect(AiToolRegistry.get('get_customer')).toBe(getCustomerTool);
+  });
+
+  it('get() returns the real get_product tool definition', () => {
+    expect(AiToolRegistry.get('get_product')).toBe(getProductTool);
   });
 });
 
@@ -164,6 +170,22 @@ describe('get_customer tool definition', () => {
 
   it('accepts a valid orderId input', () => {
     const result = getCustomerTool.inputSchema.safeParse({ orderId: 'order-123' });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe('get_product tool definition', () => {
+  it('is categorized as read (side-effect-free)', () => {
+    expect(getProductTool.category).toBe('read');
+  });
+
+  it('rejects an input missing productId', () => {
+    const result = getProductTool.inputSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a valid productId input', () => {
+    const result = getProductTool.inputSchema.safeParse({ productId: 'product-123' });
     expect(result.success).toBe(true);
   });
 });
