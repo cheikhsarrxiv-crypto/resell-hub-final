@@ -14,9 +14,10 @@ import { getCustomerTool } from '@/services/ai/tools/customerTools';
 import { getProductTool } from '@/services/ai/tools/productTools';
 import { getInventoryTool } from '@/services/ai/tools/inventoryTools';
 import { getCustomerOrdersTool } from '@/services/ai/tools/customerOrderTools';
+import { getSalesSummaryTool } from '@/services/ai/tools/salesSummaryTools';
 
 describe('AiToolRegistry.list / get', () => {
-  it('lists get_order, get_listing, get_shipment, get_customer, get_product, get_inventory, get_customer_orders, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
+  it('lists get_order, get_listing, get_shipment, get_customer, get_product, get_inventory, get_customer_orders, get_sales_summary, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
     const names = AiToolRegistry.list().map((t) => t.name);
     expect(names).toContain('get_order');
     expect(names).toContain('get_listing');
@@ -25,6 +26,7 @@ describe('AiToolRegistry.list / get', () => {
     expect(names).toContain('get_product');
     expect(names).toContain('get_inventory');
     expect(names).toContain('get_customer_orders');
+    expect(names).toContain('get_sales_summary');
     expect(names).toContain('search_products');
     expect(names).toContain('calculate_margin');
     // Phase 12A: publish_listing exists as a real, confirmable 'engage'
@@ -95,6 +97,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real get_customer_orders tool definition', () => {
     expect(AiToolRegistry.get('get_customer_orders')).toBe(getCustomerOrdersTool);
+  });
+
+  it('get() returns the real get_sales_summary tool definition', () => {
+    expect(AiToolRegistry.get('get_sales_summary')).toBe(getSalesSummaryTool);
   });
 });
 
@@ -231,5 +237,21 @@ describe('get_customer_orders tool definition', () => {
   it('accepts a valid customerId input', () => {
     const result = getCustomerOrdersTool.inputSchema.safeParse({ customerId: 'buyer-123' });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('get_sales_summary tool definition', () => {
+  it('is categorized as read (side-effect-free)', () => {
+    expect(getSalesSummaryTool.category).toBe('read');
+  });
+
+  it('accepts an empty input (days/statuses both optional)', () => {
+    const result = getSalesSummaryTool.inputSchema.safeParse({});
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an unknown status value', () => {
+    const result = getSalesSummaryTool.inputSchema.safeParse({ statuses: ['refunded'] });
+    expect(result.success).toBe(false);
   });
 });
