@@ -15,6 +15,7 @@ import { getProductTool } from '@/services/ai/tools/productTools';
 import { getInventoryTool } from '@/services/ai/tools/inventoryTools';
 import { getCustomerOrdersTool } from '@/services/ai/tools/customerOrderTools';
 import { getSalesSummaryTool } from '@/services/ai/tools/salesSummaryTools';
+import { updateListingTool } from '@/services/ai/tools/actionTools';
 
 describe('AiToolRegistry.list / get', () => {
   it('lists get_order, get_listing, get_shipment, get_customer, get_product, get_inventory, get_customer_orders, get_sales_summary, search_products, calculate_margin, simulate_engage_action, and publish_listing as currently registered tools', () => {
@@ -39,6 +40,9 @@ describe('AiToolRegistry.list / get', () => {
     // Etsy publication parity — same 'engage' shape as publish_listing,
     // its own separate real-call safeguard (see actionTools.ts).
     expect(names).toContain('publish_etsy_listing');
+    // update_listing is another real 'engage' action — see actionTools.ts
+    // for the per-marketplace capability audit behind its confirmation preview.
+    expect(names).toContain('update_listing');
     // Phase 12B: draft preparation tools — always 'write' (never 'engage'),
     // since a draft has no external effect until publish_listing confirms.
     expect(names).toContain('generate_listing_draft');
@@ -61,9 +65,10 @@ describe('AiToolRegistry.list / get', () => {
     expect(AiToolRegistry.get('not_a_real_tool')).toBeUndefined();
   });
 
-  it('publish_listing, publish_etsy_listing and simulate_engage_action are categorized "engage" — never auto-executable', () => {
+  it('publish_listing, publish_etsy_listing, update_listing and simulate_engage_action are categorized "engage" — never auto-executable', () => {
     expect(AiToolRegistry.get('publish_listing')?.category).toBe('engage');
     expect(AiToolRegistry.get('publish_etsy_listing')?.category).toBe('engage');
+    expect(AiToolRegistry.get('update_listing')?.category).toBe('engage');
     expect(AiToolRegistry.get('simulate_engage_action')?.category).toBe('engage');
   });
 
@@ -111,6 +116,10 @@ describe('AiToolRegistry.list / get', () => {
 
   it('get() returns the real get_sales_summary tool definition', () => {
     expect(AiToolRegistry.get('get_sales_summary')).toBe(getSalesSummaryTool);
+  });
+
+  it('get() returns the real update_listing tool definition', () => {
+    expect(AiToolRegistry.get('update_listing')).toBe(updateListingTool);
   });
 });
 
@@ -247,6 +256,39 @@ describe('get_customer_orders tool definition', () => {
   it('accepts a valid customerId input', () => {
     const result = getCustomerOrdersTool.inputSchema.safeParse({ customerId: 'buyer-123' });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('update_listing tool definition', () => {
+  it('is categorized as engage — never auto-executable, always requires confirmation', () => {
+    expect(updateListingTool.category).toBe('engage');
+    expect(AiToolRegistry.isAutoExecutable('engage')).toBe(false);
+  });
+
+  it('has a preview() — required for every engage tool', () => {
+    expect(typeof updateListingTool.preview).toBe('function');
+  });
+
+  it('rejects an input missing listingId', () => {
+    expect(updateListingTool.inputSchema.safeParse({ changes: { title: 'A valid title' } }).success).toBe(false);
+  });
+
+  it('rejects changes with no fields at all', () => {
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: {} }).success).toBe(false);
+  });
+
+  it('rejects a negative or zero price', () => {
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { price: -10 } }).success).toBe(false);
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { price: 0 } }).success).toBe(false);
+  });
+
+  it('rejects a negative or zero quantity', () => {
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { quantity: -1 } }).success).toBe(false);
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { quantity: 0 } }).success).toBe(false);
+  });
+
+  it('accepts a valid partial change', () => {
+    expect(updateListingTool.inputSchema.safeParse({ listingId: 'listing-1', changes: { price: 49 } }).success).toBe(true);
   });
 });
 

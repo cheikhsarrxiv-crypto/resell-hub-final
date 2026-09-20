@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AgentToolDefinition } from './types';
 import { findLatestDraft } from './listingDraftTools';
 import { validateEbayDraft, mapDraftToEbayInput, validateEtsyDraft, mapDraftToEtsyInput } from '@/lib/listing/listingDraft';
-import { getAuthenticatedAdapter } from '@/services/ListingService';
+import { ListingService, getAuthenticatedAdapter } from '@/services/ListingService';
 import { isRealEbayPublishEnabled, describeEbayEnvironment } from './ebayPublishGuard';
 import { isRealEtsyPublishEnabled, describeEtsyEnvironment } from './etsyPublishGuard';
 
@@ -299,6 +299,221 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string }> 
       published: true,
       externalId: result.externalId,
       status: result.status,
+    };
+  },
+};
+
+/**
+ * update_listing — proposes changing an EXISTING listing's title,
+ * description, price, and/or quantity. 'engage' (not 'write'): unlike a
+ * ListingDraft, a real Listing is a live business record already visible
+ * everywhere else in the app, so every change — even one that never
+ * touches a marketplace — always goes through the same
+ * propose -> preview -> confirm -> execute pipeline as publish_listing,
+ * never a second confirmation mechanism.
+ *
+ * CAPABILITY AUDIT (this file's own — verified against the real adapters,
+ * never assumed from a schema comment):
+ * - EbayAdapter.updateListing really supports title/description/quantity.
+ *   Price is NOT supported here: it requires a `currency` alongside the
+ *   new price value (EbayAdapter.updateListing throws otherwise), and
+ *   ADKSY has no currency stored anywhere for an already-published Listing
+ *   (Listing has no currency column at all — a draft's currency is
+ *   ephemeral, conversation-scoped, and gone once the listing is created).
+ *   Guessing a currency (e.g. defaulting to EUR) would be exactly the kind
+ *   of invented data this project never allows, so eBay price changes are
+ *   deliberately refused with a clear, honest reason rather than silently
+ *   attempted or silently dropped.
+ * - EtsyAdapter.updateListing really supports title/description/price/
+ *   quantity — no currency requirement (Etsy's price field is a plain
+ *   number), so all four are available for Etsy.
+ * - DepopAdapter.updateListing / VintedAdapter.updateListing both
+ *   unconditionally throw ("BLOCKED - requires approved Depop partner
+ *   access" / not supported) — neither marketplace supports any field.
+ * - A listing with no marketplace connection, or one that was never
+ *   actually published (no externalId yet — ListingService.updateListing's
+ *   own condition for whether it calls the adapter at all), has no
+ *   marketplace to sync to: every field is a local-only ADKSY edit, and
+ *   ListingService.updateListing already skips the marketplace call for
+ *   exactly this case, so it's reused as-is.
+ * - Listing.status has no update_listing field at all: no adapter's
+ *   updateListing accepts a status/lifecycle value — delisting is a
+ *   completely separate real operation (ListingService.deleteListing,
+ *   its own adapter.deleteListing call), not a "change" this tool makes.
+ */
+const MARKETPLACE_UPDATE_CAPABILITIES: Record<string, readonly string[]> = {
+  ebay: ['title', 'description', 'quantity'],
+  etsy: ['title', 'description', 'price', 'quantity'],
+  depop: [],
+  vinted: [],
+};
+
+// Mirrors createListingSchema/updateListingSchema's own real constraints
+// (src/lib/validations.ts) exactly — the app's one existing definition of
+// a valid listing title/description/price/quantity — rather than inventing
+// separate rules for this tool.
+const updateListingChangesSchema = z
+  .object({
+    title: z.string().min(5).optional(),
+    description: z.string().min(20).optional(),
+    price: z.number().min(0.01).optional(),
+    quantity: z.number().int().min(1).optional(),
+  })
+  .refine((changes) => Object.keys(changes).length > 0, { message: 'At least one field to change is required' });
+
+const updateListingInputSchema = z.object({
+  listingId: z.string().min(1, 'listingId is required'),
+  changes: updateListingChangesSchema,
+});
+
+type UpdateListingInput = z.infer<typeof updateListingInputSchema>;
+type UpdateListingChanges = z.infer<typeof updateListingChangesSchema>;
+
+type ListingWithConnection = NonNullable<Awaited<ReturnType<typeof ListingService.getListing>>>;
+
+/**
+ * Whether ListingService.updateListing will actually call a marketplace
+ * adapter for this listing — its OWN real condition
+ * (`listing.connection && listing.externalId`), mirrored here rather than
+ * re-derived differently, so this tool's capability check always agrees
+ * with what will really happen at execute time.
+ */
+function resolveUpdateTarget(listing: ListingWithConnection): { marketplaceKey: string | null; marketplaceDisplayName: string | null } {
+  const willCallMarketplace = Boolean(listing.connection && listing.externalId);
+  if (!willCallMarketplace) {
+    return { marketplaceKey: null, marketplaceDisplayName: null };
+  }
+  return {
+    marketplaceKey: listing.connection!.marketplace.name,
+    marketplaceDisplayName: listing.connection!.marketplace.displayName,
+  };
+}
+
+function getUnsupportedFields(marketplaceKey: string | null, changes: UpdateListingChanges): string[] {
+  // No marketplace call will be made at all (no connection, or never
+  // actually published) — every field is a local-only ADKSY edit.
+  if (!marketplaceKey) return [];
+  const supported = MARKETPLACE_UPDATE_CAPABILITIES[marketplaceKey] ?? [];
+  return Object.keys(changes).filter((field) => !supported.includes(field));
+}
+
+function buildUnsupportedFieldsError(marketplaceDisplayName: string, marketplaceKey: string, unsupported: string[]): string {
+  const supported = MARKETPLACE_UPDATE_CAPABILITIES[marketplaceKey] ?? [];
+  if (supported.length === 0) {
+    return `${marketplaceDisplayName} listings cannot be updated through ADKSY today (no real update capability is implemented for this marketplace).`;
+  }
+  if (unsupported.includes('price') && marketplaceKey === 'ebay') {
+    return (
+      `Price cannot be changed on this eBay listing: ADKSY has no stored currency for it and never assumes one. ` +
+      `Fields ADKSY can update on eBay: ${supported.join(', ')}.`
+    );
+  }
+  return `${unsupported.join(', ')} cannot be changed on this ${marketplaceDisplayName} listing. Fields ADKSY can update here: ${supported.join(', ')}.`;
+}
+
+async function loadUpdatableListing(workspaceId: string, listingId: string): Promise<{ listing: ListingWithConnection } | { error: string }> {
+  const listing = await ListingService.getListing(listingId, workspaceId);
+  if (!listing) {
+    return { error: 'Listing not found in this workspace.' };
+  }
+  if (listing.deletedAt) {
+    return { error: 'This listing has been deleted and can no longer be updated.' };
+  }
+  return { listing };
+}
+
+export const updateListingTool: AgentToolDefinition<UpdateListingInput> = {
+  name: 'update_listing',
+  description:
+    "Propose changing an existing listing's title, description, price, and/or quantity in the reseller's own workspace. " +
+    'Always requires the reseller\'s explicit confirmation before anything changes — a request to change a listing is never treated as confirmation ' +
+    'by itself. Which fields can really be changed depends on the listing\'s marketplace: eBay supports title/description/quantity only (price cannot ' +
+    'be changed there because ADKSY has no stored currency for an already-published listing and never assumes one); Etsy supports all four fields; ' +
+    "Depop and Vinted listings cannot be updated at all today. A listing with no marketplace connection (or never actually published) is a local-only " +
+    'ADKSY edit, so every field is available. There is no way to change a listing\'s status/lifecycle (active/delisted/etc.) through this tool — no ' +
+    'marketplace update operation supports that; delisting is a separate action. Rejects the whole request (never applies part of it) if any requested ' +
+    "field isn't really supported for this listing.",
+  category: 'engage',
+  inputSchema: updateListingInputSchema,
+  jsonSchema: {
+    type: 'object',
+    properties: {
+      listingId: { type: 'string', description: 'The ADKSY listing id (Listing.id) to update.' },
+      changes: {
+        type: 'object',
+        description: 'At least one field to change. Only fields actually provided are changed — everything else stays as-is.',
+        properties: {
+          title: { type: 'string', description: 'New title (at least 5 characters).' },
+          description: { type: 'string', description: 'New description (at least 20 characters).' },
+          price: { type: 'number', description: 'New price (must be positive). Not available for an eBay-published listing — see this tool\'s description.' },
+          quantity: { type: 'number', description: 'New quantity (must be at least 1).' },
+        },
+      },
+    },
+    required: ['listingId', 'changes'],
+  },
+  async preview(workspaceId, input) {
+    const loaded = await loadUpdatableListing(workspaceId, input.listingId);
+    if ('error' in loaded) return { error: loaded.error };
+    const { listing } = loaded;
+
+    const { marketplaceKey, marketplaceDisplayName } = resolveUpdateTarget(listing);
+    const unsupported = getUnsupportedFields(marketplaceKey, input.changes);
+    if (unsupported.length > 0) {
+      return { error: buildUnsupportedFieldsError(marketplaceDisplayName!, marketplaceKey!, unsupported) };
+    }
+
+    const changes: Record<string, { before: unknown; after: unknown }> = {};
+    if (input.changes.title !== undefined) changes.title = { before: listing.title, after: input.changes.title };
+    if (input.changes.description !== undefined) changes.description = { before: listing.description, after: input.changes.description };
+    if (input.changes.price !== undefined) changes.price = { before: listing.price, after: input.changes.price };
+    if (input.changes.quantity !== undefined) changes.quantity = { before: listing.quantity, after: input.changes.quantity };
+
+    return {
+      action: 'update_listing',
+      listingId: listing.id,
+      marketplace: marketplaceKey ? { name: marketplaceKey, displayName: marketplaceDisplayName } : null,
+      changes,
+      willSyncToMarketplace: marketplaceKey !== null,
+      message: marketplaceKey
+        ? `Confirming this will update the listing on ${marketplaceDisplayName} and in ADKSY.`
+        : 'This listing is not currently published on any marketplace — confirming this will update it in ADKSY only.',
+    };
+  },
+  async handler(workspaceId, input) {
+    const loaded = await loadUpdatableListing(workspaceId, input.listingId);
+    if ('error' in loaded) return { error: loaded.error };
+    const { listing } = loaded;
+
+    const { marketplaceKey } = resolveUpdateTarget(listing);
+    const unsupported = getUnsupportedFields(marketplaceKey, input.changes);
+    if (unsupported.length > 0) {
+      const { marketplaceDisplayName } = resolveUpdateTarget(listing);
+      return { error: buildUnsupportedFieldsError(marketplaceDisplayName!, marketplaceKey!, unsupported) };
+    }
+
+    // ListingService.updateListing is the SAME real execution path the
+    // human-facing dashboard edit already uses — marketplace call first
+    // (only when connection+externalId exist, exactly the condition this
+    // tool already checked above), DB update only once that succeeds (or
+    // skipped entirely for a local-only listing). Never reimplemented
+    // here. A real marketplace failure propagates unmodified to
+    // AiActionService.confirmAndExecute's own catch, exactly like
+    // publish_listing/publish_etsy_listing's own real-call branch — never
+    // a second, ad-hoc error handler here.
+    const updated = await ListingService.updateListing(input.listingId, workspaceId, input.changes);
+
+    return {
+      success: true,
+      listingId: updated.id,
+      marketplace: marketplaceKey,
+      syncedToMarketplace: marketplaceKey !== null,
+      updated: {
+        title: updated.title,
+        description: updated.description,
+        price: updated.price,
+        quantity: updated.quantity,
+      },
     };
   },
 };
