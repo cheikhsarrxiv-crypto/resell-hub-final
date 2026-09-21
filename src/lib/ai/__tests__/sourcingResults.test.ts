@@ -180,4 +180,8 @@ describe('formatMarketplaceLabel', () => {
   it('shows the raw marketplace value as-is for a non-eBay source, never a fabricated label', () => {
     expect(formatMarketplaceLabel('some-future-marketplace', 'other-source')).toBe('some-future-marketplace');
   });
+
+  it("Phase 2 — formats Etsy's constant 'ETSY' marketplace as a plain 'Etsy' label (no per-country split exists for Etsy)", () => {
+    expect(formatMarketplaceLabel('ETSY', 'etsy')).toBe('Etsy');
+  });
 });

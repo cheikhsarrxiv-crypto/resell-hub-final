@@ -8,6 +8,13 @@ import { AgentToolDefinition } from './types';
 // silently dropped deeper in the stack.
 const SUPPORTED_EBAY_MARKETPLACES = ['EBAY_FR', 'EBAY_GB', 'EBAY_DE', 'EBAY_IT', 'EBAY_ES', 'EBAY_US'] as const;
 
+// Every SourcingProvider.name SourcingProviderRegistry currently knows
+// about (real or not-yet-configured) — kept in sync with
+// SourcingProviderRegistry.getAllProviders() manually, same pattern as
+// SUPPORTED_EBAY_MARKETPLACES above, so an invalid provider name is
+// rejected by Zod before ever reaching SourcingService.
+const SUPPORTED_PROVIDER_NAMES = ['ebay', 'etsy'] as const;
+
 const searchProductsInputSchema = z
   .object({
     query: z.string().min(1, 'query is required').max(200),
@@ -27,6 +34,11 @@ const searchProductsInputSchema = z
     // this does and does not promise. When set, a provider MAY ignore
     // `marketplaces` in favor of its own full supported set.
     worldwide: z.boolean().optional(),
+    // Phase 2 — restricts the search to specific sourcing providers, e.g.
+    // ["ebay"] to skip Etsy for this one search. Omitted (the default)
+    // means every configured provider is queried, unchanged from before
+    // this field existed.
+    providers: z.array(z.enum(SUPPORTED_PROVIDER_NAMES)).min(1).max(SUPPORTED_PROVIDER_NAMES.length).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     offset: z.number().int().min(0).optional(),
   })
@@ -38,15 +50,22 @@ const searchProductsInputSchema = z
 export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProductsInputSchema>> = {
   name: 'search_products',
   description:
-    'Search for sourcing opportunities across configured external providers (currently: eBay, via its official Browse API — read-only, public listings). ' +
+    'Search for sourcing opportunities across configured external providers (currently: eBay via its official Browse API, and Etsy via its official Open API v3 ' +
+    'public marketplace-wide listings search — both read-only, public listings). ' +
     'Can search multiple eBay marketplaces (countries) at once for price comparison, or set worldwide=true to search every marketplace ADKSY has real, ' +
     'configured access to for that provider — this means "every source ADKSY can currently, legitimately reach", never literally the entire internet; ' +
-    'the response\'s providersSearched/providersUnavailable fields say exactly which sources were actually queried. ' +
+    'the response\'s providersSearched/providersUnavailable/providersSkipped fields say exactly which sources were actually queried, unavailable, or excluded. ' +
+    'Use `providers` (e.g. ["ebay"]) to restrict the search to specific providers instead of all configured ones. ' +
     "Returns real listings only — never a fabricated result. If no provider is configured, returns status SOURCE_NOT_CONFIGURED. " +
-    "Each result's authenticityStatus is 'verified' only when eBay's own Authenticity Guarantee program covers the item; " +
+    "Each result's authenticityStatus is 'verified' only when a provider's own institutional program covers the item (currently only eBay's Authenticity Guarantee — Etsy has no such program, so Etsy results are never 'verified'); " +
     "otherwise 'claimed' (the seller's own listing, not independently checked), 'unverified' (no usable content), or 'unknown'. Never upgrade this yourself. " +
     "Each result's normalizedPriceEur (when present) is a real currency conversion, not the authoritative price — always prefer the original price/currency; " +
-    'normalizedPriceEur is absent whenever no reliable exchange rate was available, never a guessed value. ' +
+    'normalizedPriceEur is absent whenever no reliable exchange rate was available, never a guessed value. Combined multi-provider results are sorted by ' +
+    'normalizedPriceEur ascending (results with no available rate are listed last), so this doubles as the price comparison the query implies. ' +
+    "estimatedKnownCostEur (when present) sums every cost ADKSY actually knows a real amount for (price + shipping + known fees) — it is NOT a full landed cost " +
+    'when unknownCostFactors is non-empty (e.g. import duties with no known amount); never present it to the user as an all-in total in that case. ' +
+    'Not every provider supports every filter (e.g. Etsy currently ignores minPrice/maxPrice/condition — see providersSearched to know which provider actually ran; ' +
+    'use each result\'s own normalizedPriceEur to judge whether it still fits a price constraint the provider itself could not apply). ' +
     'This tool does NOT calculate margin — margin requires a resale price and cost inputs this version does not have.',
   category: 'read',
   inputSchema: searchProductsInputSchema,
@@ -68,6 +87,11 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       worldwide: {
         type: 'boolean',
         description: 'Search every marketplace ADKSY currently has real access to for each configured provider, instead of just `marketplaces`. Not a promise to search "everywhere" — see the tool description.',
+      },
+      providers: {
+        type: 'array',
+        items: { type: 'string', enum: SUPPORTED_PROVIDER_NAMES as unknown as string[] },
+        description: 'Restrict the search to these sourcing providers only, e.g. ["ebay"]. Omit to search every configured provider (default).',
       },
       limit: { type: 'number', description: 'Max results per marketplace (1-50).' },
       offset: { type: 'number', description: 'Pagination offset.' },
@@ -96,8 +120,9 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       providersSearched: response.providersSearched,
       providersFailed: response.providersFailed,
       providersUnavailable: response.providersUnavailable,
+      providersSkipped: response.providersSkipped,
       totalResults: response.totalResults,
-      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur (when present) is a supplementary conversion, not the authoritative price. No margin is calculated — a real margin needs a resale price and cost inputs this tool does not have yet.",
+      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. No margin is calculated — a real margin needs a resale price and cost inputs this tool does not have yet.",
     };
   },
 };

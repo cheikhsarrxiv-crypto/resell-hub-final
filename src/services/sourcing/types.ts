@@ -44,6 +44,20 @@ export interface NormalizedSearchQuery {
    * only passes it through to providers unchanged, same as `marketplaces`.
    */
   worldwide?: boolean;
+  /**
+   * Phase 2 (real international providers) — an explicit allowlist of
+   * provider names (SourcingProvider.name, e.g. ['ebay', 'etsy']) to
+   * query. Omitted (the default, unchanged from before this field
+   * existed) means every configured provider is queried, exactly as
+   * before. When set, a configured provider NOT in this list is recorded
+   * in SourcingSearchResponse.providersSkipped rather than queried or
+   * silently dropped — the caller always sees why a known, available
+   * provider didn't run. Independent of `worldwide`: this chooses WHICH
+   * providers run; `worldwide` only tells an already-selected provider
+   * how broad ITS OWN internal scope should be (e.g. which eBay
+   * marketplaces).
+   */
+  providers?: string[];
   limit?: number;
   offset?: number;
   /**
@@ -171,6 +185,19 @@ export interface NormalizedSourcingResult {
    */
   knownAdditionalCosts?: Array<{ type: string; amount: number; currency: string; description?: string }>;
   unknownCostFactors?: string[];
+  /**
+   * Phase 2 (real international providers) — the sum, in EUR, of every
+   * cost line ADKSY actually knows a real amount for (price + shippingCost
+   * + each knownAdditionalCosts entry), each independently converted via
+   * CurrencyConversionService, set by SourcingService. Deliberately NOT a
+   * "total cost" — when `unknownCostFactors` is non-empty (e.g. import
+   * duties with no known amount), this number is real but incomplete, and
+   * is never presented as "prix tout compris". Undefined whenever ANY
+   * required conversion (price, or shippingCost/a knownAdditionalCosts
+   * line if present) was unavailable — a partial, possibly-misleading sum
+   * is never returned; it's all real known costs converted, or nothing.
+   */
+  estimatedKnownCostEur?: number;
 }
 
 export interface SourcingProviderErrorInfo {
@@ -236,8 +263,16 @@ export interface SourcingSearchResponse {
   providersSearched: string[];
   /** Subset of providersSearched whose call produced a providerErrors entry (a structured error or an unexpected throw) — never a provider that simply returned zero results, that's a normal empty outcome, not a failure. */
   providersFailed: string[];
-  /** Providers ADKSY knows about (see getAllProviders) but that are not configured right now — never queried, distinct from a failure. */
+  /** Providers ADKSY knows about (see SourcingProviderRegistry) but that are not configured right now — never queried, distinct from a failure. */
   providersUnavailable: string[];
+  /**
+   * Phase 2 — providers that WERE configured and available, but were
+   * excluded from this specific search because NormalizedSearchQuery.providers
+   * named a different, narrower allowlist. Distinct from providersUnavailable
+   * (which means "not usable at all right now") — a skipped provider could
+   * have been queried, it just wasn't asked to be for this search.
+   */
+  providersSkipped: string[];
   /** results.length, after deduplication — provided directly so the agent never has to (and never needs to) recompute it. */
   totalResults: number;
 }

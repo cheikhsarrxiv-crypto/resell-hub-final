@@ -124,7 +124,9 @@ export function formatSourcingPrice(amount: number, currency: string): string {
  * fabricated country/region. eBay's own marketplace ids (e.g. 'EBAY_GB')
  * are the only ones this provider ever returns (see
  * EbayBrowseSourcingProvider.SUPPORTED_MARKETPLACES); any other shape is
- * shown as-is rather than guessed at.
+ * shown as-is rather than guessed at. Etsy (Phase 2) has no per-country
+ * marketplace split — EtsySourcingProvider always reports the constant
+ * 'ETSY' — so 'source' alone (not the marketplace value) picks the label.
  */
 export function formatMarketplaceLabel(marketplace: string, source: string): string {
   const match = /^EBAY_([A-Z]{2})$/.exec(marketplace);
@@ -133,6 +135,9 @@ export function formatMarketplaceLabel(marketplace: string, source: string): str
   }
   if (source === 'ebay') {
     return 'eBay';
+  }
+  if (source === 'etsy') {
+    return 'Etsy';
   }
   return marketplace;
 }

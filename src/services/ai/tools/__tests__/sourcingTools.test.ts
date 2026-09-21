@@ -55,6 +55,15 @@ describe('search_products tool definition', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', worldwide: true }).success).toBe(true);
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x' }).success).toBe(true);
     });
+
+    it('accepts a valid providers allowlist (Phase 2)', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['ebay'] }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['ebay', 'etsy'] }).success).toBe(true);
+    });
+
+    it('rejects an unknown provider name', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['stockx'] }).success).toBe(false);
+    });
   });
 
   describe('handler', () => {
@@ -147,6 +156,31 @@ describe('search_products tool definition', () => {
       const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
 
       expect(result.providersUnavailable).toEqual(['ebay']);
+    });
+
+    it('providers allowlist is passed through unchanged to SourcingService.search (Phase 2)', async () => {
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [] });
+
+      await searchProductsTool.handler('ws-1', { query: 'x', providers: ['ebay'] });
+
+      expect(searchMock).toHaveBeenCalledWith({ query: 'x', providers: ['ebay'] });
+    });
+
+    it('providersSkipped is passed through unchanged (Phase 2)', async () => {
+      searchMock.mockResolvedValue({
+        status: 'ok',
+        results: [],
+        providerErrors: [],
+        providersSearched: ['ebay'],
+        providersFailed: [],
+        providersUnavailable: [],
+        providersSkipped: ['etsy'],
+        totalResults: 0,
+      });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x', providers: ['ebay'] });
+
+      expect(result.providersSkipped).toEqual(['etsy']);
     });
   });
 });

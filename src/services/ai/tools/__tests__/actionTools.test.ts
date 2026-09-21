@@ -462,6 +462,69 @@ describe('create_product tool definition', () => {
       expect(createProductMock).toHaveBeenCalledTimes(1);
       expect(result.success).toBe(true);
     });
+
+    it('Phase 2 — a real Etsy-sourced search_products result revalidates and reaches ProductService exactly like an eBay one, no code path is eBay-specific', async () => {
+      const etsySourcedItem: NormalizedSourcingResult = {
+        source: 'etsy',
+        sourceId: '987654321',
+        sourceUrl: 'https://www.etsy.com/listing/987654321/vintage-chanel-wool-blazer',
+        title: 'Vintage Chanel Wool Blazer',
+        price: 450,
+        currency: 'USD',
+        marketplace: 'ETSY',
+        images: [],
+        authenticityStatus: 'claimed',
+      };
+      const etsyInput = {
+        sourceMarketplace: 'etsy',
+        sourceId: etsySourcedItem.sourceId!,
+        sourceUrl: etsySourcedItem.sourceUrl,
+        title: 'Vintage Chanel Wool Blazer',
+        description: 'A real description of the item, at least twenty characters long.',
+        sellingPrice: 600,
+        purchasePrice: 450,
+      };
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [etsySourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({
+        id: 'product-new-3',
+        sku: 'SKU-NEW-3',
+        title: etsyInput.title,
+        sourceMarketplace: 'etsy',
+        sourceId: etsySourcedItem.sourceId,
+        sourceUrl: etsySourcedItem.sourceUrl,
+        sellingPrice: 600,
+        purchasePrice: 450,
+      });
+
+      const result: any = await createProductTool.handler('ws-1', etsyInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createProductMock).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+    });
+
+    it('Phase 2 — an Etsy sourceId claimed under a falsified sourceMarketplace ("ebay") is refused, exactly like TEST E for eBay', async () => {
+      const etsySourcedItem: NormalizedSourcingResult = {
+        source: 'etsy',
+        sourceId: '987654321',
+        sourceUrl: 'https://www.etsy.com/listing/987654321/vintage-chanel-wool-blazer',
+        title: 'Vintage Chanel Wool Blazer',
+        price: 450,
+        currency: 'USD',
+        marketplace: 'ETSY',
+        images: [],
+        authenticityStatus: 'claimed',
+      };
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [etsySourcedItem], providerErrors: [] });
+
+      const result: any = await createProductTool.handler(
+        'ws-1',
+        { ...validInput, sourceMarketplace: 'ebay', sourceId: etsySourcedItem.sourceId!, sourceUrl: etsySourcedItem.sourceUrl },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(createProductMock).not.toHaveBeenCalled();
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+    });
   });
 
   describe('preview()', () => {

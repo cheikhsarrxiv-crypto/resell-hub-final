@@ -2,24 +2,12 @@ import { createLogger } from '@/lib/logger';
 import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
-  SourcingProvider,
   SourcingSearchResponse,
 } from './types';
-import { EbayBrowseSourcingProvider } from './providers/EbayBrowseSourcingProvider';
+import { SourcingProviderRegistry } from './SourcingProviderRegistry';
 import { CurrencyConversionService } from '@/services/pricing/CurrencyConversionService';
 
 const logger = createLogger('sourcing-service');
-
-/**
- * Every provider ADKSY knows about, real or not-yet-configured. Adding a
- * provider means adding one entry here — SourcingService itself never
- * changes. A provider whose credentials aren't set (isConfigured() ===
- * false) is simply skipped, not removed from this list — see
- * search()'s SOURCE_NOT_CONFIGURED handling below.
- */
-function getAllProviders(): SourcingProvider[] {
-  return [new EbayBrowseSourcingProvider()];
-}
 
 /**
  * Global Sourcing Engine — conservative deduplication only: two results
@@ -71,6 +59,65 @@ async function attachNormalizedPrice(result: NormalizedSourcingResult): Promise<
   }
 }
 
+/**
+ * Phase 2 — attaches `estimatedKnownCostEur`: the sum, in EUR, of every
+ * cost line ADKSY actually has a real amount for (price + shippingCost +
+ * each knownAdditionalCosts entry). Requires normalizedPriceEur to
+ * already be set (attachNormalizedPrice must run first) — without a
+ * converted price there is nothing real to build a landed cost from.
+ * Never a partial/misleading sum: if ANY present cost line fails to
+ * convert, `estimatedKnownCostEur` stays undefined entirely, rather than
+ * silently omitting just that one line from the total.
+ */
+async function attachLandedCost(result: NormalizedSourcingResult): Promise<NormalizedSourcingResult> {
+  if (result.normalizedPriceEur === undefined) {
+    return result;
+  }
+
+  let total = result.normalizedPriceEur;
+
+  try {
+    if (result.shippingCost !== undefined && result.shippingCostCurrency) {
+      const conversion = await CurrencyConversionService.convert(result.shippingCost, result.shippingCostCurrency, 'EUR');
+      if (conversion.amount === null) return result;
+      total += conversion.amount;
+    }
+
+    if (result.knownAdditionalCosts && result.knownAdditionalCosts.length > 0) {
+      for (const cost of result.knownAdditionalCosts) {
+        const conversion = await CurrencyConversionService.convert(cost.amount, cost.currency, 'EUR');
+        if (conversion.amount === null) return result;
+        total += conversion.amount;
+      }
+    }
+  } catch (error) {
+    logger.error(
+      `Landed cost conversion failed for a sourcing result from "${result.source}"`,
+      error instanceof Error ? error : String(error)
+    );
+    return result;
+  }
+
+  return { ...result, estimatedKnownCostEur: total };
+}
+
+/**
+ * Phase 2 — orders combined, multi-provider results by real, comparable
+ * price (normalizedPriceEur), ascending, so "moins de 400€, peu importe
+ * le pays" style queries actually read as a price comparison across
+ * sources. A result with no available EUR rate is never guessed into a
+ * position — it's placed after every result that does have one (stable
+ * order preserved otherwise), never dropped.
+ */
+function sortByNormalizedPrice(results: NormalizedSourcingResult[]): NormalizedSourcingResult[] {
+  return [...results].sort((a, b) => {
+    if (a.normalizedPriceEur === undefined && b.normalizedPriceEur === undefined) return 0;
+    if (a.normalizedPriceEur === undefined) return 1;
+    if (b.normalizedPriceEur === undefined) return -1;
+    return a.normalizedPriceEur - b.normalizedPriceEur;
+  });
+}
+
 export class SourcingService {
   /**
    * Queries every configured provider for the given normalized query,
@@ -84,18 +131,33 @@ export class SourcingService {
    *   providerErrors and the search continues with whatever other
    *   providers returned; the failure is never silently swallowed.
    * - Global Sourcing Engine: results are deduplicated (conservative,
-   *   exact-identifier only) and each carries a real, honestly-sourced
-   *   normalizedPriceEur when a rate was available. providersSearched/
-   *   providersFailed/providersUnavailable give the agent real,
-   *   structured provenance of the search itself, so it never claims to
-   *   have searched a source it didn't actually query.
+   *   exact-identifier only), sorted by real normalizedPriceEur (when
+   *   available), and each carries a real, honestly-sourced
+   *   normalizedPriceEur/estimatedKnownCostEur when a rate was available.
+   *   providersSearched/providersFailed/providersUnavailable/
+   *   providersSkipped give the agent real, structured provenance of the
+   *   search itself, so it never claims to have searched a source it
+   *   didn't actually query.
+   * - Phase 2: query.providers, when set, restricts which CONFIGURED
+   *   providers are actually queried (see types.ts) — everything else is
+   *   unchanged from Phase 1.
    */
   static async search(query: NormalizedSearchQuery): Promise<SourcingSearchResponse> {
-    const allProviders = getAllProviders();
+    const allProviders = SourcingProviderRegistry.getAllProviders();
     const configuredProviders = allProviders.filter((provider) => provider.isConfigured());
     const providersUnavailable = allProviders
       .filter((provider) => !provider.isConfigured())
       .map((provider) => provider.name);
+
+    const providerAllowlist = query.providers;
+    const selectedProviders = providerAllowlist
+      ? configuredProviders.filter((provider) => providerAllowlist.includes(provider.name))
+      : configuredProviders;
+    const providersSkipped = providerAllowlist
+      ? configuredProviders
+          .filter((provider) => !providerAllowlist.includes(provider.name))
+          .map((provider) => provider.name)
+      : [];
 
     if (configuredProviders.length === 0) {
       logger.info('No sourcing provider is configured', { query: query.query });
@@ -106,6 +168,7 @@ export class SourcingService {
         providersSearched: [],
         providersFailed: [],
         providersUnavailable,
+        providersSkipped: [],
         totalResults: 0,
       };
     }
@@ -116,7 +179,7 @@ export class SourcingService {
     const providersFailed: string[] = [];
 
     await Promise.all(
-      configuredProviders.map(async (provider) => {
+      selectedProviders.map(async (provider) => {
         providersSearched.push(provider.name);
         try {
           const outcome = await provider.searchProducts(query);
@@ -141,7 +204,9 @@ export class SourcingService {
     );
 
     const deduped = deduplicate(rawResults);
-    const results = await Promise.all(deduped.map((result) => attachNormalizedPrice(result)));
+    const withPrice = await Promise.all(deduped.map((result) => attachNormalizedPrice(result)));
+    const withLandedCost = await Promise.all(withPrice.map((result) => attachLandedCost(result)));
+    const results = sortByNormalizedPrice(withLandedCost);
 
     return {
       status: 'ok',
@@ -150,6 +215,7 @@ export class SourcingService {
       providersSearched,
       providersFailed,
       providersUnavailable,
+      providersSkipped,
       totalResults: results.length,
     };
   }
