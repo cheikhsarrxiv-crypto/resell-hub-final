@@ -399,6 +399,87 @@ export class EbayAdapter extends MarketplaceAdapter {
   }
 
   /**
+   * Listing-reconciliation fix — determines whether a PUBLISHED offer
+   * already exists on eBay for (sku, marketplaceId), independently of
+   * ADKSY's own local Listing row. Exists specifically for the case where
+   * createListing() above already completed its real 3-step sequence
+   * (inventory item -> offer -> PUBLISH) but the caller's own follow-up DB
+   * write then failed/crashed — ADKSY's local record never learns the
+   * publish actually succeeded. This lets that state be reconciled with
+   * the real eBay-side truth instead of either (a) trusting an
+   * unconfirmed local "syncing" row as published, or (b) blindly retrying
+   * createListing and risking a second live offer.
+   *
+   * https://developer.ebay.com/api-docs/sell/inventory/resources/offer/methods/getOffers
+   * (GET /sell/inventory/v1/offer?sku={sku}&marketplace_id={marketplaceId}
+   * — the documented way to look up existing offers for a SKU, scoped to
+   * one marketplace.) developer.ebay.com is egress-blocked in this
+   * sandbox (same limitation noted in createListing's own inventoryBody
+   * comment and in EbayBrowseSourcingProvider), so this is built on
+   * established, stable Sell Inventory API knowledge, at the same
+   * confidence tier as this file's other endpoints — spot-check against
+   * eBay's sandbox before relying on it for a real reconciliation.
+   *
+   * Three distinct outcomes, deliberately NOT collapsed into a boolean —
+   * see ListingReconciliationService, which depends on telling
+   * "confirmed absent" apart from "could not check":
+   * - 'found': a PUBLISHED offer for this exact (sku, marketplaceId) pair
+   *   exists, with a real listingId — safe to adopt as the local
+   *   externalId.
+   * - 'not_found': eBay returned a real, successful response with no
+   *   PUBLISHED offer for this (sku, marketplaceId) pair — a genuine,
+   *   marketplace-confirmed absence (an offer that exists but was never
+   *   published counts as absent here too: createListing() never returns
+   *   successfully before the publish step completes, so an unpublished
+   *   offer cannot be the one this reconciliation is looking for).
+   * - 'unable_to_verify': the call itself failed (auth, rate limit,
+   *   network, timeout, unexpected shape) — eBay's real state is unknown.
+   *   NEVER treated as 'not_found' by this method or its caller.
+   */
+  async findPublishedOfferBySku(
+    sku: string,
+    marketplaceId: string
+  ): Promise<{ status: 'found'; listingId: string; offerId: string } | { status: 'not_found' } | { status: 'unable_to_verify'; reason: string }> {
+    if (!this.accessToken) {
+      return { status: 'unable_to_verify', reason: 'Access token required.' }
+    }
+
+    try {
+      const params = new URLSearchParams({ sku, marketplace_id: marketplaceId })
+      const response = await this.callEbayApi(
+        'GET',
+        `/sell/inventory/v1/offer?${params.toString()}`,
+        this.accessToken,
+        undefined,
+        marketplaceId
+      )
+
+      const offers: any[] = Array.isArray(response?.offers) ? response.offers : []
+      const published = offers.find(
+        (offer) => offer?.sku === sku && offer?.marketplaceId === marketplaceId && offer?.status === 'PUBLISHED' && offer?.listing?.listingId
+      )
+
+      if (published) {
+        return { status: 'found', listingId: String(published.listing.listingId), offerId: String(published.offerId) }
+      }
+
+      // A real, successful eBay response with no matching PUBLISHED offer
+      // is a genuine confirmed absence — never conflated with the catch
+      // branch below, which means the check itself did not succeed.
+      return { status: 'not_found' }
+    } catch (error) {
+      const status = (error as any)?.status ?? (error as any)?.statusCode
+      if (status === 404) {
+        // Some eBay endpoints signal "no results" via 404 rather than an
+        // empty 200 body — treated identically to a real empty result.
+        return { status: 'not_found' }
+      }
+      const normalized = ErrorNormalizer.normalize(error, 'ebay')
+      return { status: 'unable_to_verify', reason: normalized.message || 'eBay reconciliation check failed.' }
+    }
+  }
+
+  /**
    * REAL: Update listing
    * https://developer.ebay.com/docs/sell/inventory/change-item
    */

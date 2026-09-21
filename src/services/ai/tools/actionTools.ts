@@ -10,6 +10,7 @@ import { FulfillmentService } from '@/services/FulfillmentService';
 import { SubscriptionService } from '@/services/SubscriptionService';
 import { isRealEbayPublishEnabled, describeEbayEnvironment } from './ebayPublishGuard';
 import { isRealEtsyPublishEnabled, describeEtsyEnvironment } from './etsyPublishGuard';
+import { reconcileStuckListing, type EbayOfferLookup } from '@/services/listing/ListingReconciliationService';
 
 /**
  * Persistence-architecture audit (see the "Architecture A" report) — a
@@ -70,34 +71,74 @@ interface ReservedListingFields {
   quantity: number;
 }
 
-interface ReserveListingResult {
-  listing: { id: string; externalId: string | null; status: string };
-  /** true when an already synced/syncing Listing for this exact (product, connection) pair was found — no adapter call should happen, this IS the idempotent replay. */
-  alreadyPublished: boolean;
+type ReserveListingOutcome =
+  /** A real, confirmed publish already exists (has a real externalId) — no adapter call, this IS the idempotent replay. Unchanged normal behavior. */
+  | { outcome: 'already_published'; listing: { id: string; externalId: string | null; status: string } }
+  /**
+   * Listing-reconciliation fix: an existing row is stuck at 'syncing'
+   * (a prior attempt reserved it but never reached a terminal
+   * synced/failed state — see ListingReconciliationService's header for
+   * why). It must be reconciled with the real marketplace state before
+   * it can be trusted as published OR retried — never assumed to be
+   * either.
+   */
+  | { outcome: 'needs_reconciliation'; listing: { id: string } }
+  /** A brand-new reservation (or a reused 'failed' slot) — proceed with a real adapter call exactly as before. */
+  | { outcome: 'reserved_for_publish'; listing: { id: string; externalId: string | null; status: string } };
+
+function classifyExistingListing(listing: { id: string; externalId: string | null; status: string; syncStatus: string }): ReserveListingOutcome | null {
+  if (listing.syncStatus === 'synced') {
+    return { outcome: 'already_published', listing };
+  }
+  // 'reconciling' is a transient state ListingReconciliationService's own
+  // atomic claim writes WHILE a reconciliation is actually in flight for
+  // this exact row (see that file's header). A third concurrent request
+  // landing here must be routed the same way as 'syncing' — never fall
+  // through to the reservation path below, which would otherwise try to
+  // reuse/overwrite a row another request is mid-reconciliation on.
+  // reconcileStuckListing's own claim (which only matches 'syncing')
+  // correctly reports this as 'in_progress' rather than re-checking the
+  // marketplace a second time.
+  if (listing.syncStatus === 'syncing' || listing.syncStatus === 'reconciling') {
+    return { outcome: 'needs_reconciliation', listing: { id: listing.id } };
+  }
+  // 'failed' (or any other non-terminal value) — not a final classification, caller proceeds to reserve/reuse the row.
+  return null;
 }
 
 /**
  * Mirrors ListingService.createListing's own reserve-then-publish guard
- * exactly (see that method's own comments): a Listing already 'synced' or
- * 'syncing' for this (productId, connectionId) pair means the intent is
- * already satisfied — returned as-is, the real adapter call is NEVER made
- * again. A 'failed' row is a retryable slot, reused in place rather than
+ * exactly (see that method's own comments): a Listing already 'synced'
+ * for this (productId, connectionId) pair means the intent is already
+ * satisfied — returned as-is, the real adapter call is NEVER made again.
+ * A 'failed' row is a retryable slot, reused in place rather than
  * inserting a duplicate. The DB's own partial unique index
  * (Listing_active_product_connection_key) is the real, race-safe backstop
  * if two requests somehow reach the insert at the same time.
+ *
+ * Listing-reconciliation fix: a 'syncing' row is NO LONGER treated the
+ * same as 'synced'. Before this fix, a Listing stuck at 'syncing' (the
+ * real marketplace call succeeded but the DB write that should have
+ * followed it — markListingSynced — failed or crashed) was silently
+ * reported as `alreadyPublished: true` with `externalId: null` forever,
+ * and never retried. It is now reported as its own outcome,
+ * 'needs_reconciliation', so the caller can resolve it against the real
+ * marketplace state (see ListingReconciliationService) instead of
+ * guessing either way.
  */
 async function reserveListingForPublish(
   workspaceId: string,
   productId: string,
   connectionId: string,
   fields: ReservedListingFields
-): Promise<ReserveListingResult> {
+): Promise<ReserveListingOutcome> {
   const existingListing = await prisma.listing.findFirst({
     where: { productId, marketplaceConnectionId: connectionId, deletedAt: null },
   });
 
-  if (existingListing && existingListing.syncStatus !== 'failed') {
-    return { listing: existingListing, alreadyPublished: true };
+  if (existingListing) {
+    const classified = classifyExistingListing(existingListing);
+    if (classified) return classified;
   }
 
   try {
@@ -116,14 +157,19 @@ async function reserveListingForPublish(
             ...fields,
           },
         });
-    return { listing: reserved, alreadyPublished: false };
+    return { outcome: 'reserved_for_publish', listing: reserved };
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       // Lost a race — another request already claimed this exact pair a
-      // moment ago. Same outcome as the fast-path check above: return
+      // moment ago. Same outcome as the fast-path check above: classify
       // whatever exists now, never publish a duplicate.
       const raceWinner = await prisma.listing.findFirst({ where: { productId, marketplaceConnectionId: connectionId, deletedAt: null } });
-      if (raceWinner) return { listing: raceWinner, alreadyPublished: true };
+      if (raceWinner) {
+        const classified = classifyExistingListing(raceWinner);
+        if (classified) return classified;
+        // raceWinner is itself 'failed' (or similar) — treat it as the reserved slot, same as the non-race path would.
+        return { outcome: 'reserved_for_publish', listing: raceWinner };
+      }
     }
     throw error;
   }
@@ -362,22 +408,55 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
       };
     }
 
-    const { listing: reserved, alreadyPublished } = await reserveListingForPublish(workspaceId, product.id, connection.id, {
+    const reserveResult = await reserveListingForPublish(workspaceId, product.id, connection.id, {
       title: ebayInput.title as string,
       description: ebayInput.description as string,
       price: ebayInput.price as number,
       quantity: ebayInput.quantity as number,
     });
 
-    if (alreadyPublished) {
+    if (reserveResult.outcome === 'already_published') {
       // Idempotent replay: this exact (product, connection) pair is
-      // already synced/syncing — the real adapter call is NEVER repeated.
+      // already confirmed synced — the real adapter call is NEVER repeated.
       return {
         published: true,
-        listingId: reserved.id,
-        externalId: reserved.externalId,
-        status: reserved.status,
+        listingId: reserveResult.listing.id,
+        externalId: reserveResult.listing.externalId,
+        status: reserveResult.listing.status,
         alreadyPublished: true,
+      };
+    }
+
+    if (reserveResult.outcome === 'needs_reconciliation') {
+      // Listing-reconciliation fix: a prior attempt for this exact
+      // (product, connection) pair is stuck at 'syncing' — the real eBay
+      // call may have already succeeded even though ADKSY never recorded
+      // it. Never trusted as published and never blindly retried until
+      // this is resolved against eBay's own real state.
+      const ebayMarketplaceId = (ebayInput.ebay as { marketplaceId?: string } | undefined)?.marketplaceId;
+      const adapter = await getAuthenticatedAdapter(workspaceId, 'ebay');
+      const reconciliation = await reconcileStuckListing(reserveResult.listing, 'ebay', product.sku, adapter as unknown as EbayOfferLookup, ebayMarketplaceId);
+
+      if (reconciliation.outcome === 'synced' || reconciliation.outcome === 'already_published') {
+        return {
+          published: true,
+          listingId: reconciliation.listing.id,
+          externalId: reconciliation.listing.externalId,
+          status: reconciliation.listing.status,
+          alreadyPublished: true,
+        };
+      }
+      if (reconciliation.outcome === 'not_found_retryable') {
+        return {
+          error:
+            'A previous publish attempt for this product could not be confirmed on eBay and has been marked for retry. Please try publishing again.',
+        };
+      }
+      // 'unable_to_verify' or 'in_progress' — fail closed: never conclude
+      // absence, never republish while the real state is unknown.
+      return {
+        error:
+          "This product's eBay publish status from a previous attempt could not be confirmed right now. No new listing will be created until this is resolved — please try again shortly.",
       };
     }
 
@@ -393,7 +472,7 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
       // bookkeeping only, never masking or replacing the real error.
       const adapter = await getAuthenticatedAdapter(workspaceId, 'ebay');
       const result = await adapter.createListing(payload as any);
-      const finalListing = await markListingSynced(reserved.id, result.externalId);
+      const finalListing = await markListingSynced(reserveResult.listing.id, result.externalId);
       return {
         published: true,
         listingId: finalListing.id,
@@ -401,7 +480,7 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
         status: result.status,
       };
     } catch (error) {
-      await markListingFailed(reserved.id, 'eBay');
+      await markListingFailed(reserveResult.listing.id, 'eBay');
       throw error;
     }
   },
@@ -535,20 +614,50 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
       };
     }
 
-    const { listing: reserved, alreadyPublished } = await reserveListingForPublish(workspaceId, product.id, connection.id, {
+    const reserveResult = await reserveListingForPublish(workspaceId, product.id, connection.id, {
       title: etsyInput.title as string,
       description: etsyInput.description as string,
       price: etsyInput.price as number,
       quantity: etsyInput.quantity as number,
     });
 
-    if (alreadyPublished) {
+    if (reserveResult.outcome === 'already_published') {
       return {
         published: true,
-        listingId: reserved.id,
-        externalId: reserved.externalId,
-        status: reserved.status,
+        listingId: reserveResult.listing.id,
+        externalId: reserveResult.listing.externalId,
+        status: reserveResult.listing.status,
         alreadyPublished: true,
+      };
+    }
+
+    if (reserveResult.outcome === 'needs_reconciliation') {
+      // Listing-reconciliation fix: a prior attempt for this exact
+      // (product, connection) pair is stuck at 'syncing'. Etsy has no
+      // reliable SKU-indexed listing lookup (see
+      // ListingReconciliationService's own documented reason) — this
+      // always fails closed rather than guess either way: never trusted
+      // as published, never blindly retried.
+      const reconciliation = await reconcileStuckListing(reserveResult.listing, 'etsy', product.sku, null, undefined);
+
+      if (reconciliation.outcome === 'synced' || reconciliation.outcome === 'already_published') {
+        return {
+          published: true,
+          listingId: reconciliation.listing.id,
+          externalId: reconciliation.listing.externalId,
+          status: reconciliation.listing.status,
+          alreadyPublished: true,
+        };
+      }
+      if (reconciliation.outcome === 'not_found_retryable') {
+        return {
+          error:
+            'A previous publish attempt for this product could not be confirmed on Etsy and has been marked for retry. Please try publishing again.',
+        };
+      }
+      return {
+        error:
+          "This product's Etsy publish status from a previous attempt could not be confirmed right now. No new listing will be created until this is resolved — please try again shortly.",
       };
     }
 
@@ -561,7 +670,7 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
       // here that could diverge from that guarantee.
       const adapter = await getAuthenticatedAdapter(workspaceId, 'etsy');
       const result = await adapter.createListing(payload as any);
-      const finalListing = await markListingSynced(reserved.id, result.externalId);
+      const finalListing = await markListingSynced(reserveResult.listing.id, result.externalId);
       return {
         published: true,
         listingId: finalListing.id,
@@ -569,7 +678,7 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
         status: result.status,
       };
     } catch (error) {
-      await markListingFailed(reserved.id, 'Etsy');
+      await markListingFailed(reserveResult.listing.id, 'Etsy');
       throw error;
     }
   },

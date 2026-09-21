@@ -35,6 +35,15 @@ const { productStore, connectionStore, listingStore } = vi.hoisted(() => ({
   listingStore: new Map<string, any>(),
 }));
 
+// Listing-reconciliation fix — Test 9 (Étape 9) flag: when
+// `.value` is true, prisma.listing.update throws for every call,
+// simulating the DB being genuinely unavailable right after a real
+// marketplace call already succeeded. A mutable holder OBJECT (not a
+// destructured primitive) so the mocked module factory below — itself
+// hoisted, and evaluated once at import time — and the test bodies below
+// share the exact same reference and see each other's mutations.
+const dbDownFlag = vi.hoisted(() => ({ value: false }));
+
 const DEFAULT_PRODUCT_ID = 'product-1';
 const DEFAULT_PRODUCT_SKU = 'SKU-REAL-PRODUCT-1';
 
@@ -84,16 +93,41 @@ vi.mock('@/lib/prisma', () => ({
         }
         return null;
       }),
+      findUnique: vi.fn(async ({ where }: any) => {
+        const row = listingStore.get(where.id);
+        return row ? { ...row } : null;
+      }),
       create: vi.fn(async ({ data }: any) => {
         const row = { id: `listing-${++listingIdCounter}`, externalId: null, deletedAt: null, ...data };
         listingStore.set(row.id, row);
         return { ...row };
       }),
       update: vi.fn(async ({ where, data }: any) => {
+        // Listing-reconciliation fix — Test 9 (Étape 9): simulates the DB
+        // being genuinely unavailable for `update` calls specifically
+        // (both markListingSynced's and markListingFailed's), the exact
+        // "adapter.createListing succeeded, the local write then failed"
+        // crash scenario the audit identified. Toggled per-test only.
+        if (dbDownFlag.value) {
+          throw new Error('DB temporarily unavailable');
+        }
         const row = listingStore.get(where.id);
         if (!row) throw new Error('Listing not found');
         Object.assign(row, data);
         return { ...row };
+      }),
+      // Race-safe conditional transition, the same idiom
+      // AgentActionStateMachine already uses — only counts as a match
+      // (and only then mutates) when the row's CURRENT syncStatus equals
+      // what `where` demands, exactly like a real
+      // `UPDATE ... WHERE id = ? AND syncStatus = ?` would.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        const row = listingStore.get(where.id);
+        if (!row || row.syncStatus !== where.syncStatus) {
+          return { count: 0 };
+        }
+        Object.assign(row, data);
+        return { count: 1 };
       }),
     },
   },
@@ -105,12 +139,23 @@ vi.mock('@/lib/prisma', () => ({
 // actually runs (triggered by this file's own hoisted imports resolving
 // the module graph). vi.hoisted() is Vitest's own documented mechanism
 // for exactly this: values that must exist inside a hoisted mock factory.
-const { getAuthenticatedAdapterMock, createListingMock } = vi.hoisted(() => {
+const { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock } = vi.hoisted(() => {
   const createListingMock = vi.fn();
+  // Listing-reconciliation fix — the eBay-only real lookup used to
+  // reconcile a stuck 'syncing' Listing (see EbayAdapter.findPublishedOfferBySku).
+  // Defaults to an explicit unable_to_verify so a test that forgets to
+  // configure it fails loudly rather than silently behaving like a
+  // confirmed not_found.
+  const findPublishedOfferBySkuMock = vi.fn(
+    async (): Promise<
+      { status: 'found'; listingId: string; offerId: string } | { status: 'not_found' } | { status: 'unable_to_verify'; reason: string }
+    > => ({ status: 'unable_to_verify', reason: 'not configured by this test' })
+  );
   const getAuthenticatedAdapterMock = vi.fn(async (_workspaceId: string, _marketplaceName: string) => ({
     createListing: createListingMock,
+    findPublishedOfferBySku: findPublishedOfferBySkuMock,
   }));
-  return { getAuthenticatedAdapterMock, createListingMock };
+  return { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock };
 });
 
 vi.mock('@/services/ListingService', () => ({
@@ -245,12 +290,15 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
     productStore.clear();
     connectionStore.clear();
     listingStore.clear();
+    dbDownFlag.value = false;
+    findPublishedOfferBySkuMock.mockReset().mockResolvedValue({ status: 'unable_to_verify', reason: 'not configured by this test' });
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:ebay', { id: 'conn-ebay-1' });
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_EBAY_PUBLISH;
+    dbDownFlag.value = false;
   });
 
   it('is registered in AiToolRegistry as an engage tool — never auto-executed', () => {
@@ -516,6 +564,198 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       });
     });
   });
+
+  /**
+   * Listing-reconciliation fix (audit finding CRITICAL) — a Listing
+   * stuck at syncStatus='syncing' (the real eBay call already succeeded,
+   * but the local DB write that should have followed it crashed/failed)
+   * must never be silently trusted as published nor blindly republished.
+   * See ListingReconciliationService for the unit-level tests of the
+   * atomic claim/race logic; these are end-to-end through the real tool.
+   */
+  describe('reconciliation of a Listing stuck at "syncing" (listing-reconciliation fix)', () => {
+    function seedStuckListing(overrides: Record<string, any> = {}) {
+      const id = `listing-${++listingIdCounter}`;
+      listingStore.set(id, {
+        id,
+        productId: DEFAULT_PRODUCT_ID,
+        workspaceId: 'ws-1',
+        marketplaceConnectionId: 'conn-ebay-1',
+        externalId: null,
+        status: 'active',
+        syncStatus: 'syncing',
+        syncError: null,
+        deletedAt: null,
+        title: 'stale',
+        description: 'stale',
+        price: 1,
+        quantity: 1,
+        ...overrides,
+      });
+      return id;
+    }
+
+    it('TEST 1 — eBay: reconciliation finds the real published offer, records the externalId, moves to synced, and NEVER calls createListing again', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      const stuckId = seedStuckListing();
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'found', listingId: 'EBAY-RECOVERED-1', offerId: 'OFFER-1' });
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result).toEqual({ published: true, listingId: stuckId, externalId: 'EBAY-RECOVERED-1', status: 'active', alreadyPublished: true });
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(findPublishedOfferBySkuMock).toHaveBeenCalledWith(DEFAULT_PRODUCT_SKU, 'EBAY_GB');
+      expect(listingStore.get(stuckId).syncStatus).toBe('synced');
+      expect(listingStore.get(stuckId).externalId).toBe('EBAY-RECOVERED-1');
+      expect(listingStore.size).toBe(1); // no duplicate row created
+    });
+
+    it('TEST 3 — eBay: reconciliation confirms real absence (not_found) and allows a controlled retry — a fresh call then publishes for real, never a duplicate', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      const stuckId = seedStuckListing();
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'not_found' });
+      await seedReadyDraft('conv-1');
+
+      const first: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(first.error).toMatch(/could not be confirmed on eBay.*marked for retry/i);
+      expect(createListingMock).not.toHaveBeenCalled(); // reconciliation itself never republishes
+      expect(listingStore.get(stuckId).syncStatus).toBe('failed');
+
+      // A separate, later call is the "controlled retry" — reuses the SAME row via the existing 'failed' retry path, never a duplicate.
+      createListingMock.mockResolvedValueOnce({ externalId: 'EBAY-NEW-1', status: 'active' });
+      const second: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createListingMock).toHaveBeenCalledTimes(1);
+      expect(second.listingId).toBe(stuckId);
+      expect(second.externalId).toBe('EBAY-NEW-1');
+      expect(listingStore.size).toBe(1);
+    });
+
+    it('TEST 5 — eBay: the marketplace check is inconclusive (rate-limited/unreachable) — no republication, no false not_found, explicit error', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      const stuckId = seedStuckListing();
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'unable_to_verify', reason: 'eBay rate limited the check' });
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/could not be confirmed/i);
+      expect(result.error).not.toMatch(/not found|not_found/i);
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.get(stuckId).syncStatus).toBe('syncing'); // left exactly as it was — never failed, never synced
+      expect(listingStore.get(stuckId).externalId).toBeNull();
+    });
+
+    it('TEST 6 — eBay: two concurrent publish attempts on the SAME stuck Listing — only one reconciliation actually checks eBay, no duplicate external call', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      seedStuckListing();
+      let resolveLookup!: (v: any) => void;
+      findPublishedOfferBySkuMock.mockImplementation(() => new Promise((resolve) => { resolveLookup = resolve; }));
+      await seedReadyDraft('conv-1');
+
+      const firstCall = publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const second: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(second.error).toBeTruthy(); // the second request lost the claim — reports "in progress", never re-checks
+
+      resolveLookup({ status: 'found', listingId: 'EBAY-CONCURRENT-1', offerId: 'OFFER-1' });
+      const first: any = await firstCall;
+
+      expect(findPublishedOfferBySkuMock).toHaveBeenCalledTimes(1); // never checked twice
+      expect(first.published).toBe(true);
+      expect(first.externalId).toBe('EBAY-CONCURRENT-1');
+      expect(createListingMock).not.toHaveBeenCalled();
+    });
+
+    it('a THIRD request landing on a row already mid-reconciliation (syncStatus="reconciling") is also routed to reconciliation, never to a fresh reservation', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      seedStuckListing({ syncStatus: 'reconciling' }); // simulates another request's in-flight claim
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toBeTruthy();
+      expect(findPublishedOfferBySkuMock).not.toHaveBeenCalled(); // never re-checks — the claim belongs to someone else
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(1); // no duplicate row created
+    });
+
+    it('TEST 7 — the old "alreadyPublished=true + externalId=null" behavior for a stuck Listing no longer exists', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      seedStuckListing();
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'unable_to_verify', reason: 'inconclusive' });
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      // Never presented as a confirmed publish while unresolved.
+      expect(result.alreadyPublished).not.toBe(true);
+      expect(result.published).not.toBe(true);
+    });
+
+    it('TEST 9b — a genuine "failed" Listing (real adapter rejection, not a stuck reconciliation) still retries normally, unaffected by this fix', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      const stuckId = seedStuckListing({ syncStatus: 'failed', syncError: "Couldn't publish to eBay. Please try again." });
+      createListingMock.mockResolvedValueOnce({ externalId: 'EBAY-RETRY-NORMAL', status: 'active' });
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(findPublishedOfferBySkuMock).not.toHaveBeenCalled(); // a 'failed' row never goes through reconciliation
+      expect(result.listingId).toBe(stuckId);
+      expect(result.externalId).toBe('EBAY-RETRY-NORMAL');
+    });
+
+    it('TEST 10 — workspace isolation: workspace B can never trigger reconciliation on workspace A\'s stuck Listing', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      seedStuckListing(); // belongs to ws-1 / DEFAULT_PRODUCT_ID / conn-ebay-1
+      await seedReadyDraft('conv-1');
+
+      // ws-2 has no matching Product/connection at all — the existing,
+      // unmodified workspace-scoped lookups (loadPublishableProduct /
+      // loadMarketplaceConnectionForPublish) refuse before reconciliation
+      // is ever reached.
+      const result: any = await publishListingTool.handler('ws-2', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/product not found/i);
+      expect(findPublishedOfferBySkuMock).not.toHaveBeenCalled();
+    });
+
+    it('Étape 9 — the exact crash scenario: adapter.createListing() succeeds, the DB write (markListingSynced) then throws, the Listing stays "syncing"; a later reconciliation recovers it without ever republishing', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      createListingMock.mockResolvedValueOnce({ externalId: 'EBAY-CRASHED-SUCCESS', status: 'active' });
+      await seedReadyDraft('conv-1');
+
+      // Simulates the DB going down for the write immediately following
+      // the real eBay success (both markListingSynced's and
+      // markListingFailed's own compensating write fail too — the exact
+      // "DB temporarily indisponible" scenario from the audit).
+      dbDownFlag.value = true;
+      await expect(
+        publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+      ).rejects.toBeTruthy();
+      dbDownFlag.value = false;
+
+      expect(listingStore.size).toBe(1);
+      const stuck = Array.from(listingStore.values())[0];
+      expect(stuck.syncStatus).toBe('syncing');
+      expect(stuck.externalId).toBeNull();
+      expect(createListingMock).toHaveBeenCalledTimes(1); // the real eBay call really happened, exactly once
+
+      // DB is back — a later attempt must reconcile, not republish.
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'found', listingId: 'EBAY-CRASHED-SUCCESS', offerId: 'OFFER-CRASHED-1' });
+      const recovered: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createListingMock).toHaveBeenCalledTimes(1); // still exactly once — never republished
+      expect(recovered.published).toBe(true);
+      expect(recovered.externalId).toBe('EBAY-CRASHED-SUCCESS');
+      expect(listingStore.get(stuck.id).syncStatus).toBe('synced');
+    });
+  });
 });
 
 describe('publish_etsy_listing tool definition (Etsy publication parity)', () => {
@@ -529,12 +769,14 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     productStore.clear();
     connectionStore.clear();
     listingStore.clear();
+    dbDownFlag.value = false;
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    dbDownFlag.value = false;
   });
 
   const withProduct = { productId: DEFAULT_PRODUCT_ID };
@@ -779,6 +1021,109 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
           publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
         ).rejects.toBeTruthy();
       });
+    });
+  });
+
+  /**
+   * Listing-reconciliation fix — Etsy side. Etsy has no reliable
+   * SKU-indexed listing lookup (see ListingReconciliationService's own
+   * documented reason), so a stuck Etsy Listing always fails closed:
+   * never trusted as published, never blindly retried, and — unlike
+   * eBay — never resolved to 'synced' by this mechanism at all (TEST 2
+   * as literally specified — "reconciliation retrouve le listing" for
+   * Etsy — is not something this fix can honestly deliver; see the
+   * final report's own explanation of this scope decision).
+   */
+  describe('reconciliation of a Listing stuck at "syncing" (listing-reconciliation fix, Etsy fail-closed)', () => {
+    function seedStuckEtsyListing(overrides: Record<string, any> = {}) {
+      const id = `listing-${++listingIdCounter}`;
+      listingStore.set(id, {
+        id,
+        productId: DEFAULT_PRODUCT_ID,
+        workspaceId: 'ws-1',
+        marketplaceConnectionId: 'conn-etsy-1',
+        externalId: null,
+        status: 'active',
+        syncStatus: 'syncing',
+        syncError: null,
+        deletedAt: null,
+        title: 'stale',
+        description: 'stale',
+        price: 1,
+        quantity: 1,
+        ...overrides,
+      });
+      return id;
+    }
+
+    it('TEST 5 (Etsy variant) — always fails closed: no lookup capability exists, so it is always treated as "unable to verify", never "not found", never republished', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      const stuckId = seedStuckEtsyListing();
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/could not be confirmed/i);
+      expect(result.error).not.toMatch(/not found|not_found/i);
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.get(stuckId).syncStatus).toBe('syncing'); // left exactly as it was
+      expect(listingStore.get(stuckId).externalId).toBeNull();
+    });
+
+    it('TEST 7 (Etsy variant) — the old "alreadyPublished=true + externalId=null" behavior no longer exists for Etsy either', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      seedStuckEtsyListing();
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.alreadyPublished).not.toBe(true);
+      expect(result.published).not.toBe(true);
+    });
+
+    it('TEST 9b (Etsy variant) — a genuine "failed" Listing (real adapter rejection) still retries normally, unaffected by this fix', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      const stuckId = seedStuckEtsyListing({ syncStatus: 'failed', syncError: "Couldn't publish to Etsy. Please try again." });
+      createListingMock.mockResolvedValueOnce({ externalId: 'ETSY-RETRY-NORMAL', status: 'active' });
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.listingId).toBe(stuckId);
+      expect(result.externalId).toBe('ETSY-RETRY-NORMAL');
+    });
+
+    it("TEST 10 (Etsy variant) — workspace isolation: workspace B can never trigger reconciliation on workspace A's stuck Etsy Listing", async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      seedStuckEtsyListing();
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-2', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/product not found/i);
+    });
+
+    it('Étape 9 (Etsy variant) — adapter.createListing() succeeds, the DB write then throws, the Listing stays "syncing"; a later attempt fails closed (Etsy has no recovery lookup) rather than republishing', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      createListingMock.mockResolvedValueOnce({ externalId: 'ETSY-CRASHED-SUCCESS', status: 'active' });
+      await seedReadyEtsyDraft('conv-1');
+
+      dbDownFlag.value = true;
+      await expect(
+        publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+      ).rejects.toBeTruthy();
+      dbDownFlag.value = false;
+
+      expect(listingStore.size).toBe(1);
+      const stuck = Array.from(listingStore.values())[0];
+      expect(stuck.syncStatus).toBe('syncing');
+      expect(createListingMock).toHaveBeenCalledTimes(1);
+
+      const secondAttempt: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createListingMock).toHaveBeenCalledTimes(1); // never republished — Etsy fails closed, no way to confirm the crashed success
+      expect(secondAttempt.error).toBeTruthy();
+      expect(listingStore.get(stuck.id).syncStatus).toBe('syncing');
     });
   });
 });
