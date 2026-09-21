@@ -11,6 +11,10 @@ import { SubscriptionService } from '@/services/SubscriptionService';
 import { isRealEbayPublishEnabled, describeEbayEnvironment } from './ebayPublishGuard';
 import { isRealEtsyPublishEnabled, describeEtsyEnvironment } from './etsyPublishGuard';
 import { reconcileStuckListing, type EbayOfferLookup } from '@/services/listing/ListingReconciliationService';
+import { ProductService, PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_MESSAGE } from '@/services/ProductService';
+import { createProductSchema } from '@/lib/validations';
+import { findToolResultsByName } from './conversationToolResults';
+import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
 
 /**
  * Persistence-architecture audit (see the "Architecture A" report) — a
@@ -255,6 +259,247 @@ export const simulateEngageActionTool: AgentToolDefinition<{ note?: string }> = 
       note: input.note ?? null,
       message: 'Simulated execution completed. No real external or financial effect occurred.',
     };
+  },
+};
+
+/**
+ * create_product — the missing link the provenance/deduplication audit
+ * identified: turns a real, already-sourced marketplace item into a real
+ * ADKSY Product (+ its Inventory row), with its provenance persisted
+ * (Option A, src/prisma/schema.prisma's own Product comment). Still never
+ * creates a Listing or publishes anything — that stays publish_listing/
+ * publish_etsy_listing's job, entirely untouched here (Architecture A,
+ * see actionTools.ts's own header comment above publishListingTool: a
+ * Product must already exist before either publish tool will touch it —
+ * this tool is what makes that true for a sourced item for the first time).
+ *
+ * Real, matching PRODUCT_CONDITION_VALUES duplicated here on purpose,
+ * kept in sync by hand with createProductSchema's own inline enum
+ * (src/lib/validations.ts) — Zod's `.default()`-wrapped enum isn't
+ * cleanly re-exported/composed across modules, and this is the same
+ * "small, stable, hand-duplicated" tradeoff already accepted elsewhere in
+ * this codebase (e.g. EtsyListingMapper.ETSY_WHEN_MADE_OPTIONS).
+ */
+const PRODUCT_CONDITION_VALUES = ['new', 'like-new', 'good', 'fair', 'used'] as const;
+
+const createProductInputSchema = z.object({
+  // Provenance — all three REQUIRED for this tool (unlike Product's own
+  // schema, where they're optional to keep manual dashboard creation
+  // working). Revalidated against a real search_products result in THIS
+  // conversation before anything is ever created — see
+  // findMatchingSourcingResult below. Never accepted on trust just
+  // because the model says so.
+  sourceMarketplace: z.string().min(1),
+  sourceId: z.string().min(1),
+  sourceUrl: z.string().url(),
+
+  title: z.string().min(2),
+  description: z.string().min(5).optional(),
+
+  // Financial fields — deliberately REQUIRED, never defaulted or
+  // inferred from the sourcing result's own price (that is a cost the
+  // source reports, never automatically the reseller's real purchase
+  // price or a proposed selling price — see ListingDraftFields' own
+  // documented rule, mirrored here for the same reason).
+  sellingPrice: z.number().min(0),
+  purchasePrice: z.number().min(0),
+
+  sku: z.string().min(1).optional(),
+  brand: z.string().optional(),
+  condition: z.enum(PRODUCT_CONDITION_VALUES).optional(),
+  size: z.string().optional(),
+  color: z.string().optional(),
+  // Deliberately NO `quantity` input: a sourced item is inherently a
+  // single physical unit (the same rule ListingGenerationService already
+  // applies to a draft's own quantity) — the Agent is never allowed to
+  // invent a stock count for it. Omitted entirely so createProductSchema's
+  // own existing `.default(1)` applies, exactly like a manual creation
+  // with no quantity given.
+  // Deliberately NO `images`: Product itself has no images column (they
+  // live on the separate ProductImage table via StorageService, which
+  // needs a real file, not a source URL to hotlink) — out of this task's
+  // explicit scope.
+});
+
+type CreateProductToolInput = z.infer<typeof createProductInputSchema>;
+
+/**
+ * Never trusts sourceMarketplace/sourceId/sourceUrl the model merely
+ * repeats back — confirms all three together match a real search_products
+ * result that really appeared IN THIS CONVERSATION, the same
+ * findToolResultsByName-based revalidation pattern already used by
+ * generate_listing_draft/edit_listing_draft (see listingDraftTools.ts's
+ * own findSourcedResult) and by publish_listing/publish_etsy_listing (see
+ * findLatestDraft) — never a second, parallel verification system.
+ * All three fields must match the SAME candidate result; if any one
+ * differs, this returns null and the action is refused.
+ */
+async function findMatchingSourcingResult(conversationId: string, workspaceId: string, input: CreateProductToolInput) {
+  const entries = await findToolResultsByName(conversationId, ['search_products'], workspaceId);
+  for (const entry of entries) {
+    const payload = entry.result as { results?: unknown[] } | null;
+    const results = Array.isArray(payload?.results) ? payload!.results! : [];
+    for (const candidate of results) {
+      if (
+        isNormalizedSourcingResult(candidate) &&
+        candidate.source === input.sourceMarketplace &&
+        candidate.sourceId === input.sourceId &&
+        candidate.sourceUrl === input.sourceUrl
+      ) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * ProductService.createProduct's own known, clean business-error messages
+ * (never the raw Prisma text — see that method's own comments) that
+ * represent a genuine, expected refusal rather than an unexpected failure.
+ * Mirrors sendToFulfillmentTool's own KNOWN_FULFILLMENT_ERRORS pattern:
+ * matched errors become a controlled `{error}` result (AiActionService
+ * releases the usage reservation, marks the action COMPLETED with this
+ * refusal as its result — never FAILED); anything else propagates
+ * unmodified to AiActionService's own catch. PRODUCT_SOURCE_CONFLICT_MESSAGE
+ * is handled separately below (it needs the existing product's id looked
+ * up), never added to this set.
+ */
+const KNOWN_PRODUCT_CREATION_ERRORS = new Set([PRODUCT_SKU_CONFLICT_MESSAGE, 'Product limit reached for your plan']);
+
+function buildProductPreview(workspaceId: string, input: CreateProductToolInput) {
+  return {
+    action: 'create_product',
+    sourceMarketplace: input.sourceMarketplace,
+    sourceId: input.sourceId,
+    sourceUrl: input.sourceUrl,
+    title: input.title,
+    description: input.description ?? null,
+    sellingPrice: input.sellingPrice,
+    purchasePrice: input.purchasePrice,
+    sku: input.sku ?? null,
+    brand: input.brand ?? null,
+    condition: input.condition ?? 'used',
+    size: input.size ?? null,
+    color: input.color ?? null,
+    message: 'Confirming this will add a new product to your ADKSY catalog with these exact details.',
+  };
+}
+
+export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
+  name: 'create_product',
+  description:
+    'Propose creating a new ADKSY catalog product (with its stock record) from a product the reseller selected from a previous search_products result in THIS conversation. ' +
+    'sourceMarketplace/sourceId/sourceUrl together must exactly match one of those real results — a fabricated or foreign combination is rejected, never accepted on trust. ' +
+    "purchasePrice and sellingPrice must be the reseller's own real, explicit values — never invented or copied from the source's own listed price. " +
+    'If this exact source was already added to this workspace\'s catalog before, this is refused (never creates a duplicate, never silently returns the existing product as if this succeeded). ' +
+    'Requires the reseller\'s explicit confirmation before anything is created. Never creates a Listing or publishes anything — use publish_listing/publish_etsy_listing separately once this product exists.',
+  category: 'engage',
+  inputSchema: createProductInputSchema,
+  jsonSchema: {
+    type: 'object',
+    properties: {
+      sourceMarketplace: { type: 'string', description: "The sourcing provider name (e.g. 'ebay') — must match a real search_products result in this conversation." },
+      sourceId: { type: 'string', description: 'The exact sourceId of a result already returned by search_products in this conversation.' },
+      sourceUrl: { type: 'string', description: 'The exact sourceUrl of that same result.' },
+      title: { type: 'string', description: 'Product title.' },
+      description: { type: 'string', description: 'Product description. Optional.' },
+      sellingPrice: { type: 'number', description: "The reseller's own real proposed selling price. Never invented." },
+      purchasePrice: { type: 'number', description: "The reseller's own real purchase cost. Never invented or copied from the source's listed price without confirmation." },
+      sku: { type: 'string', description: 'Optional. A real SKU auto-generated if omitted, exactly like manual product creation.' },
+      brand: { type: 'string', description: 'Optional.' },
+      condition: { type: 'string', enum: PRODUCT_CONDITION_VALUES as unknown as string[], description: 'Optional, defaults to "used".' },
+      size: { type: 'string', description: 'Optional.' },
+      color: { type: 'string', description: 'Optional.' },
+    },
+    required: ['sourceMarketplace', 'sourceId', 'sourceUrl', 'title', 'sellingPrice', 'purchasePrice'],
+  },
+  async preview(workspaceId, input, context) {
+    if (!context) return { error: 'Missing conversation context' };
+
+    const sourced = await findMatchingSourcingResult(context.conversationId, workspaceId, input);
+    if (!sourced) {
+      return { error: "This source does not match a real search_products result in this conversation. Search again before selecting it." };
+    }
+
+    return buildProductPreview(workspaceId, input);
+  },
+  async handler(workspaceId, input, context) {
+    if (!context) return { error: 'Missing conversation context' };
+
+    const sourced = await findMatchingSourcingResult(context.conversationId, workspaceId, input);
+    if (!sourced) {
+      return { error: "This source does not match a real search_products result in this conversation. Search again before selecting it." };
+    }
+
+    // Reuses the exact same validation/defaulting pipeline the human
+    // dashboard's own POST /api/products already goes through (condition
+    // defaults to 'used', quantity defaults to 1, description defaults to
+    // '' inside ProductService itself) — never a second, hand-rolled set
+    // of defaults that could drift from it.
+    const parsed = createProductSchema.safeParse({
+      sku: input.sku,
+      title: input.title,
+      description: input.description,
+      brand: input.brand,
+      condition: input.condition,
+      size: input.size,
+      color: input.color,
+      purchasePrice: input.purchasePrice,
+      sellingPrice: input.sellingPrice,
+      sourceMarketplace: input.sourceMarketplace,
+      sourceId: input.sourceId,
+      sourceUrl: input.sourceUrl,
+    });
+    if (!parsed.success) {
+      return { error: `Invalid product data: ${parsed.error.errors.map((e) => e.message).join('; ')}` };
+    }
+
+    try {
+      // ProductService.createProduct already owns: the Product+Inventory
+      // atomic transaction, SKU generation when omitted, and the SKU/
+      // source P2002 -> clean-error mapping — never reimplemented here.
+      const product = await ProductService.createProduct(workspaceId, parsed.data);
+      return {
+        success: true,
+        productId: product.id,
+        sku: product.sku,
+        title: product.title,
+        sourceMarketplace: product.sourceMarketplace,
+        sourceId: product.sourceId,
+        sourceUrl: product.sourceUrl,
+        sellingPrice: product.sellingPrice,
+        purchasePrice: product.purchasePrice,
+        inventoryQuantity: parsed.data.quantity,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message === PRODUCT_SOURCE_CONFLICT_MESSAGE) {
+        // Duplicate source, never a second Product created. Looking up
+        // the existing product's id is a plain, workspace-scoped read —
+        // the same {workspaceId, ...} shape every other tool already
+        // uses (see get_product) — never a mutation, never a fallback to
+        // treating this as a success.
+        const existing = await prisma.product.findFirst({
+          where: { workspaceId, sourceMarketplace: input.sourceMarketplace, sourceId: input.sourceId },
+          select: { id: true },
+        });
+        return {
+          success: false,
+          error: 'This source has already been added to your catalog.',
+          errorCode: 'PRODUCT_SOURCE_ALREADY_EXISTS',
+          message: 'This source has already been added to your catalog.',
+          existingProductId: existing?.id ?? null,
+        };
+      }
+      if (error instanceof Error && KNOWN_PRODUCT_CREATION_ERRORS.has(error.message)) {
+        return { error: error.message };
+      }
+      // Unexpected (e.g. a genuinely unrecognized P2002 shape, or a real
+      // DB failure) — propagates unmodified to AiActionService.confirmAndExecute's
+      // own catch, which already logs it safely and stores only a generic,
+      // secret-free error message — never a second, ad-hoc error handler here.
+      throw error;
+    }
   },
 };
 

@@ -37,6 +37,17 @@ export const TOOL_USAGE_UNITS: Readonly<Record<string, number | null>> = {
   search_products: 3,
   generate_listing_draft: 2,
   edit_listing_draft: 1,
+  // create_product (no pre-existing barème entry to inspect — this tool
+  // didn't exist before this task): costs the same as update_listing (3),
+  // not generate_listing_draft's 2 — a real, persistent Product+Inventory
+  // row is a heavier, less reversible internal business effect than an
+  // ephemeral, conversation-scoped draft, but it's still an ADKSY-internal
+  // write, never an external marketplace call — so priced below
+  // publish_listing/publish_etsy_listing/send_to_fulfillment's 5, exactly
+  // the same "external/irreversible effects cost more" reasoning this
+  // whole table's own header comment already documents. A deliberate
+  // choice, not an inherited convention.
+  create_product: 3,
   update_listing: 3,
   publish_listing: 5,
   publish_etsy_listing: 5,

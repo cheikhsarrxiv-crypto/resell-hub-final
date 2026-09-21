@@ -46,6 +46,14 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set(ALL_CAPABILITIES);
  *   business/financial analysis (cost, live stock, sales performance,
  *   margin) -> 'product_analysis'.
  * - search_products: external sourcing search -> 'sourcing'.
+ * - create_product: turns a sourced item into a new ADKSY catalog Product
+ *   -> 'listing_generation'. No dedicated "catalog management" capability
+ *   exists (or is needed — see this file's own binary aiEnabled design
+ *   note below), and create_product is conceptually the same bucket as
+ *   generate_listing_draft: preparing a new sellable thing from a
+ *   sourcing result, just now a real Product instead of an ephemeral
+ *   draft. A deliberate choice, not an inherited convention (this tool
+ *   didn't exist before this task).
  * - generate_listing_draft: prepares a NEW draft -> 'listing_generation'.
  * - edit_listing_draft AND update_listing: both edit an already-identified
  *   listing (one still a draft, one already real/published) with the same
@@ -81,6 +89,7 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, AiCapability | null>> = 
   get_sales_summary: 'product_analysis',
   calculate_margin: 'product_analysis',
   search_products: 'sourcing',
+  create_product: 'listing_generation',
   generate_listing_draft: 'listing_generation',
   edit_listing_draft: 'listing_edit',
   update_listing: 'listing_edit',

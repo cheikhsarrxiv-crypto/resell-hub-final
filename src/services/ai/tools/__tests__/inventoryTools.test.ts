@@ -15,9 +15,15 @@ const { getProductMock, productFindFirstMock, inventoryFindUniqueMock } = vi.hoi
   inventoryFindUniqueMock: vi.fn(),
 }));
 
-vi.mock('@/services/ProductService', () => ({
-  ProductService: { getProduct: getProductMock },
-}));
+// create_product (actionTools.ts, itself imported transitively via
+// AiToolRegistry) now also imports PRODUCT_SKU_CONFLICT_MESSAGE/
+// PRODUCT_SOURCE_CONFLICT_MESSAGE from this module — importActual keeps
+// those real (never duplicated/hardcoded here), only ProductService
+// itself is replaced, exactly like actionTools.test.ts's own mock.
+vi.mock('@/services/ProductService', async () => {
+  const actual = await vi.importActual<typeof import('@/services/ProductService')>('@/services/ProductService');
+  return { ...actual, ProductService: { getProduct: getProductMock } };
+});
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {

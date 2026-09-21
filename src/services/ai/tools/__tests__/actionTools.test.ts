@@ -162,9 +162,32 @@ vi.mock('@/services/ListingService', () => ({
   getAuthenticatedAdapter: getAuthenticatedAdapterMock,
 }));
 
+// create_product's own collaborator, ProductService, is treated as an
+// already-tested dependency here (same reasoning as mocking
+// getAuthenticatedAdapter above rather than re-exercising real eBay OAuth):
+// its own atomicity/SKU-conflict/source-conflict behavior is exhaustively
+// covered in ProductService.test.ts. This file focuses on create_product's
+// OWN logic — sourcing revalidation, and correctly mapping ProductService's
+// results/errors. The full real pipeline (real ProductService + real
+// AiActionService together) is covered separately in
+// create-product-pipeline-integration.test.ts, mirroring how
+// publish-listing-pipeline-integration.test.ts complements this file for
+// publish_listing.
+const { createProductMock } = vi.hoisted(() => ({ createProductMock: vi.fn() }));
+
+vi.mock('@/services/ProductService', async () => {
+  // vi.importActual pulls in the REAL PRODUCT_SKU_CONFLICT_MESSAGE /
+  // PRODUCT_SOURCE_CONFLICT_MESSAGE constants (never duplicated/hardcoded
+  // here, which could otherwise silently drift from the real strings) —
+  // only the ProductService class itself is replaced.
+  const actual = await vi.importActual<typeof import('@/services/ProductService')>('@/services/ProductService');
+  return { ...actual, ProductService: { createProduct: createProductMock } };
+});
+
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
-import { simulateEngageActionTool, publishListingTool, publishEtsyListingTool } from '@/services/ai/tools/actionTools';
+import { simulateEngageActionTool, createProductTool, publishListingTool, publishEtsyListingTool } from '@/services/ai/tools/actionTools';
 import { generateListingDraftTool, editListingDraftTool } from '@/services/ai/tools/listingDraftTools';
+import { PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_MESSAGE } from '@/services/ProductService';
 import type { NormalizedSourcingResult } from '@/services/sourcing/types';
 
 function assistantToolUseRow(conversationId: string, toolUseId: string, toolName: string, input: unknown): FakeRow {
@@ -276,6 +299,237 @@ describe('simulate_engage_action tool definition', () => {
     const result = await simulateEngageActionTool.handler('ws-1', { note: undefined });
     expect(result).toMatchObject({ simulated: true });
     expect((result as any).message).toContain('No real external or financial effect');
+  });
+});
+
+describe('create_product tool definition', () => {
+  beforeEach(() => {
+    rows = [];
+    rowIdCounter = 0;
+    clock = 0;
+    vi.clearAllMocks();
+  });
+
+  const validInput = {
+    sourceMarketplace: 'ebay',
+    sourceId: sourcedItem.sourceId!, // sourcedItem hardcodes a real literal sourceId above — the `?` on NormalizedSourcingResult.sourceId is a type-level generality, not true of this specific fixture
+    sourceUrl: sourcedItem.sourceUrl,
+    title: 'Prada Cut Out Sneakers',
+    description: 'A real description of the item, at least twenty characters long.',
+    sellingPrice: 449,
+    purchasePrice: 200,
+  };
+
+  it('is registered in AiToolRegistry as an engage tool — never auto-executed', () => {
+    const tool = AiToolRegistry.get('create_product');
+    expect(tool).toBeDefined();
+    expect(tool?.category).toBe('engage');
+    expect(AiToolRegistry.isAutoExecutable('engage')).toBe(false);
+  });
+
+  describe('inputSchema', () => {
+    it('requires sourceMarketplace, sourceId, sourceUrl, title, sellingPrice, purchasePrice', () => {
+      expect(createProductTool.inputSchema.safeParse({}).success).toBe(false);
+      expect(createProductTool.inputSchema.safeParse(validInput).success).toBe(true);
+    });
+
+    it('TEST K — purchasePrice absent is rejected before the handler ever runs — no price is ever invented', () => {
+      const { purchasePrice, ...withoutPurchasePrice } = validInput;
+      expect(createProductTool.inputSchema.safeParse(withoutPurchasePrice).success).toBe(false);
+    });
+
+    it('TEST K — purchasePrice invalid (negative) is rejected', () => {
+      expect(createProductTool.inputSchema.safeParse({ ...validInput, purchasePrice: -1 }).success).toBe(false);
+    });
+
+    it('TEST L — sellingPrice absent is rejected before the handler ever runs — no price is ever invented', () => {
+      const { sellingPrice, ...withoutSellingPrice } = validInput;
+      expect(createProductTool.inputSchema.safeParse(withoutSellingPrice).success).toBe(false);
+    });
+
+    it('TEST L — sellingPrice invalid (negative) is rejected', () => {
+      expect(createProductTool.inputSchema.safeParse({ ...validInput, sellingPrice: -1 }).success).toBe(false);
+    });
+
+    it('never accepts a quantity or images field as input — a sourced item is always a single unit, and images are out of this tool\'s scope', () => {
+      const parsed = createProductTool.inputSchema.safeParse({ ...validInput, quantity: 5, images: ['https://img.example/1.jpg'] });
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data).not.toHaveProperty('quantity');
+        expect(parsed.data).not.toHaveProperty('images');
+      }
+    });
+
+    it('rejects an unrecognized condition value', () => {
+      expect(createProductTool.inputSchema.safeParse({ ...validInput, condition: 'mint' }).success).toBe(false);
+    });
+  });
+
+  describe('sourcing revalidation — never trusts provenance the model merely repeats back', () => {
+    it('rejects when no search_products result exists at all in this conversation', async () => {
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('TEST C — a falsified sourceId (does not match the real result) is refused', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const result: any = await createProductTool.handler(
+        'ws-1',
+        { ...validInput, sourceId: 'FABRICATED-ID' },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('TEST D — a falsified sourceUrl (does not match the real result) is refused', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const result: any = await createProductTool.handler(
+        'ws-1',
+        { ...validInput, sourceUrl: 'https://www.ebay.co.uk/itm/999999999' },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('TEST E — a falsified sourceMarketplace (does not match the real result\'s own source) is refused', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const result: any = await createProductTool.handler(
+        'ws-1',
+        { ...validInput, sourceMarketplace: 'etsy' },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('cross-conversation: a source that only appeared in a DIFFERENT conversation is rejected', async () => {
+      pushToolCall('conv-OTHER', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('TEST B — sourceMarketplace/sourceId/sourceUrl ALL matching the real result succeeds in reaching ProductService', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({
+        id: 'product-new-1',
+        sku: 'SKU-NEW-1',
+        title: validInput.title,
+        sourceMarketplace: 'ebay',
+        sourceId: sourcedItem.sourceId,
+        sourceUrl: sourcedItem.sourceUrl,
+        sellingPrice: 449,
+        purchasePrice: 200,
+      });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createProductMock).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('preview()', () => {
+    it('never calls ProductService — no mutation during proposal', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(createProductMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a source with no matching search_products result, same as handler()', async () => {
+      const summary: any = await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/does not match a real search_products result/i);
+    });
+
+    it('when valid, returns exactly the fields that will be created — what the reseller confirms matches what handler() would send', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const summary: any = await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(summary.title).toBe(validInput.title);
+      expect(summary.sellingPrice).toBe(449);
+      expect(summary.purchasePrice).toBe(200);
+      expect(summary.sourceMarketplace).toBe('ebay');
+      expect(summary.sourceId).toBe(sourcedItem.sourceId);
+      expect(summary.sourceUrl).toBe(sourcedItem.sourceUrl);
+    });
+  });
+
+  describe('handler() — SKU (TEST I / TEST J)', () => {
+    it('TEST I — a SKU explicitly provided is passed through to ProductService unchanged', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'MY-OWN-SKU', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      await createProductTool.handler('ws-1', { ...validInput, sku: 'MY-OWN-SKU' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const [, passedData] = createProductMock.mock.calls[0];
+      expect(passedData.sku).toBe('MY-OWN-SKU');
+    });
+
+    it('TEST J — no SKU provided: ProductService receives no sku field, so its own existing auto-generation behavior applies unchanged', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-AUTO', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const [, passedData] = createProductMock.mock.calls[0];
+      expect(passedData.sku).toBeUndefined();
+    });
+
+    it('never derives sourceId/sourceMarketplace/sourceUrl from the SKU or title — passes them through exactly as validated', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const [, passedData] = createProductMock.mock.calls[0];
+      expect(passedData.sourceMarketplace).toBe('ebay');
+      expect(passedData.sourceId).toBe(sourcedItem.sourceId);
+      expect(passedData.sourceUrl).toBe(sourcedItem.sourceUrl);
+    });
+  });
+
+  describe('handler() — duplicate provenance (TEST G shape) and SKU conflict (TEST N)', () => {
+    it('a PRODUCT_SOURCE_CONFLICT_MESSAGE from ProductService becomes a clean, distinguishable refusal — never a fabricated success', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockRejectedValue(new Error(PRODUCT_SOURCE_CONFLICT_MESSAGE));
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe('PRODUCT_SOURCE_ALREADY_EXISTS');
+      expect(typeof result.error).toBe('string'); // so AiActionService treats this as a non-billable refusal, never a success
+      expect(result.message).toMatch(/already been added/i);
+    });
+
+    it('TEST N — a PRODUCT_SKU_CONFLICT_MESSAGE from ProductService is never confused with a source conflict', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockRejectedValue(new Error(PRODUCT_SKU_CONFLICT_MESSAGE));
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toBe(PRODUCT_SKU_CONFLICT_MESSAGE);
+      expect(result.errorCode).toBeUndefined(); // never mislabeled as PRODUCT_SOURCE_ALREADY_EXISTS
+    });
+
+    it('an unexpected/unrecognized error from ProductService is never swallowed as a controlled refusal — it propagates', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockRejectedValue(new Error('Something genuinely unexpected'));
+
+      await expect(
+        createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' })
+      ).rejects.toThrow('Something genuinely unexpected');
+    });
   });
 });
 
