@@ -160,6 +160,18 @@ vi.mock('@/services/ListingService', () => ({
   getAuthenticatedAdapter: getAuthenticatedAdapterMock,
 }));
 
+// This file proves publish_listing's own propose -> confirm -> execute
+// pipeline (idempotence, the real-publish safeguard, Product/Listing
+// persistence) — entitlement refusal is a separate, already-tested
+// concern (see ai-entitlement-service.test.ts). Real
+// AiEntitlementService.canUseCapability would call SubscriptionService
+// against a workspace/plan Prisma mock this file doesn't set up above —
+// always-true here keeps this file's own scope narrow.
+vi.mock('@/services/ai/AiEntitlementService', async () => {
+  const actual = await vi.importActual<typeof import('@/services/ai/AiEntitlementService')>('@/services/ai/AiEntitlementService');
+  return { ...actual, AiEntitlementService: { canUseCapability: vi.fn().mockResolvedValue(true) } };
+});
+
 import { AiActionService } from '@/services/ai/AiActionService';
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
 import { generateListingDraftTool, editListingDraftTool } from '@/services/ai/tools/listingDraftTools';

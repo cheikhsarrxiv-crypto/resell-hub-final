@@ -91,6 +91,18 @@ vi.mock('@/services/FulfillmentService', () => ({
   FulfillmentService: { sendToFulfillment: sendToFulfillmentMock },
 }));
 
+// This file proves send_to_fulfillment's own propose -> confirm -> execute
+// pipeline (idempotence, the double-fulfillment DB-race guard) —
+// entitlement refusal is a separate, already-tested concern (see
+// ai-entitlement-service.test.ts). Real AiEntitlementService.canUseCapability
+// would call the real SubscriptionService.getSubscription, which this file's
+// own SubscriptionService mock below doesn't define (only hasFeature is
+// mocked) — always-true here keeps this file's own scope narrow.
+vi.mock('@/services/ai/AiEntitlementService', async () => {
+  const actual = await vi.importActual<typeof import('@/services/ai/AiEntitlementService')>('@/services/ai/AiEntitlementService');
+  return { ...actual, AiEntitlementService: { canUseCapability: vi.fn().mockResolvedValue(true) } };
+});
+
 vi.mock('@/services/SubscriptionService', () => ({
   SubscriptionService: { hasFeature: hasFeatureMock },
 }));
