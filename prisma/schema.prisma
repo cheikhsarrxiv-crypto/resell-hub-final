@@ -185,6 +185,27 @@ model Product {
   // EtsyAdapter). Never used to replace or derive Product.sku.
   supplierSku String?
 
+  // Source provenance (Option A, provenance/deduplication architecture
+  // decision) — records the ONE external marketplace item this Product
+  // was created from, when it was created from a real sourcing result.
+  // All three nullable: a manually-created Product has none of them, and
+  // that stays a perfectly valid, ordinary state — never backfilled or
+  // inferred for pre-existing rows (see this migration's own comment).
+  // - sourceMarketplace: the provider/marketplace name (e.g. 'ebay') —
+  //   scopes sourceId, since a bare sourceId alone is not guaranteed
+  //   unique across different providers.
+  // - sourceId: the source's own stable identifier for that specific
+  //   listing (e.g. eBay Browse API's item.itemId) — the real
+  //   deduplication key, together with sourceMarketplace and workspaceId.
+  // - sourceUrl: for traceability/display only — NEVER a deduplication
+  //   key (not guaranteed stable: an annonce's URL can change even while
+  //   its sourceId does not).
+  // Never derived from one another, never generated, never normalized —
+  // persisted exactly as given, by design (see ProductService.createProduct).
+  sourceMarketplace String?
+  sourceId          String?
+  sourceUrl         String?
+
   // Etsy-specific listing metadata — nullable, unrelated to eBay/Depop/
   // Vinted. Etsy's createDraftListing requires a real taxonomy_id (there
   // is no "generic" fallback ID) and a when_made era bucket on every
@@ -210,6 +231,16 @@ model Product {
   orderItems  OrderItem[]
 
   @@unique([workspaceId, sku])
+  // Deduplication key for source provenance (Option A) — workspace-scoped
+  // exactly like the sku constraint above, deliberately never a global
+  // key: two different workspaces must both be able to import the same
+  // external source independently (see this constraint's own migration
+  // comment). Standard Postgres UNIQUE semantics treat NULL as distinct
+  // from every other value (including other NULLs), so any number of
+  // Products with no provenance (sourceMarketplace/sourceId both NULL)
+  // coexist without ever conflicting with each other or with this
+  // constraint — a manually-created Product is never blocked by it.
+  @@unique([workspaceId, sourceMarketplace, sourceId])
   @@index([workspaceId])
 }
 

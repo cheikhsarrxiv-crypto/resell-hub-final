@@ -7,6 +7,17 @@ import { ListingService } from './ListingService';
 /** Thrown by ProductService.createProduct on a (workspaceId, sku) conflict — see that method's own comment. Matched by message in /api/products' own route.ts, the same idiom already used for the "already has an active subscription" -> 409 case in /api/stripe/checkout/route.ts. */
 export const PRODUCT_SKU_CONFLICT_MESSAGE = 'A product with this SKU already exists in this workspace';
 
+/**
+ * Thrown by ProductService.createProduct on a (workspaceId,
+ * sourceMarketplace, sourceId) conflict — Product's second, separate
+ * @@unique constraint (Option A, provenance/deduplication architecture
+ * decision). Not yet mapped to a specific HTTP status in
+ * /api/products/route.ts — this step establishes the DB constraint and
+ * its clean business error only; the route's dedup-aware UX is deferred
+ * to the future create_product work, per this task's own scope.
+ */
+export const PRODUCT_SOURCE_CONFLICT_MESSAGE = 'A product from this source already exists in this workspace';
+
 export class ProductService {
   static async createProduct(workspaceId: string, data: CreateProductInput) {
     try {
@@ -72,19 +83,56 @@ export class ProductService {
 
       return product;
     } catch (error) {
-      // SKU-conflict fix (read-only audit's CRITICAL #2): a (workspaceId,
-      // sku) collision on the existing @@unique([workspaceId, sku])
-      // constraint is turned into one clean, workspace-scoped business
-      // error — never the raw Prisma message, never a second Product,
-      // never a different SKU substituted automatically, never an
-      // automatic retry. Product has exactly one @@unique constraint
-      // besides its primary key, so any P2002 reaching this catch from
-      // tx.product.create is unambiguously this conflict. Same detection
-      // idiom already used in ListingService.createListing and
-      // actionTools.ts's reserveListingForPublish
-      // (`error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'`).
+      // SKU-conflict fix (read-only audit's CRITICAL #2) + source-conflict
+      // fix (Option A, provenance/deduplication architecture decision):
+      // Product now has TWO separate @@unique constraints —
+      // [workspaceId, sku] and [workspaceId, sourceMarketplace, sourceId]
+      // — so a P2002 reaching this catch from tx.product.create is no
+      // longer unambiguous on its own; it must be attributed to the right
+      // one before being turned into a clean, workspace-scoped business
+      // error. Never the raw Prisma message either way, never a second
+      // Product, never a value substituted automatically, never an
+      // automatic retry.
+      //
+      // Prisma's PrismaClientKnownRequestError.meta.target for a Postgres
+      // unique-constraint violation is documented and has been stable
+      // across Prisma versions as the array of column names the violated
+      // constraint covers (e.g. ['workspaceId', 'sku']) — NOT the
+      // constraint's own name string. This could not be verified against
+      // a live Postgres instance in this sandbox (network egress to the
+      // configured database is blocked here — see this session's own
+      // "DB NOT REACHABLE" check), so this is built on that documented,
+      // stable behavior rather than an empirical confirmation; spot-check
+      // against a real Postgres connection before relying on this in
+      // production, the same discipline already applied elsewhere in this
+      // codebase to API behavior that couldn't be verified live (see e.g.
+      // EbayBrowseSourcingProvider's own header comment).
+      //
+      // target is read defensively (array or, defensively, a single
+      // string) and checked by exact field-name membership — the two
+      // constraints share no field name except workspaceId, which itself
+      // is never treated as sufficient on its own to attribute either
+      // conflict. If the shape can't be confidently attributed to either
+      // known constraint, this deliberately does NOT guess which one
+      // fired (guessing wrong would report a misleading cause) — it logs
+      // the raw target for diagnosis and still throws a clean, generic,
+      // secret-free business error, never the raw Prisma message.
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new Error(PRODUCT_SKU_CONFLICT_MESSAGE);
+        const target = error.meta?.target;
+        const fields = Array.isArray(target) ? target : typeof target === 'string' ? [target] : [];
+
+        const isSourceConflict = fields.includes('sourceId') || fields.includes('sourceMarketplace');
+        const isSkuConflict = fields.includes('sku');
+
+        if (isSourceConflict) {
+          throw new Error(PRODUCT_SOURCE_CONFLICT_MESSAGE);
+        }
+        if (isSkuConflict) {
+          throw new Error(PRODUCT_SKU_CONFLICT_MESSAGE);
+        }
+
+        console.error('[ProductService] P2002 on Product with an unrecognized meta.target shape — cannot attribute to sku vs. source conflict:', target);
+        throw new Error('This product conflicts with an existing product in this workspace');
       }
       throw error;
     }

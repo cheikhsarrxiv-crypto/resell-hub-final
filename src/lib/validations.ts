@@ -60,6 +60,14 @@ export const createProductSchema = z.object({
   fulfillmentCost: z.number().min(0).default(0),
   quantity: z.number().min(1, 'Quantity must be at least 1').default(1),
   location: z.string().optional(),
+  // Source provenance (Option A) — all three optional: a manually-created
+  // product supplies none of them, and stays perfectly valid. Persisted
+  // exactly as given by ProductService.createProduct — never derived from
+  // one another, never generated, never normalized here or there. See
+  // Product's own schema comment for exactly what each one means.
+  sourceMarketplace: z.string().optional(),
+  sourceId: z.string().optional(),
+  sourceUrl: z.string().optional(),
   // Etsy-only, both optional: required only at Etsy-publish time (enforced
   // by EtsyListingMapper/ListingService, not here), so a product created
   // for eBay only is never blocked by these.
@@ -154,6 +162,15 @@ export const aiChatMessageSchema = z.object({
     .default([]),
 });
 
+// AI Agent — distinct from aiChatMessageSchema above. The agent persists
+// its own conversation server-side (see AgentConversation/AgentMessage in
+// prisma/schema.prisma), so the client sends a conversationId to
+// continue one instead of resending full history.
+export const aiAgentMessageSchema = z.object({
+  message: z.string().min(1, 'Message is required').max(4000, 'Message is too long'),
+  conversationId: z.string().min(1).optional(),
+});
+
 export type SignUpInput = z.infer<typeof signUpSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type CreateProductInput = z.infer<typeof createProductSchema>;
@@ -165,4 +182,5 @@ export type CreateFulfillmentOrderInput = z.infer<typeof createFulfillmentOrderS
 export type ConnectMarketplaceInput = z.infer<typeof connectMarketplaceSchema>;
 export type ChangeSubscriptionInput = z.infer<typeof changeSubscriptionSchema>;
 export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;
+export type AiAgentMessageInput = z.infer<typeof aiAgentMessageSchema>;
 export type ResetPasswordWithTokenInput = z.infer<typeof resetPasswordWithTokenSchema>;
