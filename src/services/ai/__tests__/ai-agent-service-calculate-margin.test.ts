@@ -42,7 +42,9 @@ vi.mock('@/services/ai/AiEntitlementService', async () => {
 vi.mock('@/services/ai/AiUsageService', () => ({
   AiUsageService: {
     hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
-    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+    reserveUsage: vi.fn().mockResolvedValue({ status: 'RESERVED', eventId: 'test-usage-event', units: 0 }),
+    finalizeUsage: vi.fn().mockResolvedValue({ status: 'RECORDED' }),
+    releaseUsage: vi.fn().mockResolvedValue({ status: 'RELEASED' }),
   },
 }));
 

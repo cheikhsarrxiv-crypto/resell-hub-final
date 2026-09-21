@@ -1,0 +1,25 @@
+-- Race-condition fix for AiUsageService V1 (audit: read-only race audit
+-- following commit c2ac9cd found that hasQuotaRemaining() -> handler ->
+-- recordUsage() let two concurrent requests both pass the pre-check and
+-- both actually execute their handler, even though only one had real
+-- quota — the DB counter itself never overflowed, but the HANDLER could
+-- still run beyond budget). Adds one column, purely additive, backward
+-- compatible with every existing row (defaults to 0 — an existing
+-- AiUsagePeriod row has no in-flight reservation by definition).
+--
+-- unitsReserved tracks units atomically held by an in-flight AiUsageEvent
+-- (status RESERVED) — moved into unitsConsumed on real success
+-- (AiUsageService.finalizeUsage) or given back to 0 on failure
+-- (AiUsageService.releaseUsage). See AiUsageService.reserveUsage for the
+-- atomic conditional raw UPDATE that maintains
+-- unitsConsumed + unitsReserved <= unitsLimit at all times.
+--
+-- NOT applied to any database from this environment (no network route to
+-- the project's Postgres instance here). This file is prepared for
+-- review and for `prisma migrate deploy` to be run manually against a
+-- local/dev database, and only against production after separate,
+-- explicit authorization. Migrations not yet applied in production must
+-- stay unapplied until that authorization is given.
+
+-- AlterTable
+ALTER TABLE "AiUsagePeriod" ADD COLUMN     "unitsReserved" INTEGER NOT NULL DEFAULT 0;

@@ -822,13 +822,27 @@ model AgentAction {
 // retry or concurrent double-confirmation — the same role
 // AgentAction.idempotencyKey's own unique index already plays.
 //
-// status: 'RESERVED' is a short-lived internal state used only while
-// AiUsageService.recordUsage decides the outcome of the one write that won
-// the idempotency race — a caller never observes it, only 'RECORDED' (this
-// event really incremented AiUsagePeriod.unitsConsumed) or 'REJECTED'
-// (quota exceeded, or quota/period could not be resolved at all — fail
-// closed). A REJECTED row is never deleted (kept for audit) and never
-// counted twice.
+// status is a real, externally-visible lifecycle (Race-condition fix —
+// see AiUsageService.reserveUsage/finalizeUsage/releaseUsage):
+// - RESERVED: units are atomically held in AiUsagePeriod.unitsReserved for
+//   an execution currently in flight. A handler is only ever allowed to
+//   run once its event reaches this state.
+// - RECORDED: the handler succeeded; reserveUsage's hold was moved from
+//   unitsReserved into unitsConsumed — the real, final, billed outcome.
+// - REJECTED: the reservation itself was refused (insufficient quota, or
+//   quota/period could not be resolved at all — fail closed). No units
+//   were ever held for this event.
+// - RELEASED: a reservation was granted but the handler then failed (or
+//   returned a controlled business error) — its held units were given
+//   back to unitsReserved->0, never counted as consumed (V1's own
+//   FAILED = 0 rule). The row itself is never deleted or reused; a
+//   released idempotencyKey is retired for good, never silently
+//   re-reserved (see AiUsageService's own comment on why).
+// No row here is ever deleted, and no non-RESERVED status is ever
+// revisited by a later reserveUsage/finalizeUsage/releaseUsage call for
+// the same idempotencyKey (all three transitions out of RESERVED are
+// themselves conditional UPDATEs gated on status = RESERVED, so at most
+// one of finalize/release can ever win for a given event).
 model AiUsageEvent {
   id             String  @id @default(cuid())
   workspaceId    String
@@ -838,8 +852,8 @@ model AiUsageEvent {
 
   toolName   String // AiToolRegistry tool name, e.g. "search_products"
   capability String // AiCapability at the time of recording (see AiEntitlementService) — kept even if the tool's own mapping changes later, for an accurate audit trail
-  units      Int // AI Units this event cost, resolved from aiUsageConfig.ts at record time — never recomputed retroactively from a possibly-changed barème
-  status     String @default("RESERVED") // RESERVED (transient, never returned to a caller) | RECORDED | REJECTED
+  units      Int // AI Units this event cost, resolved from aiUsageConfig.ts at reservation time — never recomputed retroactively from a possibly-changed barème
+  status     String @default("RESERVED") // RESERVED | RECORDED | REJECTED | RELEASED
 
   idempotencyKey String
 
@@ -858,13 +872,20 @@ model AiUsageEvent {
 }
 
 // One row per (workspace, real billing period) — the fast, O(1)-read
-// aggregate counter AiUsageService actually checks/increments.
-// unitsConsumed is only ever mutated through the SAME atomic conditional
-// updateMany pattern ProductService.reserveInventory already uses on
-// Inventory.available (`WHERE unitsConsumed <= limit - units, DATA
-// {increment: units}`) — never a separate read-then-write, and never
-// wrapped in a $transaction/Serializable block (not needed: a single
-// conditional UPDATE is already atomic under PostgreSQL's own row lock).
+// aggregate counters AiUsageService actually checks/reserves/finalizes.
+// unitsReserved is only ever mutated by reserveUsage's atomic conditional
+// raw UPDATE (`WHERE unitsConsumed + unitsReserved + units <= limit`) —
+// a two-column arithmetic condition Prisma's query builder cannot express
+// as a single filter, so this one statement uses `$executeRaw` rather
+// than `updateMany` (see AiUsageService.reserveUsage's own comment); it
+// is still a single atomic PostgreSQL UPDATE under the same row lock
+// guarantee as ProductService.reserveInventory's own conditional
+// `updateMany` on Inventory.available, never `$transaction`/Serializable.
+// unitsConsumed is only ever mutated by finalizeUsage (moving units out
+// of unitsReserved once a handler has genuinely succeeded), via a plain
+// conditional `updateMany`, since that step needs no cross-column
+// arithmetic — it is gated instead by AiUsageEvent's own RESERVED->
+// RECORDED transition (see that model's own comment).
 model AiUsagePeriod {
   id          String @id @default(cuid())
   workspaceId String
@@ -873,12 +894,26 @@ model AiUsagePeriod {
   periodEnd   DateTime
 
   unitsConsumed Int @default(0)
+  // Units currently held by an in-flight AiUsageEvent (status RESERVED) —
+  // moved into unitsConsumed on success (AiUsageService.finalizeUsage) or
+  // released back to 0 on failure (AiUsageService.releaseUsage). Added to
+  // close a race the original V1 design left open: a plain non-atomic
+  // hasQuotaRemaining() pre-check followed later by an unconditional
+  // handler execution let two concurrent requests both pass the check and
+  // both actually run their handler, even though only one had real budget
+  // — the DB counter itself never overflowed, but the HANDLER could still
+  // execute beyond quota. reserveUsage() now atomically claims capacity
+  // here, in the SAME statement that verifies it (see that method's own
+  // comment for why this needs a raw SQL UPDATE, not the query builder),
+  // strictly BEFORE any handler is ever allowed to run.
+  unitsReserved Int @default(0)
   // Snapshot of the monthly limit at the moment this period row was first
   // created — kept for historical/audit display only. The live quota
-  // check/increment in AiUsageService always re-resolves the CURRENT limit
-  // (WorkspaceAiOverride, else the plan's default) instead of trusting
-  // this column alone, so a plan upgrade/downgrade mid-period is reflected
-  // immediately without recreating the counter row (see AiUsageService).
+  // check/reservation in AiUsageService always re-resolves the CURRENT
+  // limit (WorkspaceAiOverride, else the plan's default) instead of
+  // trusting this column alone, so a plan upgrade/downgrade mid-period is
+  // reflected immediately without recreating the counter row (see
+  // AiUsageService).
   unitsLimit Int
 
   createdAt DateTime @default(now())

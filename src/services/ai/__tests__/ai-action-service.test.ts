@@ -100,7 +100,9 @@ vi.mock('@/services/ai/AiEntitlementService', async () => {
 vi.mock('@/services/ai/AiUsageService', () => ({
   AiUsageService: {
     hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
-    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+    reserveUsage: vi.fn().mockResolvedValue({ status: 'RESERVED', eventId: 'test-usage-event', units: 0 }),
+    finalizeUsage: vi.fn().mockResolvedValue({ status: 'RECORDED' }),
+    releaseUsage: vi.fn().mockResolvedValue({ status: 'RELEASED' }),
   },
 }));
 
@@ -312,51 +314,31 @@ describe('AiActionService.cancelAction', () => {
   });
 });
 
-describe('AiActionService — AiUsageService.recordUsage is called only after a real COMPLETED success', () => {
+describe('AiActionService — AiUsageService reserve/finalize/release wiring (race-condition fix)', () => {
   beforeEach(() => {
     __actionStore.clear();
     vi.clearAllMocks();
+    (AiUsageService.reserveUsage as any).mockResolvedValue({ status: 'RESERVED', eventId: 'test-usage-event', units: 0 });
   });
 
-  it('COMPLETED (real handler success) -> recordUsage called exactly once, with action:${actionId}', async () => {
+  it('the handler runs only after reserveUsage, and finalizeUsage is called exactly once on real COMPLETED success, with action:${actionId}', async () => {
     const proposed = await AiActionService.proposeAction(baseParams());
     const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
 
     expect(result?.status).toBe('COMPLETED');
-    expect(AiUsageService.recordUsage).toHaveBeenCalledTimes(1);
-    expect(AiUsageService.recordUsage).toHaveBeenCalledWith(
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledWith(
       'ws-1',
       expect.objectContaining({ toolName: 'publish_listing', idempotencyKey: `action:${proposed.id}`, actionId: proposed.id })
     );
+    expect(publishHandler).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).toHaveBeenCalledWith('ws-1', `action:${proposed.id}`);
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
   });
 
-  it('FAILED (handler throws) -> recordUsage is never called — 0 consumption', async () => {
-    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'failing_tool' }));
-    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
-
-    expect(result?.status).toBe('FAILED');
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
-  });
-
-  it('CANCELLED -> recordUsage is never called — 0 consumption', async () => {
-    const proposed = await AiActionService.proposeAction(baseParams());
-    await AiActionService.cancelAction('ws-1', 'user-1', proposed.id);
-
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
-  });
-
-  it('EXPIRED -> recordUsage is never called — 0 consumption', async () => {
-    const proposed = await AiActionService.proposeAction(baseParams());
-    __actionStore.get(proposed.id).expiresAt = new Date(Date.now() - 1000);
-
-    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
-
-    expect(result?.status).toBe('EXPIRED');
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
-  });
-
-  it('quota exceeded (AiUsageService.hasQuotaRemaining refuses) -> the handler never runs, action lands on FAILED, recordUsage never called', async () => {
-    (AiUsageService.hasQuotaRemaining as any).mockResolvedValueOnce({ allowed: false, reason: 'quota_exceeded' });
+  it('reservation REJECTED -> the handler never runs, action lands on FAILED, finalize/release never called', async () => {
+    (AiUsageService.reserveUsage as any).mockResolvedValueOnce({ status: 'REJECTED', eventId: 'evt-1', units: 5, reason: 'quota_exceeded' });
 
     const proposed = await AiActionService.proposeAction(baseParams());
     const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
@@ -364,16 +346,58 @@ describe('AiActionService — AiUsageService.recordUsage is called only after a 
     expect(result?.status).toBe('FAILED');
     expect(result?.error).toMatch(/quota/i);
     expect(publishHandler).not.toHaveBeenCalled();
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
   });
 
-  it('a handler that returns a controlled business error (no throw) is not billed either', async () => {
+  it('FAILED (handler throws) -> the reservation is released (never finalized) — 0 final consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'failing_tool' }));
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.releaseUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.releaseUsage).toHaveBeenCalledWith('ws-1', `action:${proposed.id}`);
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+  });
+
+  it('CANCELLED -> reserveUsage is never called at all (the action never reaches EXECUTING) — 0 consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams());
+    await AiActionService.cancelAction('ws-1', 'user-1', proposed.id);
+
+    expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+  });
+
+  it('EXPIRED -> reserveUsage is never called at all — 0 consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams());
+    __actionStore.get(proposed.id).expiresAt = new Date(Date.now() - 1000);
+
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('EXPIRED');
+    expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
+  });
+
+  it('a handler that returns a controlled business error (no throw) releases the reservation, never finalizes it', async () => {
     publishHandler.mockResolvedValueOnce({ error: 'Listing not found in this workspace.' });
     const proposed = await AiActionService.proposeAction(baseParams());
     const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
 
     expect(result?.status).toBe('COMPLETED'); // the action pipeline itself still completed — see AgentAction's own convention
     expect((result?.result as any).error).toBe('Listing not found in this workspace.');
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+  });
+
+  it('a release failure (DB error) never blocks or masks the real FAILED transition', async () => {
+    (AiUsageService.releaseUsage as any).mockRejectedValueOnce(new Error('db down'));
+    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'failing_tool' }));
+
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(result?.error).toBe('Action execution failed');
   });
 });

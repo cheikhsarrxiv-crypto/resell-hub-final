@@ -8,7 +8,7 @@ import { getToolUsageUnits, getDefaultMonthlyUnitsForPlan } from './aiUsageConfi
  * AiUsageService — the commercial "budget" layer for the AI Agent.
  *
  * Strictly separate from the other two systems this codebase already has,
- * on purpose (see the AiEntitlementService task's own architecture note):
+ * on purpose:
  * - AiEntitlementService = "do I have the RIGHT to use this capability?"
  *   (a binary per-capability flag, never a quantity).
  * - ratelimit.ts (RateLimiterService) = "can I call this endpoint right
@@ -20,49 +20,106 @@ import { getToolUsageUnits, getDefaultMonthlyUnitsForPlan } from './aiUsageConfi
  *   with a quantity and a period.
  *
  * ONE global AI Units budget per (workspace, real billing period) — never
- * one quota per capability — so this never turns into several
- * independent quota systems stacking accidentally. Each tool's own unit
- * cost (see aiUsageConfig.ts) is what varies; the budget itself is a
- * single number per workspace per period.
+ * one quota per capability. Each tool's own unit cost (see
+ * aiUsageConfig.ts) is what varies; the budget itself is a single number
+ * per workspace per period.
  *
- * Two tables back this (see prisma/schema.prisma's own "AI USAGE" section
- * for the full per-field rationale):
- * - AiUsageEvent: append-only audit trail, deduplicated by
- *   (workspaceId, idempotencyKey) — the real DB-enforced guard against
- *   double-counting a retry or a concurrent double-confirmation, mirroring
- *   AgentAction.idempotencyKey's own already-proven pattern exactly.
- * - AiUsagePeriod: the fast aggregate counter, incremented ONLY through
- *   the same atomic conditional `updateMany` pattern
- *   ProductService.reserveInventory already uses on Inventory.available —
- *   never a separate read-then-write, never `$transaction`/Serializable
- *   (not needed: a single conditional UPDATE is already atomic under
- *   PostgreSQL's own row lock for the matched row).
+ * === Race-condition fix (reserve/finalize/release) ===
  *
- * Concurrency design, stated explicitly (not hidden): `hasQuotaRemaining`
- * is a plain, NON-atomic advisory read, called before a read/write tool's
- * handler runs so the overwhelming majority of over-quota attempts never
- * even reach it. The one authoritative, atomic decision is
- * `recordUsage()`, called only AFTER a handler has already succeeded. A
- * narrow race remains between the two (two concurrent requests could both
- * pass the advisory check) — deliberately left unclosed rather than built
- * out into a reserve-before-execute-then-roll-back-on-failure system,
- * which would itself be the "fragile rollback" this design was explicitly
- * told not to invent. The race is bounded and asymmetric-safe: it can
- * never double-charge or wrongly block a workspace — at worst, in a
- * genuinely rare concurrent race, one extra tool execution's real cost is
- * absorbed without being billed (recordUsage's own atomic increment still
- * correctly rejects it commercially). AiActionService's 'engage' pipeline
- * is naturally far less exposed to this window: it is already
- * confirmation-gated and its own state machine only ever lets a single
- * request reach EXECUTING per action.
+ * The original V1 design was `hasQuotaRemaining()` (a non-atomic advisory
+ * read) followed by the handler, followed by `recordUsage()` (the one
+ * atomic write). A read-only audit found this left a real gap: two
+ * concurrent requests could both pass `hasQuotaRemaining()` before either
+ * had written anything, and both would then actually RUN their handler —
+ * the counter itself could never overflow (recordUsage's own atomic
+ * increment guaranteed that), but the HANDLER could still execute beyond
+ * the workspace's real budget. For a `read`/`write` tool this was
+ * harmless; for an `engage` tool (a real marketplace publish, a real
+ * FulfillmentOrder) it was a genuine business risk.
+ *
+ * This is fixed by splitting consumption into three explicit steps, and —
+ * critically — moving the ONE atomic operation to BEFORE the handler
+ * instead of after it:
+ *
+ *   reserveUsage()   — atomically claims capacity. A handler may run
+ *                      ONLY if this returns 'RESERVED'.
+ *   finalizeUsage()  — call after the handler genuinely succeeds; moves
+ *                      the held units from "reserved" to "consumed" (the
+ *                      real, final, billed outcome).
+ *   releaseUsage()   — call after the handler fails (or returns a
+ *                      controlled business error); gives the held units
+ *                      back without ever counting them as consumed
+ *                      (V1's own "FAILED = 0" rule, preserved exactly).
+ *
+ * `AiUsagePeriod` now tracks TWO counters: `unitsConsumed` (final, billed)
+ * and `unitsReserved` (currently held by an in-flight execution) — kept
+ * as two separate columns rather than folding "reserved" into
+ * "consumed", so the real, final billed total is never ambiguous with
+ * in-flight holds (see prisma/schema.prisma's own comment on this choice).
+ * The invariant enforced at all times is:
+ *
+ *   unitsConsumed + unitsReserved <= unitsLimit
+ *
+ * `reserveUsage`'s own atomic step needs to compare a NEW reservation
+ * against the SUM of two columns (`unitsConsumed + unitsReserved`) in a
+ * single condition — Prisma's query builder can express a bound on one
+ * field at a time (exactly what `ProductService.reserveInventory` and
+ * this file's own `finalizeUsage` use), but not an arithmetic relation
+ * BETWEEN two columns. A plain JS-level "read both fields, then decide,
+ * then write" is provably unsafe here: a concurrent `finalizeUsage` for a
+ * DIFFERENT event can shift units from `unitsReserved` to `unitsConsumed`
+ * (leaving their sum unchanged) between the read and the write, silently
+ * invalidating a limit computed from a stale `unitsConsumed` snapshot.
+ * So `reserveUsage` uses one minimal, fully parameterized raw SQL
+ * `UPDATE ... WHERE unitsConsumed + unitsReserved + $units <= $limit`
+ * (`$executeRaw`, never `$queryRaw`/string interpolation) — still a
+ * single atomic PostgreSQL statement under the same row lock guarantee
+ * every other conditional update in this codebase relies on, never
+ * `$transaction`/`Serializable`. This is the same class of escape hatch
+ * already used elsewhere in this codebase (`StockService.reserveStock`
+ * calls a Postgres function via `$queryRaw` for the same reason) — this
+ * file deliberately uses a plain inline `UPDATE`, not a stored function,
+ * to keep the whole guarantee visible and self-contained in one migration.
+ *
+ * Idempotence (unchanged in spirit from V1): the (workspaceId,
+ * idempotencyKey) UNIQUE constraint on AiUsageEvent is attempted FIRST,
+ * before any counter is touched — only the request whose INSERT actually
+ * wins ever proceeds to attempt a reservation. `finalizeUsage`/
+ * `releaseUsage` are themselves gated by a conditional UPDATE on
+ * `AiUsageEvent.status = 'RESERVED'` (the exact same pattern
+ * `AiActionService.transition()` uses for AgentAction) — so at most ONE
+ * of finalize/release can ever win for a given event, making both
+ * naturally idempotent under retry or a duplicate call with no rollback
+ * machinery needed.
+ *
+ * Honesty about what this does NOT guarantee: reserveUsage/finalizeUsage/
+ * releaseUsage make the LOCAL quota bookkeeping exactly-once. They say
+ * nothing about whether a real external marketplace call inside a
+ * handler is itself exactly-once — that guarantee (or its absence) is
+ * entirely up to the handler/adapter being called (e.g.
+ * publish_listing's own real-call safeguard, or the
+ * FulfillmentOrder.orderId unique constraint) and is never claimed here.
+ *
+ * Known V1 limitation, stated explicitly rather than hidden: a RESERVED
+ * event whose caller crashes or is killed before ever calling
+ * finalizeUsage/releaseUsage (e.g. a process restart mid-handler) stays
+ * RESERVED forever — its units remain held, permanently reducing the
+ * workspace's available budget until manual intervention. No reaper/TTL
+ * job reclaims an orphaned reservation in this V1 (out of this task's
+ * scope, and no such mechanism exists yet for the closest real
+ * precedent either — AgentAction's own PENDING_CONFIRMATION TTL is
+ * lazily expired only on next read, there is no background sweep there
+ * either).
  */
+
+export type AiUsageEventStatus = 'RESERVED' | 'RECORDED' | 'REJECTED' | 'RELEASED';
 
 export interface QuotaCheckResult {
   allowed: boolean;
   reason?: 'no_quota_configured' | 'period_unavailable' | 'quota_exceeded';
 }
 
-export interface RecordUsageParams {
+export interface UsageOperationParams {
   toolName: string;
   idempotencyKey: string;
   conversationId?: string;
@@ -70,17 +127,23 @@ export interface RecordUsageParams {
   toolUseId?: string;
 }
 
-export interface RecordUsageResult {
-  status: 'RECORDED' | 'REJECTED';
+export interface ReserveUsageResult {
+  status: AiUsageEventStatus;
   eventId: string | null;
   units: number;
   reason?: 'no_quota_configured' | 'period_unavailable' | 'quota_exceeded' | 'error';
+}
+
+export interface FinalizeReleaseResult {
+  /** 'NOT_FOUND' covers both a no-cost tool (nothing was ever reserved) and a genuinely unknown key — both are safe no-ops for the caller. */
+  status: AiUsageEventStatus | 'NOT_FOUND' | 'error';
 }
 
 export interface UsagePeriodSnapshot {
   periodStart: Date;
   periodEnd: Date;
   unitsConsumed: number;
+  unitsReserved: number;
   unitsLimit: number;
 }
 
@@ -178,11 +241,11 @@ export class AiUsageService {
     workspaceId: string,
     period: ResolvedPeriod,
     unitsLimitSnapshot: number
-  ): Promise<{ id: string; unitsConsumed: number } | null> {
+  ): Promise<{ id: string; unitsConsumed: number; unitsReserved: number } | null> {
     try {
       const existing = await prisma.aiUsagePeriod.findUnique({
         where: { workspaceId_periodStart_periodEnd: { workspaceId, periodStart: period.periodStart, periodEnd: period.periodEnd } },
-        select: { id: true, unitsConsumed: true },
+        select: { id: true, unitsConsumed: true, unitsReserved: true },
       });
       if (existing) return existing;
 
@@ -193,16 +256,17 @@ export class AiUsageService {
             periodStart: period.periodStart,
             periodEnd: period.periodEnd,
             unitsConsumed: 0,
+            unitsReserved: 0,
             unitsLimit: unitsLimitSnapshot,
           },
-          select: { id: true, unitsConsumed: true },
+          select: { id: true, unitsConsumed: true, unitsReserved: true },
         });
         return created;
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
           const raceWinner = await prisma.aiUsagePeriod.findUnique({
             where: { workspaceId_periodStart_periodEnd: { workspaceId, periodStart: period.periodStart, periodEnd: period.periodEnd } },
-            select: { id: true, unitsConsumed: true },
+            select: { id: true, unitsConsumed: true, unitsReserved: true },
           });
           if (raceWinner) return raceWinner;
         }
@@ -214,11 +278,19 @@ export class AiUsageService {
     }
   }
 
+  /** Conditional transition out of RESERVED — the same idempotence guard AgentAction's own transition() uses. At most one caller ever wins this for a given event. */
+  private static async claimTerminalStatus(eventId: string, to: 'RECORDED' | 'REJECTED' | 'RELEASED'): Promise<boolean> {
+    const claim = await prisma.aiUsageEvent.updateMany({ where: { id: eventId, status: 'RESERVED' }, data: { status: to } });
+    return claim.count > 0;
+  }
+
   /**
-   * Advisory, non-atomic pre-check — see this file's own header comment
-   * on the concurrency tradeoff. A tool with no commercial cost
-   * (aiUsageConfig.getToolUsageUnits returns null) is always allowed,
-   * with no DB read at all.
+   * Advisory, informational-only read — NOT an authorization gate (see
+   * this file's own header comment on why the old check-then-execute
+   * shape was unsafe). Safe to use for display (e.g. a future usage
+   * dashboard) or as a cheap early hint before proposing an 'engage'
+   * action, but a handler must never run on the strength of this call
+   * alone — only a 'RESERVED' result from reserveUsage() authorizes that.
    */
   static async hasQuotaRemaining(workspaceId: string, toolName: string): Promise<QuotaCheckResult> {
     const units = getToolUsageUnits(toolName);
@@ -233,35 +305,33 @@ export class AiUsageService {
     const periodRow = await this.getOrCreatePeriodRow(workspaceId, period, limit);
     if (!periodRow) return { allowed: false, reason: 'period_unavailable' };
 
-    return periodRow.unitsConsumed + units <= limit
+    return periodRow.unitsConsumed + periodRow.unitsReserved + units <= limit
       ? { allowed: true }
       : { allowed: false, reason: 'quota_exceeded' };
   }
 
   /**
-   * The one authoritative, atomic consumption. Must only ever be called
-   * AFTER the real operation it bills for has already succeeded (a
-   * handler that threw, or an AgentAction that ended FAILED/CANCELLED/
-   * EXPIRED, must never reach this method at all — see
-   * AiAgentService/AiActionService's own integration for where this is
-   * enforced).
+   * The one authoritative, atomic authorization. A handler must only ever
+   * run when this returns `status: 'RESERVED'` — every other status means
+   * "do not execute the handler".
    *
-   * Idempotence: the (workspaceId, idempotencyKey) UNIQUE constraint on
-   * AiUsageEvent is attempted FIRST, before any counter is touched — only
-   * the request whose INSERT actually wins ever proceeds to the atomic
-   * increment below. This ordering (insert-then-increment, never
-   * increment-then-insert) is what makes a double-confirmation or a
-   * retry with the same key provably consume at most once: a loser of the
-   * INSERT race never touches AiUsagePeriod at all, so there is nothing
-   * to roll back.
+   * A tool with no commercial cost (aiUsageConfig.getToolUsageUnits
+   * returns null) always returns 'RESERVED' immediately, with no DB write
+   * at all — the handler is always allowed to run for it, matching
+   * hasQuotaRemaining's own short-circuit.
    *
-   * A tool with no commercial cost records nothing at all (no DB write),
-   * mirroring hasQuotaRemaining's own short-circuit.
+   * Idempotent: the (workspaceId, idempotencyKey) UNIQUE constraint on
+   * AiUsageEvent means a retry with the SAME key never creates a second
+   * reservation — it returns the stored outcome of whichever attempt won
+   * (RESERVED/RECORDED/REJECTED/RELEASED). A caller seeing anything other
+   * than a freshly-won 'RESERVED' must not run the handler again under
+   * that same key — see this file's own header comment on the limits of
+   * what this guarantees for a real external call.
    */
-  static async recordUsage(workspaceId: string, params: RecordUsageParams): Promise<RecordUsageResult> {
+  static async reserveUsage(workspaceId: string, params: UsageOperationParams): Promise<ReserveUsageResult> {
     const units = getToolUsageUnits(params.toolName);
     if (units === null) {
-      return { status: 'RECORDED', eventId: null, units: 0 };
+      return { status: 'RESERVED', eventId: null, units: 0 };
     }
 
     const period = await this.resolvePeriod(workspaceId);
@@ -271,7 +341,7 @@ export class AiUsageService {
 
     const capability = getRequiredCapabilityForTool(params.toolName) ?? 'unknown';
 
-    let event: { id: string } | null = null;
+    let event: { id: string; status: string; units: number } | null = null;
     try {
       event = await prisma.aiUsageEvent.create({
         data: {
@@ -287,75 +357,144 @@ export class AiUsageService {
           periodStart: period.periodStart,
           periodEnd: period.periodEnd,
         },
-        select: { id: true },
+        select: { id: true, status: true, units: true },
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         // Lost the idempotency race — this exact operation was already
-        // recorded (or rejected) by a previous attempt. Never re-run the
-        // increment below; just report the stored outcome.
+        // attempted (reserved/recorded/rejected/released) before. Never
+        // attempt a second reservation for the same key; report the
+        // stored outcome as-is so the caller never re-runs the handler.
         const existing = await prisma.aiUsageEvent.findUnique({
           where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey: params.idempotencyKey } },
         });
         if (existing) {
-          return {
-            status: existing.status === 'REJECTED' ? 'REJECTED' : 'RECORDED',
-            eventId: existing.id,
-            units: existing.units,
-          };
+          return { status: existing.status as AiUsageEventStatus, eventId: existing.id, units: existing.units };
         }
         return { status: 'REJECTED', eventId: null, units, reason: 'error' };
       }
-      console.error('[AiUsageService] Error creating AiUsageEvent:', error);
+      console.error('[AiUsageService] Error creating AiUsageEvent reservation:', error);
       return { status: 'REJECTED', eventId: null, units, reason: 'error' };
     }
 
     // Only the winner of the create() above ever reaches this point for a
-    // given idempotencyKey — safe to increment at most once. Wrapped as a
-    // whole so recordUsage NEVER throws past this point either — an
-    // unexpected DB error here fails closed (REJECTED), it never
-    // propagates to the caller (AiAgentService/AiActionService must never
-    // crash mid-turn over a usage-recording failure).
+    // given idempotencyKey — safe to attempt the reservation at most once.
     try {
       const limit = await this.resolveMonthlyLimit(workspaceId);
       if (limit === null) {
-        await prisma.aiUsageEvent.update({ where: { id: event.id }, data: { status: 'REJECTED' } }).catch(() => undefined);
+        await this.claimTerminalStatus(event.id, 'REJECTED');
         return { status: 'REJECTED', eventId: event.id, units, reason: 'no_quota_configured' };
       }
 
       const periodRow = await this.getOrCreatePeriodRow(workspaceId, period, limit);
       if (!periodRow) {
-        await prisma.aiUsageEvent.update({ where: { id: event.id }, data: { status: 'REJECTED' } }).catch(() => undefined);
+        await this.claimTerminalStatus(event.id, 'REJECTED');
         return { status: 'REJECTED', eventId: event.id, units, reason: 'period_unavailable' };
       }
 
-      // Atomic conditional increment — same pattern as
-      // ProductService.reserveInventory's `available: { gte: quantity }`.
-      // `limit` here is the freshly-resolved current limit (see
-      // resolveMonthlyLimit), never the possibly-stale periodRow snapshot.
-      const claim = await prisma.aiUsagePeriod.updateMany({
-        where: { id: periodRow.id, unitsConsumed: { lte: limit - units } },
-        data: { unitsConsumed: { increment: units } },
-      });
+      // The one atomic step: claims `units` of capacity IF AND ONLY IF
+      // unitsConsumed + unitsReserved + units <= limit, in a single
+      // PostgreSQL UPDATE — see this file's own header comment for why a
+      // raw statement is used here (a two-column arithmetic condition
+      // Prisma's query builder cannot express as one filter) and why this
+      // is still safe (a single atomic statement, row-locked, never
+      // $transaction/Serializable). Fully parameterized — no string
+      // interpolation of any value.
+      const claimed = await prisma.$executeRaw`
+        UPDATE "AiUsagePeriod"
+        SET "unitsReserved" = "unitsReserved" + ${units}, "updatedAt" = NOW()
+        WHERE "id" = ${periodRow.id} AND "unitsConsumed" + "unitsReserved" + ${units} <= ${limit}
+      `;
 
-      const finalStatus: 'RECORDED' | 'REJECTED' = claim.count > 0 ? 'RECORDED' : 'REJECTED';
-      await prisma.aiUsageEvent.update({ where: { id: event.id }, data: { status: finalStatus } }).catch((updateError) => {
-        // The counter's own state (incremented or not) is already correct
-        // and durable regardless of this bookkeeping update's outcome —
-        // never retried, never allowed to change the real decision above.
-        console.error('[AiUsageService] Failed to finalize AiUsageEvent status:', updateError);
-      });
+      if (claimed === 0) {
+        await this.claimTerminalStatus(event.id, 'REJECTED');
+        return { status: 'REJECTED', eventId: event.id, units, reason: 'quota_exceeded' };
+      }
 
-      return {
-        status: finalStatus,
-        eventId: event.id,
-        units,
-        reason: finalStatus === 'REJECTED' ? 'quota_exceeded' : undefined,
-      };
+      return { status: 'RESERVED', eventId: event.id, units };
     } catch (error) {
-      console.error('[AiUsageService] Error recording usage:', error);
-      await prisma.aiUsageEvent.update({ where: { id: event.id }, data: { status: 'REJECTED' } }).catch(() => undefined);
+      console.error('[AiUsageService] Error reserving usage:', error);
+      await this.claimTerminalStatus(event.id, 'REJECTED').catch(() => undefined);
       return { status: 'REJECTED', eventId: event.id, units, reason: 'error' };
+    }
+  }
+
+  /**
+   * Call ONLY after the handler a reservation authorized has genuinely
+   * succeeded. Moves the held units from "reserved" to "consumed" — the
+   * real, final, billed outcome.
+   *
+   * Idempotent: gated by the same RESERVED->RECORDED conditional
+   * transition as claimTerminalStatus — a retry (or a duplicate call)
+   * after the first one already won never touches AiUsagePeriod a second
+   * time, so unitsConsumed can never be double-incremented and
+   * unitsReserved can never be double-decremented.
+   *
+   * A tool with no commercial cost (no AiUsageEvent was ever created) or
+   * a genuinely unknown key both resolve to 'NOT_FOUND' — a safe no-op
+   * for the caller, never an error.
+   */
+  static async finalizeUsage(workspaceId: string, idempotencyKey: string): Promise<FinalizeReleaseResult> {
+    try {
+      const event = await prisma.aiUsageEvent.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } } });
+      if (!event) return { status: 'NOT_FOUND' };
+      if (event.status !== 'RESERVED') return { status: event.status as AiUsageEventStatus };
+
+      const won = await this.claimTerminalStatus(event.id, 'RECORDED');
+      if (!won) {
+        // Lost a race to a concurrent finalize/release of the SAME event
+        // (should not happen under correct single-caller usage, but never
+        // trusted blindly) — report whatever actually won, never
+        // re-attempt the counter move.
+        const fresh = await prisma.aiUsageEvent.findUnique({ where: { id: event.id } });
+        return { status: (fresh?.status as AiUsageEventStatus) ?? 'RECORDED' };
+      }
+
+      // Only the winner of the transition above ever reaches this —
+      // moving the hold to consumed exactly once, unconditionally (the
+      // conditional guard already happened on AiUsageEvent above).
+      await prisma.aiUsagePeriod.updateMany({
+        where: { workspaceId, periodStart: event.periodStart, periodEnd: event.periodEnd },
+        data: { unitsReserved: { decrement: event.units }, unitsConsumed: { increment: event.units } },
+      });
+
+      return { status: 'RECORDED' };
+    } catch (error) {
+      console.error('[AiUsageService] Error finalizing usage:', error);
+      return { status: 'error' };
+    }
+  }
+
+  /**
+   * Call after the handler a reservation authorized has failed (thrown,
+   * or returned a controlled business error the caller treats as "did
+   * not really succeed"). Gives the held units back — they are NEVER
+   * counted as consumed, exactly preserving V1's "FAILED = 0" rule.
+   *
+   * Idempotent, same mechanism as finalizeUsage. Never decrements
+   * unitsReserved twice for the same event.
+   */
+  static async releaseUsage(workspaceId: string, idempotencyKey: string): Promise<FinalizeReleaseResult> {
+    try {
+      const event = await prisma.aiUsageEvent.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } } });
+      if (!event) return { status: 'NOT_FOUND' };
+      if (event.status !== 'RESERVED') return { status: event.status as AiUsageEventStatus };
+
+      const won = await this.claimTerminalStatus(event.id, 'RELEASED');
+      if (!won) {
+        const fresh = await prisma.aiUsageEvent.findUnique({ where: { id: event.id } });
+        return { status: (fresh?.status as AiUsageEventStatus) ?? 'RELEASED' };
+      }
+
+      await prisma.aiUsagePeriod.updateMany({
+        where: { workspaceId, periodStart: event.periodStart, periodEnd: event.periodEnd },
+        data: { unitsReserved: { decrement: event.units } },
+      });
+
+      return { status: 'RELEASED' };
+    } catch (error) {
+      console.error('[AiUsageService] Error releasing usage:', error);
+      return { status: 'error' };
     }
   }
 
@@ -373,13 +512,14 @@ export class AiUsageService {
 
     const periodRow = await prisma.aiUsagePeriod.findUnique({
       where: { workspaceId_periodStart_periodEnd: { workspaceId, periodStart: period.periodStart, periodEnd: period.periodEnd } },
-      select: { unitsConsumed: true },
+      select: { unitsConsumed: true, unitsReserved: true },
     });
 
     return {
       periodStart: period.periodStart,
       periodEnd: period.periodEnd,
       unitsConsumed: periodRow?.unitsConsumed ?? 0,
+      unitsReserved: periodRow?.unitsReserved ?? 0,
       unitsLimit: limit,
     };
   }

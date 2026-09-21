@@ -138,14 +138,17 @@ export class AiAgentService {
   }
 
   /**
-   * AiUsageService — the commercial budget check, entirely independent of
-   * isCapabilityRefused above (entitlement = right, this = remaining
-   * budget; see AiUsageService's own header comment on why the two are
-   * never merged). A tool with no commercial cost (aiUsageConfig.ts) is
-   * never refused here, exactly like a tool with no capability mapping is
-   * never refused by isCapabilityRefused.
+   * Advisory-only budget hint for an 'engage' tool's PROPOSAL step —
+   * avoids needlessly creating an AgentAction the workspace has no real
+   * budget for. This is NEVER the real authorization: AiUsageService.
+   * hasQuotaRemaining is a plain, non-atomic read (see that method's own
+   * comment). The one authoritative, atomic check for an engage tool is
+   * AiActionService.confirmAndExecute's own reserveUsage() call, made
+   * right before the handler runs — never here. A tool with no commercial
+   * cost (aiUsageConfig.ts) is never flagged here, exactly like a tool
+   * with no capability mapping is never refused by isCapabilityRefused.
    */
-  private static async isQuotaExceeded(workspaceId: string, toolName: string): Promise<boolean> {
+  private static async isQuotaLikelyExceeded(workspaceId: string, toolName: string): Promise<boolean> {
     const result = await AiUsageService.hasQuotaRemaining(workspaceId, toolName);
     return !result.allowed;
   }
@@ -399,14 +402,14 @@ export class AiAgentService {
               // on why the two are not yet merged into one check.
               resultPayload = { error: `The "${getRequiredCapabilityForTool(tool.name)}" capability is not available on this workspace's current plan.` };
               toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
-            } else if (await this.isQuotaExceeded(workspaceId, tool.name)) {
-              // AiUsageService — checked before proposing an AgentAction,
-              // same reasoning as the entitlement check above: a refused
-              // proposal never reaches the reseller as something to
-              // confirm. Re-checked again at confirm time in
-              // AiActionService.confirmAndExecute (the confirmation can
-              // arrive minutes later) — nothing is ever consumed here,
-              // only at real execution success (see AiUsageService).
+            } else if (await this.isQuotaLikelyExceeded(workspaceId, tool.name)) {
+              // Advisory only (see isQuotaLikelyExceeded's own comment) —
+              // avoids proposing an action the workspace almost certainly
+              // can't afford. The real, atomic authorization for this
+              // tool's actual execution happens later, in
+              // AiActionService.confirmAndExecute's own reserveUsage()
+              // call, right before the handler runs — never here, and
+              // nothing is ever reserved/consumed at this step.
               resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
               toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
             } else {
@@ -463,39 +466,55 @@ export class AiAgentService {
               resultPayload = { error: 'Invalid tool input', details: parsed.error.flatten() };
             } else if (await this.isCapabilityRefused(workspaceId, tool.name)) {
               resultPayload = { error: `The "${getRequiredCapabilityForTool(tool.name)}" capability is not available on this workspace's current plan.` };
-            } else if (await this.isQuotaExceeded(workspaceId, tool.name)) {
-              // Checked BEFORE the handler runs, so an over-quota call
-              // never executes at all in the overwhelming common case
-              // (see AiUsageService's own header comment on the narrow,
-              // deliberately-bounded concurrency tradeoff this implies).
-              resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
             } else {
-              try {
-                resultPayload = await tool.handler(workspaceId, parsed.data, { conversationId: resolvedConversationId, userId });
-                // AiUsageService — recorded only now, AFTER a real,
-                // non-throwing result. A controlled business error (the
-                // same `{error: string}` shape checked a few lines above
-                // for an 'engage' tool's preview) is treated as "did not
-                // really succeed" here too — never billed, exactly like a
-                // thrown exception below.
-                const succeeded = !(
-                  resultPayload &&
-                  typeof resultPayload === 'object' &&
-                  typeof (resultPayload as Record<string, unknown>).error === 'string'
-                );
-                if (succeeded) {
-                  await AiUsageService.recordUsage(workspaceId, {
-                    toolName: tool.name,
-                    idempotencyKey: `tool:${resolvedConversationId}:${block.id}`,
-                    conversationId: resolvedConversationId,
-                    toolUseId: block.id,
+              // AiUsageService — race-condition fix: the handler is only
+              // ever called once reserveUsage has ATOMICALLY claimed its
+              // units (never on the strength of a plain read — see
+              // AiUsageService's own header comment on why the old
+              // hasQuotaRemaining-then-execute shape let two concurrent
+              // requests both pass a non-atomic check and both actually
+              // run their handler).
+              const usageIdempotencyKey = `tool:${resolvedConversationId}:${block.id}`;
+              const reservation = await AiUsageService.reserveUsage(workspaceId, {
+                toolName: tool.name,
+                idempotencyKey: usageIdempotencyKey,
+                conversationId: resolvedConversationId,
+                toolUseId: block.id,
+              });
+
+              if (reservation.status !== 'RESERVED') {
+                resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
+              } else {
+                try {
+                  resultPayload = await tool.handler(workspaceId, parsed.data, { conversationId: resolvedConversationId, userId });
+                  // A controlled business error (the same `{error: string}`
+                  // shape checked a few lines above for an 'engage' tool's
+                  // preview) is treated as "did not really succeed" here
+                  // too — the reservation is released, never finalized,
+                  // exactly like a thrown exception below.
+                  const succeeded = !(
+                    resultPayload &&
+                    typeof resultPayload === 'object' &&
+                    typeof (resultPayload as Record<string, unknown>).error === 'string'
+                  );
+                  if (succeeded) {
+                    await AiUsageService.finalizeUsage(workspaceId, usageIdempotencyKey);
+                  } else {
+                    await AiUsageService.releaseUsage(workspaceId, usageIdempotencyKey);
+                  }
+                } catch (error) {
+                  logger.error(`Tool "${tool.name}" handler failed`, error instanceof Error ? error : String(error), {
+                    workspaceId,
+                  });
+                  resultPayload = { error: 'Tool execution failed' };
+                  // The reservation must never stay held forever just
+                  // because the handler threw — release it (best-effort;
+                  // never lets a release failure mask the real tool error
+                  // already captured in resultPayload above).
+                  await AiUsageService.releaseUsage(workspaceId, usageIdempotencyKey).catch((releaseError) => {
+                    logger.error('Failed to release AI usage reservation after a handler error', releaseError instanceof Error ? releaseError : String(releaseError), { workspaceId, toolName: tool.name });
                   });
                 }
-              } catch (error) {
-                logger.error(`Tool "${tool.name}" handler failed`, error instanceof Error ? error : String(error), {
-                  workspaceId,
-                });
-                resultPayload = { error: 'Tool execution failed' };
               }
             }
             toolCalls.push({

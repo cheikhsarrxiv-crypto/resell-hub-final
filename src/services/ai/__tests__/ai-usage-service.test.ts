@@ -1,12 +1,20 @@
 /**
  * Behavioral tests for AiUsageService — the commercial AI Units quota
- * layer. Uses the REAL SubscriptionService (never mocked) so period/limit
+ * layer, race-condition-fixed version (reserveUsage/finalizeUsage/
+ * releaseUsage replacing the old hasQuotaRemaining-then-execute-then-
+ * recordUsage shape a read-only audit found unsafe under concurrency).
+ *
+ * Uses the REAL SubscriptionService (never mocked) so period/limit
  * resolution is proven to build on it rather than duplicate its logic —
  * only prisma.workspace/plan/workspaceAiOverride/aiUsagePeriod/aiUsageEvent
  * are mocked, as a small in-memory store faithfully reproducing Postgres's
  * own UNIQUE-constraint (P2002) and atomic-conditional-UPDATE semantics —
  * the same style already established in ai-action-service.test.ts and
- * subscription-status-access.test.ts.
+ * subscription-status-access.test.ts. `$executeRaw` is mocked to apply the
+ * exact same `unitsConsumed + unitsReserved + units <= limit` condition
+ * the real raw SQL in AiUsageService.reserveUsage expresses, against the
+ * same in-memory row — see that mock's own comment for why its parameter
+ * order must stay in sync with the production query.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Prisma } from '@prisma/client';
@@ -46,7 +54,8 @@ vi.mock('@/lib/prisma', () => {
     aiUsagePeriod: {
       findUnique: vi.fn(async ({ where }: any) => {
         const k = where.workspaceId_periodStart_periodEnd;
-        return periodStore.get(periodKey(k.workspaceId, k.periodStart, k.periodEnd)) ?? null;
+        const row = periodStore.get(periodKey(k.workspaceId, k.periodStart, k.periodEnd));
+        return row ? { ...row } : null;
       }),
       create: vi.fn(async ({ data }: any) => {
         const k = periodKey(data.workspaceId, data.periodStart, data.periodEnd);
@@ -54,25 +63,44 @@ vi.mock('@/lib/prisma', () => {
         // already exists never succeeds — no internal await between this
         // check and the write below, matching a single atomic INSERT.
         if (periodStore.has(k)) p2002();
-        const row = { id: `period-${++periodIdCounter}`, unitsConsumed: 0, ...data };
+        const row = { id: `period-${++periodIdCounter}`, unitsConsumed: 0, unitsReserved: 0, ...data };
         periodStore.set(k, row);
         return { ...row };
       }),
       updateMany: vi.fn(async ({ where, data }: any) => {
         let count = 0;
         for (const row of periodStore.values()) {
-          if (row.id !== where.id) continue;
-          if (where.unitsConsumed?.lte !== undefined && !(row.unitsConsumed <= where.unitsConsumed.lte)) continue;
+          if (where.id !== undefined && row.id !== where.id) continue;
+          if (where.workspaceId !== undefined && row.workspaceId !== where.workspaceId) continue;
+          if (where.periodStart !== undefined && row.periodStart.getTime() !== where.periodStart.getTime()) continue;
+          if (where.periodEnd !== undefined && row.periodEnd.getTime() !== where.periodEnd.getTime()) continue;
           if (data.unitsConsumed?.increment !== undefined) row.unitsConsumed += data.unitsConsumed.increment;
+          if (data.unitsReserved?.increment !== undefined) row.unitsReserved += data.unitsReserved.increment;
+          if (data.unitsReserved?.decrement !== undefined) row.unitsReserved -= data.unitsReserved.decrement;
           count++;
         }
         return { count };
       }),
+      // Mirrors the production raw SQL in AiUsageService.reserveUsage
+      // exactly:
+      //   UPDATE "AiUsagePeriod"
+      //   SET "unitsReserved" = "unitsReserved" + ${units}, ...
+      //   WHERE "id" = ${periodRow.id}
+      //     AND "unitsConsumed" + "unitsReserved" + ${units} <= ${limit}
+      // Tagged-template call shape: $executeRaw(strings, ...values) with
+      // values in template order = [units, periodId, units, limit].
     },
     aiUsageEvent: {
       findUnique: vi.fn(async ({ where }: any) => {
+        if (where.id !== undefined) {
+          for (const row of eventStore.values()) {
+            if (row.id === where.id) return { ...row };
+          }
+          return null;
+        }
         const k = where.workspaceId_idempotencyKey;
-        return eventStore.get(eventKey(k.workspaceId, k.idempotencyKey)) ?? null;
+        const row = eventStore.get(eventKey(k.workspaceId, k.idempotencyKey));
+        return row ? { ...row } : null;
       }),
       create: vi.fn(async ({ data }: any) => {
         const k = eventKey(data.workspaceId, data.idempotencyKey);
@@ -81,16 +109,27 @@ vi.mock('@/lib/prisma', () => {
         eventStore.set(k, row);
         return { ...row };
       }),
-      update: vi.fn(async ({ where, data }: any) => {
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        let count = 0;
         for (const row of eventStore.values()) {
-          if (row.id === where.id) {
-            Object.assign(row, data);
-            return { ...row };
-          }
+          if (row.id !== where.id) continue;
+          if (where.status !== undefined && row.status !== where.status) continue;
+          Object.assign(row, data);
+          count++;
         }
-        throw new Error('AiUsageEvent not found');
+        return { count };
       }),
     },
+    $executeRaw: vi.fn(async (_strings: TemplateStringsArray, ...values: any[]) => {
+      const [units, periodId, , limit] = values;
+      const row = [...periodStore.values()].find((r) => r.id === periodId);
+      if (!row) return 0;
+      if (row.unitsConsumed + row.unitsReserved + units <= limit) {
+        row.unitsReserved += units;
+        return 1;
+      }
+      return 0;
+    }),
   };
   return { default: client, prisma: client };
 });
@@ -137,8 +176,8 @@ describe('AiUsageService — period resolution', () => {
       })
     );
 
-    const result = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
-    expect(result.status).toBe('RECORDED');
+    const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    expect(result.status).toBe('RESERVED');
 
     const row = [...periodStore.values()][0];
     expect(row.periodStart.toISOString()).toBe('2026-03-17T08:00:00.000Z');
@@ -151,8 +190,8 @@ describe('AiUsageService — period resolution', () => {
     vi.setSystemTime(new Date('2026-06-15T12:34:56.000Z'));
 
     try {
-      const result = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
-      expect(result.status).toBe('RECORDED');
+      const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+      expect(result.status).toBe('RESERVED');
 
       const row = [...periodStore.values()][0];
       expect(row.periodStart.toISOString()).toBe('2026-06-01T00:00:00.000Z');
@@ -163,48 +202,135 @@ describe('AiUsageService — period resolution', () => {
   });
 });
 
-describe('AiUsageService.hasQuotaRemaining / recordUsage — exact quota, REJECTED, no double counting', () => {
+describe('AiUsageService.reserveUsage — exact quota, REJECTED, no execution beyond quota', () => {
   beforeEach(() => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', BUSINESS_PLAN));
   });
 
-  it('allows usage exactly up to the limit, refuses the unit that would exceed it', async () => {
+  it('allows a reservation exactly up to the limit, refuses the one that would exceed it', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 5 });
 
-    // publish_listing costs 5 — exactly the limit.
-    const r1 = await AiUsageService.recordUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
-    expect(r1.status).toBe('RECORDED');
+    const r1 = await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }); // 5 units — exactly the limit
+    expect(r1.status).toBe('RESERVED');
 
     const check = await AiUsageService.hasQuotaRemaining('ws-1', 'get_order'); // 1 more unit -> would be 6 > 5
     expect(check).toEqual({ allowed: false, reason: 'quota_exceeded' });
 
-    const r2 = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-2' });
+    const r2 = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-2' });
     expect(r2.status).toBe('REJECTED');
     expect(r2.reason).toBe('quota_exceeded');
 
+    // The REJECTED reservation never held any capacity.
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
-    expect(snapshot?.unitsConsumed).toBe(5); // the REJECTED event never incremented the counter
+    expect(snapshot?.unitsReserved).toBe(5);
+    expect(snapshot?.unitsConsumed).toBe(0);
   });
 
-  it('a REJECTED event is persisted (never deleted) and never counted', async () => {
+  it('a REJECTED event is persisted (never deleted) and never held any units', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 2 });
-    await AiUsageService.recordUsage('ws-1', { toolName: 'search_products', idempotencyKey: 'tool:conv-1:tu-1' }); // 3 units > 2 -> REJECTED
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'search_products', idempotencyKey: 'tool:conv-1:tu-1' }); // 3 units > 2 -> REJECTED
 
     expect(eventStore.size).toBe(1);
     const stored = [...eventStore.values()][0];
     expect(stored.status).toBe('REJECTED');
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsReserved).toBe(0);
     expect(snapshot?.unitsConsumed).toBe(0);
   });
 
-  it('a tool with no commercial cost (simulate_engage_action) is always allowed and records nothing', async () => {
+  it('a tool with no commercial cost (simulate_engage_action) is always RESERVED and holds no units', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 0 }); // would refuse anything real
     const check = await AiUsageService.hasQuotaRemaining('ws-1', 'simulate_engage_action');
     expect(check).toEqual({ allowed: true });
 
-    const result = await AiUsageService.recordUsage('ws-1', { toolName: 'simulate_engage_action', idempotencyKey: 'action:a-1' });
-    expect(result).toEqual({ status: 'RECORDED', eventId: null, units: 0 });
+    const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'simulate_engage_action', idempotencyKey: 'action:a-1' });
+    expect(result).toEqual({ status: 'RESERVED', eventId: null, units: 0 });
     expect(eventStore.size).toBe(0);
+  });
+});
+
+describe('AiUsageService.finalizeUsage / releaseUsage', () => {
+  beforeEach(() => {
+    workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', BUSINESS_PLAN));
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 100 });
+  });
+
+  it('finalizeUsage moves the held units from reserved to consumed, exactly once', async () => {
+    const reserved = await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+    expect(reserved.status).toBe('RESERVED');
+
+    let snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsReserved).toBe(5);
+    expect(snapshot?.unitsConsumed).toBe(0);
+
+    const finalized = await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
+    expect(finalized).toEqual({ status: 'RECORDED' });
+
+    snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsReserved).toBe(0);
+    expect(snapshot?.unitsConsumed).toBe(5);
+  });
+
+  it('releaseUsage gives the held units back without ever counting them as consumed (FAILED = 0)', async () => {
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'send_to_fulfillment', idempotencyKey: 'action:a-1' });
+
+    const released = await AiUsageService.releaseUsage('ws-1', 'action:a-1');
+    expect(released).toEqual({ status: 'RELEASED' });
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsReserved).toBe(0);
+    expect(snapshot?.unitsConsumed).toBe(0);
+
+    // A new, equally-sized reservation can now succeed — the units were genuinely freed.
+    const next = await AiUsageService.reserveUsage('ws-1', { toolName: 'send_to_fulfillment', idempotencyKey: 'action:a-2' });
+    expect(next.status).toBe('RESERVED');
+  });
+
+  it('finalize is idempotent — calling it twice never double-increments unitsConsumed', async () => {
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+
+    const first = await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
+    const second = await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
+
+    expect(first).toEqual({ status: 'RECORDED' });
+    expect(second).toEqual({ status: 'RECORDED' }); // reports the real stored outcome, does not re-touch the counter
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsConsumed).toBe(5); // not 10
+    expect(snapshot?.unitsReserved).toBe(0); // not negative
+  });
+
+  it('release is idempotent — calling it twice never double-decrements unitsReserved', async () => {
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+
+    const first = await AiUsageService.releaseUsage('ws-1', 'action:a-1');
+    const second = await AiUsageService.releaseUsage('ws-1', 'action:a-1');
+
+    expect(first).toEqual({ status: 'RELEASED' });
+    expect(second).toEqual({ status: 'RELEASED' });
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsReserved).toBe(0); // never went negative from a second decrement
+  });
+
+  it('finalize after release (and vice versa) never wins a second transition — only the first caller\'s outcome stands', async () => {
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+
+    const released = await AiUsageService.releaseUsage('ws-1', 'action:a-1');
+    expect(released).toEqual({ status: 'RELEASED' });
+
+    const lateFinalize = await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
+    expect(lateFinalize).toEqual({ status: 'RELEASED' }); // reports the real, already-settled outcome — never overwrites it to RECORDED
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsConsumed).toBe(0); // never billed despite the late finalize call
+  });
+
+  it('finalize/release on a no-cost tool (nothing was ever reserved) is a safe NOT_FOUND no-op', async () => {
+    const finalized = await AiUsageService.finalizeUsage('ws-1', 'action:never-reserved');
+    const released = await AiUsageService.releaseUsage('ws-1', 'action:never-reserved');
+    expect(finalized).toEqual({ status: 'NOT_FOUND' });
+    expect(released).toEqual({ status: 'NOT_FOUND' });
   });
 });
 
@@ -214,73 +340,175 @@ describe('AiUsageService — idempotence and retry', () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 100 });
   });
 
-  it('the exact same idempotencyKey recorded twice consumes only once', async () => {
-    const first = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
-    const second = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+  it('the exact same idempotencyKey reserved twice never reserves twice', async () => {
+    const first = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const second = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
 
     expect(second).toEqual(first);
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
-    expect(snapshot?.unitsConsumed).toBe(1); // not 2
+    expect(snapshot?.unitsReserved).toBe(1); // not 2
   });
 
-  it('a retry after a REJECTED (quota exceeded) event replays the same REJECTED outcome, never re-attempts the increment', async () => {
+  it('a retry after a REJECTED (quota exceeded) reservation replays the same REJECTED outcome, never re-attempts the claim', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 0 });
-    const first = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const first = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
     expect(first.status).toBe('REJECTED');
 
-    const retry = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const retry = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
     expect(retry.status).toBe('REJECTED');
     expect(retry.eventId).toBe(first.eventId);
   });
+
+  it('honest limit: a retry of a RELEASED reservation under the exact same key is never silently re-reserved — it must use a fresh key to try again', async () => {
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    await AiUsageService.releaseUsage('ws-1', 'tool:conv-1:tu-1');
+
+    // A genuine retry under the SAME key is a local no-op reporting the
+    // retired RELEASED status — never a second RESERVED. See
+    // AiUsageService's own header comment: a real logical retry from
+    // AiAgentService/AiActionService always gets a fresh idempotencyKey
+    // (a new Anthropic toolUseId, or the action never reaches this point
+    // twice), so this key is legitimately retired for good.
+    const retry = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    expect(retry.status).toBe('RELEASED');
+
+    const freshKeyRetry = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-2' });
+    expect(freshKeyRetry.status).toBe('RESERVED');
+  });
 });
 
-describe('AiUsageService — concurrency', () => {
+describe('AiUsageService — concurrency (the race-condition fix itself)', () => {
   beforeEach(() => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', BUSINESS_PLAN));
   });
 
-  it('double confirmation concurrent (same idempotencyKey) never double-counts — at most one consumption', async () => {
+  // Test 1
+  it('quota=5, two DIFFERENT tools costing 5 each, concurrent reservations: only one RESERVED, the other REJECTED before any handler could run', async () => {
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 5 });
+
+    const [a, b] = await Promise.all([
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_etsy_listing', idempotencyKey: 'action:a-2' }),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual(['REJECTED', 'RESERVED']);
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot!.unitsConsumed + snapshot!.unitsReserved).toBeLessThanOrEqual(5); // never overshoots
+  });
+
+  // Test 2
+  it('quota=5, A costs 3 and B costs 3 concurrently: only one reserves, final consumed = 3 once finalized', async () => {
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 5 });
+
+    const [a, b] = await Promise.all([
+      AiUsageService.reserveUsage('ws-1', { toolName: 'search_products', idempotencyKey: 'tool:conv-1:tu-a' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'update_listing', idempotencyKey: 'action:a-1' }),
+    ]);
+
+    const results = [a, b];
+    const winner = results.find((r) => r.status === 'RESERVED')!;
+    const loser = results.find((r) => r.status === 'REJECTED')!;
+    expect(winner).toBeDefined();
+    expect(loser).toBeDefined();
+
+    const winnerKey = winner === a ? 'tool:conv-1:tu-a' : 'action:a-1';
+    await AiUsageService.finalizeUsage('ws-1', winnerKey);
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsConsumed).toBe(3);
+    expect(snapshot?.unitsReserved).toBe(0);
+  });
+
+  // Test 3
+  it('quota=10, A costs 5 and B costs 5 concurrently: BOTH can reserve, final consumed = 10 once both finalized', async () => {
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 10 });
+
+    const [a, b] = await Promise.all([
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_etsy_listing', idempotencyKey: 'action:a-2' }),
+    ]);
+
+    expect(a.status).toBe('RESERVED');
+    expect(b.status).toBe('RESERVED');
+
+    await Promise.all([
+      AiUsageService.finalizeUsage('ws-1', 'action:a-1'),
+      AiUsageService.finalizeUsage('ws-1', 'action:a-2'),
+    ]);
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsConsumed).toBe(10);
+    expect(snapshot?.unitsReserved).toBe(0);
+  });
+
+  // Test 4
+  it('quota=5, A reserves 5 then its handler fails (released): unitsConsumed=0, unitsReserved=0, a new 5-unit reservation then succeeds', async () => {
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 5 });
+
+    const reserved = await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+    expect(reserved.status).toBe('RESERVED');
+
+    const released = await AiUsageService.releaseUsage('ws-1', 'action:a-1');
+    expect(released.status).toBe('RELEASED');
+
+    const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
+    expect(snapshot?.unitsConsumed).toBe(0);
+    expect(snapshot?.unitsReserved).toBe(0);
+
+    const next = await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_etsy_listing', idempotencyKey: 'action:a-2' });
+    expect(next.status).toBe('RESERVED');
+  });
+
+  // Test 5
+  it('two concurrent reservations under the SAME idempotencyKey (double confirmation): only one real reservation, at most one consumption', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 100 });
 
     const [a, b] = await Promise.all([
-      AiUsageService.recordUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
-      AiUsageService.recordUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }),
     ]);
 
-    expect(a.status).toBe('RECORDED');
-    expect(b.status).toBe('RECORDED');
+    expect(a.status).toBe('RESERVED');
+    expect(b.status).toBe('RESERVED');
     expect(a.eventId).toBe(b.eventId); // same underlying event — only one really won the insert
+
+    await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
+    // A second finalize (as if the "losing" caller also tried to finalize) must never double-count.
+    await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
 
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
     expect(snapshot?.unitsConsumed).toBe(5); // publish_listing's own cost, counted exactly once
   });
 
-  it('two DIFFERENT concurrent consumptions that would together exceed the limit never both succeed', async () => {
-    overrideStore.set('ws-1', { monthlyUnitsLimit: 5 });
+  // Test 6 — two DIFFERENT AgentActions sharing the same workspace quota
+  it('two different AgentActions (different actionIds) concurrently: shared quota respected, never both reserve beyond the limit', async () => {
+    overrideStore.set('ws-1', { monthlyUnitsLimit: 8 });
 
     const [a, b] = await Promise.all([
-      AiUsageService.recordUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }), // 5 units
-      AiUsageService.recordUsage('ws-1', { toolName: 'publish_etsy_listing', idempotencyKey: 'action:a-2' }), // 5 units
+      AiUsageService.reserveUsage('ws-1', { toolName: 'send_to_fulfillment', idempotencyKey: 'action:a-1', actionId: 'a-1' }), // 5
+      AiUsageService.reserveUsage('ws-1', { toolName: 'send_to_fulfillment', idempotencyKey: 'action:a-2', actionId: 'a-2' }), // 5
     ]);
 
     const statuses = [a.status, b.status].sort();
-    expect(statuses).toEqual(['RECORDED', 'REJECTED']); // exactly one wins, never both
+    expect(statuses).toEqual(['REJECTED', 'RESERVED']); // 5+5=10 > 8, only one fits
 
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
-    expect(snapshot?.unitsConsumed).toBe(5); // never 10
+    expect(snapshot!.unitsReserved).toBeLessThanOrEqual(8);
   });
 
   it('a period row is created exactly once under concurrent first use of the same period', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 100 });
 
     await Promise.all([
-      AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' }),
-      AiUsageService.recordUsage('ws-1', { toolName: 'get_orders', idempotencyKey: 'tool:conv-1:tu-2' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' }),
+      AiUsageService.reserveUsage('ws-1', { toolName: 'get_orders', idempotencyKey: 'tool:conv-1:tu-2' }),
     ]);
 
     expect(periodStore.size).toBe(1); // one row for the (workspace, period) pair, never two
     const snapshot = await AiUsageService.getUsageForCurrentPeriod('ws-1');
-    expect(snapshot?.unitsConsumed).toBe(2); // both 1-unit reads counted
+    expect(snapshot?.unitsReserved).toBe(2); // both 1-unit reads reserved
   });
 });
 
@@ -289,7 +517,9 @@ describe('AiUsageService — plan upgrade / downgrade / renewal', () => {
     const period = { currentPeriodStart: new Date('2026-03-10T00:00:00.000Z'), currentPeriodEnd: new Date('2026-04-10T00:00:00.000Z') };
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', FREE_PLAN, period));
 
-    await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' }); // Free plan: 50/month, consumes 1
+    const r = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' }); // Free plan: 50/month
+    await AiUsageService.finalizeUsage('ws-1', 'tool:conv-1:tu-1');
+    expect(r.status).toBe('RESERVED');
 
     // "Upgrade" mid-period: same period boundaries (a real Stripe upgrade
     // typically keeps them), new plan.
@@ -304,12 +534,13 @@ describe('AiUsageService — plan upgrade / downgrade / renewal', () => {
     const period = { currentPeriodStart: new Date('2026-03-10T00:00:00.000Z'), currentPeriodEnd: new Date('2026-04-10T00:00:00.000Z') };
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', BUSINESS_PLAN, period));
 
-    await AiUsageService.recordUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }); // 5 units
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' }); // 5 units
+    await AiUsageService.finalizeUsage('ws-1', 'action:a-1');
 
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', FREE_PLAN, period));
 
-    const check = await AiUsageService.hasQuotaRemaining('ws-1', 'publish_listing'); // 5 + 5 = 10 > Free's 50? actually Free=50 allows it
-    expect(check.allowed).toBe(true); // still well under Free's own 50/month default
+    const check = await AiUsageService.hasQuotaRemaining('ws-1', 'publish_listing'); // 5 + 5 = 10, well under Free's own 50
+    expect(check.allowed).toBe(true);
     expect(periodStore.size).toBe(1); // same period row, not recreated
   });
 
@@ -320,7 +551,8 @@ describe('AiUsageService — plan upgrade / downgrade / renewal', () => {
         currentPeriodEnd: new Date('2026-04-10T00:00:00.000Z'),
       })
     );
-    await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    await AiUsageService.finalizeUsage('ws-1', 'tool:conv-1:tu-1');
 
     // Renewal: Stripe's webhook advances the real period boundaries.
     workspaceFindUniqueMock.mockResolvedValue(
@@ -332,9 +564,9 @@ describe('AiUsageService — plan upgrade / downgrade / renewal', () => {
 
     const snapshotBeforeAnyNewUsage = await AiUsageService.getUsageForCurrentPeriod('ws-1');
     expect(snapshotBeforeAnyNewUsage?.unitsConsumed).toBe(0); // the new period starts fresh — a pure read never creates a row
-    expect(periodStore.size).toBe(1); // read-only: no new row created just by checking
+    expect(periodStore.size).toBe(1);
 
-    await AiUsageService.recordUsage('ws-1', { toolName: 'get_orders', idempotencyKey: 'tool:conv-2:tu-1' });
+    await AiUsageService.reserveUsage('ws-1', { toolName: 'get_orders', idempotencyKey: 'tool:conv-2:tu-1' });
     expect(periodStore.size).toBe(2); // a genuinely new, independent row for the new period
     const oldRow = [...periodStore.values()].find((r) => r.periodStart.toISOString() === '2026-03-10T00:00:00.000Z');
     expect(oldRow.unitsConsumed).toBe(1); // the old period's row is preserved, untouched, for audit — never merged or reset
@@ -357,9 +589,9 @@ describe('AiUsageService — Enterprise override', () => {
     expect(snapshot?.unitsLimit).toBe(5000);
   });
 
-  it('an invalid override (zero) fails closed — refuses usage rather than falling back to the plan default', async () => {
+  it('an invalid override (zero) fails closed — refuses a reservation rather than falling back to the plan default', async () => {
     overrideStore.set('ws-1', { monthlyUnitsLimit: 0 });
-    const result = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
     expect(result.status).toBe('REJECTED');
     expect(result.reason).toBe('no_quota_configured');
   });
@@ -385,14 +617,14 @@ describe('AiUsageService — fail-closed edge cases', () => {
 
   it('subscription references a plan not in PLAN_MONTHLY_AI_UNITS -> refused, never treated as unlimited', async () => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspaceWithSubscription('active', { ...BUSINESS_PLAN, name: 'some_future_plan' }));
-    const result = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
     expect(result.status).toBe('REJECTED');
     expect(result.reason).toBe('no_quota_configured');
   });
 
-  it('an unexpected DB error resolving the subscription -> fails closed, never throws past recordUsage', async () => {
+  it('an unexpected DB error resolving the subscription -> fails closed, never throws past reserveUsage', async () => {
     workspaceFindUniqueMock.mockRejectedValue(new Error('connection refused: raw internal detail'));
-    const result = await AiUsageService.recordUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
+    const result = await AiUsageService.reserveUsage('ws-1', { toolName: 'get_order', idempotencyKey: 'tool:conv-1:tu-1' });
     expect(result.status).toBe('REJECTED');
   });
 
@@ -410,12 +642,12 @@ describe('AiUsageService — fail-closed edge cases', () => {
     );
     overrideStore.clear();
 
-    await AiUsageService.recordUsage('ws-A', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
+    await AiUsageService.reserveUsage('ws-A', { toolName: 'publish_listing', idempotencyKey: 'action:a-1' });
     const snapshotA = await AiUsageService.getUsageForCurrentPeriod('ws-A');
     const snapshotB = await AiUsageService.getUsageForCurrentPeriod('ws-B');
 
-    expect(snapshotA?.unitsConsumed).toBe(5);
-    expect(snapshotB?.unitsConsumed).toBe(0);
+    expect(snapshotA?.unitsReserved).toBe(5);
+    expect(snapshotB?.unitsReserved).toBe(0);
   });
 });
 

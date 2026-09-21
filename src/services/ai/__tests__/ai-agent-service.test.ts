@@ -45,7 +45,9 @@ vi.mock('@/services/ai/AiEntitlementService', async () => {
 vi.mock('@/services/ai/AiUsageService', () => ({
   AiUsageService: {
     hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
-    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+    reserveUsage: vi.fn().mockResolvedValue({ status: 'RESERVED', eventId: 'test-usage-event', units: 0 }),
+    finalizeUsage: vi.fn().mockResolvedValue({ status: 'RECORDED' }),
+    releaseUsage: vi.fn().mockResolvedValue({ status: 'RELEASED' }),
   },
 }));
 
@@ -423,7 +425,7 @@ describe('AiAgentService.getConversationHistory (Phase 11D)', () => {
   });
 });
 
-describe('AiAgentService — AiUsageService.recordUsage is called only after a real, non-error tool success', () => {
+describe('AiAgentService — AiUsageService reserve/finalize/release wiring (race-condition fix)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (AiAgentService as any).client = null;
@@ -431,13 +433,14 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
     prismaMock.agentConversation.create.mockResolvedValue({ id: 'conv-new' });
     prismaMock.agentMessage.findMany.mockResolvedValue([]);
     prismaMock.agentMessage.create.mockResolvedValue({});
+    (AiUsageService.reserveUsage as any).mockResolvedValue({ status: 'RESERVED', eventId: 'test-usage-event', units: 0 });
   });
 
   afterEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
-  it('a real, successful get_order call records usage exactly once, with the real Anthropic toolUseId', async () => {
+  it('the handler runs only after reserveUsage, and a real successful get_order call finalizes usage exactly once, with the real Anthropic toolUseId', async () => {
     prismaMock.order.findFirst.mockResolvedValue(fakeOrder);
     createMock
       .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }, 'tu-real-1'))
@@ -446,14 +449,17 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
     const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
 
     expect(turn.toolCalls[0].result).not.toHaveProperty('error');
-    expect(AiUsageService.recordUsage).toHaveBeenCalledTimes(1);
-    expect(AiUsageService.recordUsage).toHaveBeenCalledWith(
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledWith(
       'ws-1',
       expect.objectContaining({ toolName: 'get_order', idempotencyKey: expect.stringContaining('tu-real-1'), toolUseId: 'tu-real-1' })
     );
+    expect(AiUsageService.finalizeUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).toHaveBeenCalledWith('ws-1', expect.stringContaining('tu-real-1'));
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
   });
 
-  it('invalid tool input (validation refused before execution) -> the handler never runs, recordUsage never called', async () => {
+  it('invalid tool input (validation refused before execution) -> the handler never runs, reserveUsage never called', async () => {
     createMock
       .mockResolvedValueOnce(toolUseResponse('get_order', {})) // missing orderId
       .mockResolvedValueOnce(textOnlyResponse('I need an order id.'));
@@ -461,10 +467,24 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
     await AiAgentService.sendMessage('ws-1', 'user-1', 'check my order');
 
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
   });
 
-  it('a thrown handler error -> recordUsage never called', async () => {
+  it('reservation REJECTED -> the handler never runs at all, finalize/release never called', async () => {
+    (AiUsageService.reserveUsage as any).mockResolvedValueOnce({ status: 'REJECTED', eventId: 'evt-1', units: 1, reason: 'quota_exceeded' });
+    createMock
+      .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
+      .mockResolvedValueOnce(textOnlyResponse('Quota exceeded.'));
+
+    const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
+
+    expect((turn.toolCalls[0].result as any).error).toMatch(/quota/i);
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+  });
+
+  it('a thrown handler error -> the reservation is released (never finalized)', async () => {
     prismaMock.order.findFirst.mockRejectedValue(new Error('db exploded'));
     createMock
       .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
@@ -473,10 +493,12 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
     const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
 
     expect(turn.toolCalls[0].result).toEqual({ error: 'Tool execution failed' });
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.reserveUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.releaseUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
   });
 
-  it('a controlled business error result (no throw, e.g. order not found) -> recordUsage never called', async () => {
+  it('a controlled business error result (no throw, e.g. order not found) -> the reservation is released, never finalized', async () => {
     prismaMock.order.findFirst.mockResolvedValue(null); // get_order returns {error: '...'} without throwing
     createMock
       .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
@@ -485,10 +507,11 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
     const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
 
     expect(turn.toolCalls[0].result).toEqual({ error: 'Order not found in this workspace.' });
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
   });
 
-  it('entitlement refused -> the handler never runs, recordUsage never called', async () => {
+  it('entitlement refused -> the handler never runs, reserveUsage never called', async () => {
     (AiEntitlementService.canUseCapability as any).mockResolvedValueOnce(false);
     createMock
       .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
@@ -498,19 +521,6 @@ describe('AiAgentService — AiUsageService.recordUsage is called only after a r
 
     expect((turn.toolCalls[0].result as any).error).toContain('capability');
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
-  });
-
-  it('quota exceeded -> the handler never runs, recordUsage never called', async () => {
-    (AiUsageService.hasQuotaRemaining as any).mockResolvedValueOnce({ allowed: false, reason: 'quota_exceeded' });
-    createMock
-      .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
-      .mockResolvedValueOnce(textOnlyResponse('Quota exceeded.'));
-
-    const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
-
-    expect((turn.toolCalls[0].result as any).error).toMatch(/quota/i);
-    expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
-    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
   });
 });

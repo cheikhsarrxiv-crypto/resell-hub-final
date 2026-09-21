@@ -3,7 +3,6 @@ import { createLogger } from '@/lib/logger';
 import { AiToolRegistry } from './AiToolRegistry';
 import { AiEntitlementService, getRequiredCapabilityForTool } from './AiEntitlementService';
 import { AiUsageService } from './AiUsageService';
-import { getToolUsageUnits } from './aiUsageConfig';
 import type { AgentToolCategory } from './tools/types';
 import {
   type AgentActionStatus,
@@ -262,22 +261,28 @@ export class AiActionService {
       return toView(failed);
     }
 
-    // AiUsageService — checked before the handler runs, same reasoning as
-    // the entitlement re-check above (a confirmation can arrive minutes
-    // after proposeAction's own pre-check in AiAgentService). Nothing is
-    // ever consumed here — recordUsage only ever runs below, after the
-    // handler has already succeeded (see that call's own comment).
-    const requiredUnits = getToolUsageUnits(current.type);
-    if (requiredUnits !== null) {
-      const quota = await AiUsageService.hasQuotaRemaining(workspaceId, current.type);
-      if (!quota.allowed) {
-        const failed = await prisma.agentAction.update({
-          where: { id: actionId },
-          data: { status: 'FAILED', error: 'This workspace has used its AI usage quota for the current billing period.', executedAt: new Date() },
-        });
-        logger.info('ACTION_FAILED_QUOTA_EXCEEDED', { actionId, workspaceId, toolName: current.type });
-        return toView(failed);
-      }
+    // AiUsageService — race-condition fix: a handler is only ever allowed
+    // to run once reserveUsage has ATOMICALLY claimed its units (never on
+    // the strength of a plain read like the old hasQuotaRemaining
+    // pre-check — see AiUsageService's own header comment on why that was
+    // unsafe under two concurrent AgentActions sharing one workspace
+    // quota). idempotencyKey = `action:${actionId}` — the same key used
+    // for the rest of this action's lifecycle, so a retried confirm never
+    // reserves twice.
+    const usageIdempotencyKey = `action:${actionId}`;
+    const reservation = await AiUsageService.reserveUsage(workspaceId, {
+      toolName: current.type,
+      idempotencyKey: usageIdempotencyKey,
+      conversationId: current.conversationId,
+      actionId,
+    });
+    if (reservation.status !== 'RESERVED') {
+      const failed = await prisma.agentAction.update({
+        where: { id: actionId },
+        data: { status: 'FAILED', error: 'This workspace has used its AI usage quota for the current billing period.', executedAt: new Date() },
+      });
+      logger.info('ACTION_FAILED_QUOTA_EXCEEDED', { actionId, workspaceId, toolName: current.type, reservationStatus: reservation.status });
+      return toView(failed);
     }
 
     try {
@@ -296,27 +301,22 @@ export class AiActionService {
         userId: current.userId,
       });
 
-      // AiUsageService — recorded only now, after the handler has
-      // genuinely succeeded (no throw) AND returned a real result rather
-      // than a controlled business refusal (the same `{error: string}`
-      // shape convention checked elsewhere in this codebase — e.g.
+      // A controlled business refusal (the same `{error: string}` shape
+      // convention checked elsewhere in this codebase — e.g.
       // send_to_fulfillment's own KNOWN_FULFILLMENT_ERRORS returns
-      // `{error}` without throwing, and must not be billed either). V1
-      // rule: FAILED/CANCELLED/EXPIRED never reach this line at all, so
-      // they always consume 0 — see this method's own catch block and
-      // cancelAction/maybeExpire, neither of which ever calls recordUsage.
+      // `{error}` without throwing) did not really succeed — release the
+      // reservation, never finalize it. V1 rule preserved exactly:
+      // FAILED/CANCELLED/EXPIRED, and now also a released reservation,
+      // all consume 0.
       const resultSucceeded = !(
         result &&
         typeof result === 'object' &&
         typeof (result as Record<string, unknown>).error === 'string'
       );
       if (resultSucceeded) {
-        await AiUsageService.recordUsage(workspaceId, {
-          toolName: current.type,
-          idempotencyKey: `action:${actionId}`,
-          conversationId: current.conversationId,
-          actionId,
-        });
+        await AiUsageService.finalizeUsage(workspaceId, usageIdempotencyKey);
+      } else {
+        await AiUsageService.releaseUsage(workspaceId, usageIdempotencyKey);
       }
 
       const completed = await prisma.agentAction.update({
@@ -327,6 +327,14 @@ export class AiActionService {
       return toView(completed);
     } catch (error) {
       logger.error('ACTION_FAILED', error instanceof Error ? error : String(error), { actionId, workspaceId });
+      // The reservation must never stay held forever just because the
+      // handler threw — release it (best-effort: a release failure here
+      // must never mask the real FAILED transition below, exactly the
+      // same "never let usage bookkeeping block the real state machine"
+      // principle already applied to finalize/release above).
+      await AiUsageService.releaseUsage(workspaceId, usageIdempotencyKey).catch((releaseError) => {
+        logger.error('ACTION_USAGE_RELEASE_FAILED', releaseError instanceof Error ? releaseError : String(releaseError), { actionId, workspaceId });
+      });
       const failed = await prisma.agentAction.update({
         where: { id: actionId },
         data: { status: 'FAILED', error: 'Action execution failed', executedAt: new Date() },
