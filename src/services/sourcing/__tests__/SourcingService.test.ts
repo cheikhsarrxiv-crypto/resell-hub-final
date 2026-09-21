@@ -76,7 +76,18 @@ describe('SourcingService.search', () => {
     // Same currency (EUR->EUR) is the 'identical_currency' tier of
     // CurrencyConversionService — a real, always-correct rate of 1, not
     // a network call — so normalizedPriceEur === price here.
-    expect(response.results).toEqual([{ ...result, normalizedPriceEur: 10, estimatedKnownCostEur: 10 }]);
+    // estimatedKnownCostEur stays undefined (Phase 3): this fakeResult has
+    // no shippingCost at all, which is a real, reportable "shipping
+    // unknown" gap, not "nothing to add" — see attachLandedCost.
+    expect(response.results).toEqual([
+      {
+        ...result,
+        normalizedPriceEur: 10,
+        unknownCostFactors: ['shipping_unknown'],
+        matchReasons: [],
+        warnings: ["Authenticity is only the seller's own claim — not independently verified.", "Landed cost is incomplete — this listing's shipping cost is not reported."],
+      },
+    ]);
     expect(response.providerErrors).toEqual([]);
     expect(response.totalResults).toBe(1);
   });
@@ -360,23 +371,55 @@ describe('SourcingService.search', () => {
       expect(response.results[0].normalizedPriceEur).toBe(10);
     });
 
-    it('unknownCostFactors (a label, no amount) never blocks estimatedKnownCostEur — only a real cost line that fails to convert does', async () => {
-      const result = fakeResult({ price: 10, currency: 'EUR', unknownCostFactors: ['import taxes unknown'] });
+    it('a pre-existing unknownCostFactors label (e.g. from a provider) never blocks estimatedKnownCostEur by itself — only a real cost line that fails to convert (or a genuinely unreported shippingCost) does', async () => {
+      // shippingCost is defined+convertible here so the ONLY thing under
+      // test is that an unrelated, pre-existing unknownCostFactors entry
+      // doesn't itself poison the sum.
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR', unknownCostFactors: ['import_tax_unknown'] });
       getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
 
       const response = await SourcingService.search({ query: 'x' });
 
       expect(response.results[0].estimatedKnownCostEur).toBe(10);
-      expect(response.results[0].unknownCostFactors).toEqual(['import taxes unknown']);
+      expect(response.results[0].unknownCostFactors).toEqual(['import_tax_unknown']);
     });
 
-    it('a knownAdditionalCosts entry that fails to convert leaves estimatedKnownCostEur undefined entirely', async () => {
-      const result = fakeResult({ price: 10, currency: 'EUR', knownAdditionalCosts: [{ type: 'handling', amount: 3, currency: 'JPY' }] });
+    it('a knownAdditionalCosts entry that fails to convert leaves estimatedKnownCostEur undefined entirely, and records currency_conversion_unavailable', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR', knownAdditionalCosts: [{ type: 'handling', amount: 3, currency: 'JPY' }] });
       getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
 
       const response = await SourcingService.search({ query: 'x' });
 
       expect(response.results[0].estimatedKnownCostEur).toBeUndefined();
+      expect(response.results[0].unknownCostFactors).toEqual(['currency_conversion_unavailable']);
+    });
+
+    it('Phase 3 — a real reported shippingCost of 0 counts as known, never blocking the total', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].estimatedKnownCostEur).toBe(10);
+    });
+
+    it('Phase 3 — shippingCost never reported at all blocks estimatedKnownCostEur and records shipping_unknown', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].estimatedKnownCostEur).toBeUndefined();
+      expect(response.results[0].unknownCostFactors).toEqual(['shipping_unknown']);
+    });
+
+    it('an unconvertible shippingCost currency records currency_conversion_unavailable', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 500, shippingCostCurrency: 'JPY' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].unknownCostFactors).toEqual(['currency_conversion_unavailable']);
     });
   });
 
@@ -401,6 +444,216 @@ describe('SourcingService.search', () => {
       expect(response.results).toHaveLength(2);
       expect(response.results[0].currency).toBe('EUR');
       expect(response.results[1].currency).toBe('JPY');
+    });
+  });
+
+  describe('Phase 3 — robust price filtering', () => {
+    it('excludes a result whose normalizedPriceEur is confidently outside the requested maxPrice', async () => {
+      const cheap = fakeResult({ sourceUrl: 'https://x/1', price: 100, currency: 'EUR' });
+      const expensive = fakeResult({ sourceUrl: 'https://x/2', price: 900, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [cheap, expensive] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', maxPrice: 400, currency: 'EUR' });
+
+      expect(response.results.map((r) => r.sourceUrl)).toEqual(['https://x/1']);
+    });
+
+    it('never excludes a result whose price comparison is merely uncertain (no reliable EUR rate) — keeps it with a warning', async () => {
+      const uncertain = fakeResult({ price: 100, currency: 'JPY' }); // no rate configured in this test env
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [uncertain] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', maxPrice: 400, currency: 'EUR' });
+
+      expect(response.results).toHaveLength(1);
+      expect(response.results[0].warnings?.some((w) => /uncertain/i.test(w))).toBe(true);
+    });
+
+    it('no minPrice/maxPrice requested -> nothing is excluded on price grounds', async () => {
+      const expensive = fakeResult({ price: 99999, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [expensive] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results).toHaveLength(1);
+    });
+
+    it('provider capability filtering: a provider with NO native price filter (e.g. one that ignores maxPrice, like Etsy) still gets a correct final result via SourcingService\'s own local, currency-aware filtering', async () => {
+      // Simulates a provider that (like EtsySourcingProvider) never applies
+      // minPrice/maxPrice itself and just returns everything — proving the
+      // orchestrator's OWN local filter is what actually enforces the bound,
+      // not blind trust that every provider filtered correctly.
+      const withinBounds = fakeResult({ source: 'etsy', sourceUrl: 'https://etsy/1', price: 300, currency: 'EUR' });
+      const outsideBounds = fakeResult({ source: 'etsy', sourceUrl: 'https://etsy/2', price: 900, currency: 'EUR' });
+      const providerIgnoringPriceFilter = makeFakeProvider('etsy', {
+        searchProducts: vi.fn().mockResolvedValue({ results: [withinBounds, outsideBounds] }),
+      });
+      getAllProvidersMock.mockReturnValue([providerIgnoringPriceFilter]);
+
+      const response = await SourcingService.search({ query: 'x', maxPrice: 400, currency: 'EUR' });
+
+      expect(response.results.map((r) => r.sourceUrl)).toEqual(['https://etsy/1']);
+    });
+  });
+
+  describe('Phase 3 — matchReasons/warnings wiring', () => {
+    it('every result carries real matchReasons/warnings arrays from OpportunityRankingService, never omitted', async () => {
+      const result = fakeResult({ price: 100, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', brand: 'ebay' }); // 'Item' title won't match, just proving the arrays exist
+
+      expect(Array.isArray(response.results[0].matchReasons)).toBe(true);
+      expect(Array.isArray(response.results[0].warnings)).toBe(true);
+    });
+  });
+
+  describe('Phase 3 — sort options', () => {
+    const a = fakeResult({ sourceUrl: 'https://x/a', price: 50, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+    const b = fakeResult({ sourceUrl: 'https://x/b', price: 20, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+
+    it('price_asc sorts by the raw original price, ascending', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+      const response = await SourcingService.search({ query: 'x', sort: 'price_asc' });
+      expect(response.results.map((r) => r.price)).toEqual([20, 50]);
+    });
+
+    it('price_desc sorts by the raw original price, descending', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+      const response = await SourcingService.search({ query: 'x', sort: 'price_desc' });
+      expect(response.results.map((r) => r.price)).toEqual([50, 20]);
+    });
+
+    it('known_cost_asc sorts by estimatedKnownCostEur, ascending, unknown last', async () => {
+      const known = fakeResult({ sourceUrl: 'https://x/1', price: 100, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+      const unknown = fakeResult({ sourceUrl: 'https://x/2', price: 10, currency: 'EUR' }); // no shippingCost -> estimatedKnownCostEur undefined
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [unknown, known] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', sort: 'known_cost_asc' });
+
+      expect(response.results.map((r) => r.sourceUrl)).toEqual(['https://x/1', 'https://x/2']);
+    });
+
+    it('default (omitted sort) is unchanged from Phase 2: normalized_price_asc', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+      const response = await SourcingService.search({ query: 'x' });
+      expect(response.results.map((r) => r.price)).toEqual([20, 50]);
+    });
+
+    it("'match' uses the real, documented OpportunityRankingService.compareByMatch comparator", async () => {
+      const strongMatch = fakeResult({ sourceUrl: 'https://x/1', title: 'Prada Cut Out Sneakers', price: 300, currency: 'EUR' });
+      const weakMatch = fakeResult({ sourceUrl: 'https://x/2', title: 'Something else entirely', price: 10, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [weakMatch, strongMatch] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', brand: 'Prada', sort: 'match' });
+
+      expect(response.results[0].sourceUrl).toBe('https://x/1');
+    });
+  });
+
+  describe('Phase 3 — margin preview (targetResalePrice)', () => {
+    it('attaches estimatedMargin/estimatedMarginPercent only when targetResalePrice is provided AND estimatedKnownCostEur is computable', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', targetResalePrice: 20 });
+
+      expect(response.results[0].estimatedMargin).toBe(10);
+      expect(response.results[0].estimatedMarginPercent).toBe(50);
+    });
+
+    it('never computes a margin when targetResalePrice is absent — no invented resale price', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].estimatedMargin).toBeUndefined();
+      expect(response.results[0].estimatedMarginPercent).toBeUndefined();
+    });
+
+    it('never computes a margin when estimatedKnownCostEur itself is undefined (e.g. shipping unknown)', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR' }); // no shippingCost -> estimatedKnownCostEur undefined
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', targetResalePrice: 20 });
+
+      expect(response.results[0].estimatedMargin).toBeUndefined();
+    });
+  });
+
+  describe('Phase 3 — provider fairness / balancing', () => {
+    it('no single provider dominates the final capped result set when it returned far more raw candidates than another', async () => {
+      const ebayResults = Array.from({ length: 6 }, (_, i) => fakeResult({ source: 'ebay', sourceUrl: `https://ebay/${i}`, price: i, currency: 'EUR' }));
+      const etsyResults = Array.from({ length: 2 }, (_, i) => fakeResult({ source: 'etsy', sourceUrl: `https://etsy/${i}`, price: 100 + i, currency: 'EUR' }));
+      const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: ebayResults }) });
+      const etsy = makeFakeProvider('etsy', { searchProducts: vi.fn().mockResolvedValue({ results: etsyResults }) });
+      getAllProvidersMock.mockReturnValue([ebay, etsy]);
+
+      const response = await SourcingService.search({ query: 'x', limit: 4 });
+
+      expect(response.results).toHaveLength(4);
+      const sources = new Set(response.results.map((r) => r.source));
+      expect(sources.has('etsy')).toBe(true);
+      expect(sources.has('ebay')).toBe(true);
+    });
+
+    it('fewer combined results than the limit are all kept, untouched by balancing', async () => {
+      const ebayResults = [fakeResult({ sourceUrl: 'https://ebay/1' })];
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: ebayResults }) })]);
+
+      const response = await SourcingService.search({ query: 'x', limit: 20 });
+
+      expect(response.results).toHaveLength(1);
+    });
+  });
+
+  describe('Phase 3 — observability (providerLatencyMs)', () => {
+    it('reports a real latency entry for every provider that was actually searched', async () => {
+      const ebay = makeFakeProvider('ebay');
+      const etsy = makeFakeProvider('etsy');
+      getAllProvidersMock.mockReturnValue([ebay, etsy]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(typeof response.providerLatencyMs.ebay).toBe('number');
+      expect(typeof response.providerLatencyMs.etsy).toBe('number');
+    });
+
+    it('a skipped provider has no latency entry — it was never called', async () => {
+      const ebay = makeFakeProvider('ebay');
+      const etsy = makeFakeProvider('etsy');
+      getAllProvidersMock.mockReturnValue([ebay, etsy]);
+
+      const response = await SourcingService.search({ query: 'x', providers: ['ebay'] });
+
+      expect(response.providerLatencyMs.ebay).toBeDefined();
+      expect(response.providerLatencyMs.etsy).toBeUndefined();
+    });
+
+    it('SOURCE_NOT_CONFIGURED still returns an (empty) providerLatencyMs, never undefined', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { isConfigured: false })]);
+      const response = await SourcingService.search({ query: 'x' });
+      expect(response.providerLatencyMs).toEqual({});
+    });
+
+    it('a provider that throws still gets a real latency entry recorded', async () => {
+      const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockRejectedValue(new Error('boom')) });
+      getAllProvidersMock.mockReturnValue([ebay]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(typeof response.providerLatencyMs.ebay).toBe('number');
+    });
+  });
+
+  describe('Phase 3 — model/size/color folded into provider queries', () => {
+    it('model/size/color are passed through unchanged to every provider, same as brand/category', async () => {
+      const ebay = makeFakeProvider('ebay');
+      getAllProvidersMock.mockReturnValue([ebay]);
+
+      await SourcingService.search({ query: 'x', model: 'Cut', size: '42', color: 'Black' });
+
+      expect(ebay.searchProducts).toHaveBeenCalledWith(expect.objectContaining({ model: 'Cut', size: '42', color: 'Black' }));
     });
   });
 

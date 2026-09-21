@@ -199,6 +199,17 @@ describe('EbayBrowseSourcingProvider.searchProducts', () => {
     expect(url).toContain('offset=10');
   });
 
+  it('Phase 3: model/size/color are folded into the free-text keyword search, never a structured filter', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provider.searchProducts({ query: 'sneakers', model: 'Cut', size: '42', color: 'Black' });
+
+    const [url] = fetchMock.mock.calls[0];
+    const decoded = decodeURIComponent(url).replace(/\+/g, ' ');
+    expect(decoded).toContain('q=sneakers Cut 42 Black');
+  });
+
   it('condition "new" -> sends the confirmed conditions:{NEW} filter', async () => {
     const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
     vi.stubGlobal('fetch', fetchMock);

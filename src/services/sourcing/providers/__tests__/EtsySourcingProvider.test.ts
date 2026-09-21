@@ -133,6 +133,17 @@ describe('EtsySourcingProvider.searchProducts', () => {
     expect(urlWorldwide).toBe(urlDefault);
   });
 
+  it('Phase 3: model/size/color are folded into the free-text keyword search, never a structured filter', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provider.searchProducts({ query: 'bag', model: 'Cut', size: '42', color: 'Black' });
+
+    const [url] = fetchMock.mock.calls[0];
+    const decoded = decodeURIComponent(url).replace(/\+/g, ' ');
+    expect(decoded).toContain('keywords=bag Cut 42 Black');
+  });
+
   it('pagination: forwards limit/offset to the request', async () => {
     const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
     vi.stubGlobal('fetch', fetchMock);

@@ -216,8 +216,10 @@ export class EtsySourcingProvider implements SourcingProvider {
       // completely different numeric space from eBay's category_ids, and
       // this session has no confirmed mapping from a free-text or
       // eBay-shaped category value to a real Etsy taxonomy_id. Guessing
-      // one could silently misfilter into the wrong category.
-      const keywords = [query.query, query.brand, query.category].filter(Boolean).join(' ');
+      // one could silently misfilter into the wrong category. Phase 3:
+      // model/size/color get the same treatment — no confirmed, safe
+      // structured filter for any of them on this endpoint.
+      const keywords = [query.query, query.brand, query.category, query.model, query.size, query.color].filter(Boolean).join(' ');
 
       const params = new URLSearchParams({
         keywords,

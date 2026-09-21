@@ -19,6 +19,12 @@ const searchProductsInputSchema = z
   .object({
     query: z.string().min(1, 'query is required').max(200),
     brand: z.string().max(100).optional(),
+    // Phase 3 — free text, folded into the keyword search by every
+    // provider (like brand/category) — no provider has a confirmed
+    // structured filter for any of these.
+    model: z.string().max(100).optional(),
+    size: z.string().max(50).optional(),
+    color: z.string().max(50).optional(),
     // Free text OR a numeric eBay category id — see
     // EbayBrowseSourcingProvider for exactly how each is handled.
     category: z.string().max(100).optional(),
@@ -39,8 +45,16 @@ const searchProductsInputSchema = z
     // means every configured provider is queried, unchanged from before
     // this field existed.
     providers: z.array(z.enum(SUPPORTED_PROVIDER_NAMES)).min(1).max(SUPPORTED_PROVIDER_NAMES.length).optional(),
+    // Phase 3 — deterministic final ordering of the combined result set;
+    // see NormalizedSearchQuery.sort's own comment for exactly what each
+    // option means. Omitted = 'normalized_price_asc' (unchanged default).
+    sort: z.enum(['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match']).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     offset: z.number().int().min(0).optional(),
+    // Phase 3 — ONLY when set, a margin preview (estimatedMargin/
+    // estimatedMarginPercent) is attached to results whose landed cost is
+    // computable. Never invented: omitted means no margin preview at all.
+    targetResalePrice: z.number().min(0).optional(),
   })
   .refine((data) => (data.minPrice === undefined && data.maxPrice === undefined) || data.currency !== undefined, {
     message: 'currency is required whenever minPrice or maxPrice is set',
@@ -62,11 +76,17 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
     "Each result's normalizedPriceEur (when present) is a real currency conversion, not the authoritative price — always prefer the original price/currency; " +
     'normalizedPriceEur is absent whenever no reliable exchange rate was available, never a guessed value. Combined multi-provider results are sorted by ' +
     'normalizedPriceEur ascending (results with no available rate are listed last), so this doubles as the price comparison the query implies. ' +
-    "estimatedKnownCostEur (when present) sums every cost ADKSY actually knows a real amount for (price + shipping + known fees) — it is NOT a full landed cost " +
-    'when unknownCostFactors is non-empty (e.g. import duties with no known amount); never present it to the user as an all-in total in that case. ' +
-    'Not every provider supports every filter (e.g. Etsy currently ignores minPrice/maxPrice/condition — see providersSearched to know which provider actually ran; ' +
-    'use each result\'s own normalizedPriceEur to judge whether it still fits a price constraint the provider itself could not apply). ' +
-    'This tool does NOT calculate margin — margin requires a resale price and cost inputs this version does not have.',
+    "estimatedKnownCostEur (when present) sums every cost ADKSY actually knows a real amount for (price + shipping + known fees) — it is undefined whenever ANY " +
+    "relevant cost (e.g. shipping) was never reported at all, not just when a conversion failed; see each result's own unknownCostFactors/warnings for exactly why. " +
+    'Never present it to the user as a complete all-in total when warnings mention missing cost data. ' +
+    'A requested minPrice/maxPrice is honored for EVERY provider, even one with no native price filter (e.g. Etsy) — results are filtered against the real, ' +
+    'currency-converted price after the fact; a result whose price comparison could not be confidently resolved is NEVER silently dropped, it is kept with a warning instead. ' +
+    "Each result's matchReasons/warnings are real, computed explanations (never generic marketing text) — matchReasons says exactly why it fits the request " +
+    "(e.g. price within range, requested brand found), warnings names real caveats (e.g. authenticity only seller-claimed, landed cost incomplete). " +
+    "Use `sort` to control ordering: 'match' orders by real constraint matches first, then known landed cost, then authenticity evidence, then price — never an opaque score. " +
+    'Set `targetResalePrice` to get a margin PREVIEW (estimatedMargin/estimatedMarginPercent) on results whose landed cost is known — this never includes a future ' +
+    'marketplace selling fee (none has been chosen yet) and is never computed without an explicit targetResalePrice; never invent one on the reseller\'s behalf. ' +
+    'providerLatencyMs reports real per-provider search time, for transparency only — never used to rank results.',
   category: 'read',
   inputSchema: searchProductsInputSchema,
   jsonSchema: {
@@ -74,6 +94,9 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
     properties: {
       query: { type: 'string', description: 'Free-text search keywords, e.g. "Prada sneakers".' },
       brand: { type: 'string', description: 'Optional brand to narrow the search, e.g. "Prada".' },
+      model: { type: 'string', description: 'Optional model/line, e.g. "Cut" (as in "Prada Cut"). Folded into the keyword search, not a structured filter.' },
+      size: { type: 'string', description: 'Optional size, e.g. "42". Folded into the keyword search, not a structured filter.' },
+      color: { type: 'string', description: 'Optional color. Folded into the keyword search, not a structured filter.' },
       category: { type: 'string', description: 'Optional category — free text, or a numeric eBay category id if known.' },
       minPrice: { type: 'number', description: 'Minimum price. Requires currency to be set.' },
       maxPrice: { type: 'number', description: 'Maximum price. Requires currency to be set.' },
@@ -93,8 +116,17 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
         items: { type: 'string', enum: SUPPORTED_PROVIDER_NAMES as unknown as string[] },
         description: 'Restrict the search to these sourcing providers only, e.g. ["ebay"]. Omit to search every configured provider (default).',
       },
-      limit: { type: 'number', description: 'Max results per marketplace (1-50).' },
+      sort: {
+        type: 'string',
+        enum: ['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match'],
+        description: "Final ordering of the combined result set. Defaults to 'normalized_price_asc'. 'match' orders by real constraint matches, then known landed cost, then authenticity evidence, then price.",
+      },
+      limit: { type: 'number', description: 'Max combined results returned overall (1-50), balanced fairly across providers when more candidates than this were found.' },
       offset: { type: 'number', description: 'Pagination offset.' },
+      targetResalePrice: {
+        type: 'number',
+        description: 'Optional real resale price the reseller has in mind. When set, results whose landed cost is known get a margin preview (estimatedMargin/estimatedMarginPercent). Never invented — omit to skip margin entirely.',
+      },
     },
     required: ['query'],
   },
@@ -122,7 +154,9 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       providersUnavailable: response.providersUnavailable,
       providersSkipped: response.providersSkipped,
       totalResults: response.totalResults,
-      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. No margin is calculated — a real margin needs a resale price and cost inputs this tool does not have yet.",
+      // Phase 3 — observability only, never used to rank/filter results.
+      providerLatencyMs: response.providerLatencyMs,
+      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. estimatedMargin/estimatedMarginPercent (when present) are a landed-cost-only preview, never including a marketplace selling fee, and only ever computed when targetResalePrice was explicitly given — never invented.",
     };
   },
 };

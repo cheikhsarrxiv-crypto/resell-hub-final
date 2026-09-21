@@ -325,8 +325,12 @@ export class EbayBrowseSourcingProvider implements SourcingProvider {
     try {
       const accessToken = await EbayApplicationTokenManager.getAccessToken();
 
+      // Phase 3: model/size/color are free text, folded into the keyword
+      // search exactly like brand — eBay's Browse API has no confirmed,
+      // safe structured filter for any of these (see NormalizedSearchQuery's
+      // own comments on why).
       const params = new URLSearchParams({
-        q: [query.query, query.brand].filter(Boolean).join(' '),
+        q: [query.query, query.brand, query.model, query.size, query.color].filter(Boolean).join(' '),
         limit: String(Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT)),
         offset: String(query.offset ?? 0),
       });

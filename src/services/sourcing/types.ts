@@ -16,7 +16,26 @@ export interface NormalizedSearchQuery {
   /** Free-text keywords (required) — e.g. "Prada sneakers". */
   query: string;
   brand?: string;
+  /**
+   * Phase 3 — free text, e.g. "Cut" (as in "Prada Cut"). Like `category`,
+   * every provider folds this into its own free-text keyword search —
+   * neither eBay's Browse API nor Etsy's Open API v3 has a confirmed,
+   * separate "model" filter parameter, so this is never sent as a
+   * structured filter, only as part of the search string.
+   */
+  model?: string;
   category?: string;
+  /**
+   * Phase 3 — free text (e.g. "42", "M"), folded into keywords the same
+   * way as `model`. Neither current provider has a confirmed, safe
+   * structured size filter (eBay Browse API's item aspect filters were
+   * not verified with confidence in this session — see
+   * EbayBrowseSourcingProvider's own comment on why `condition:refurbished`
+   * is similarly left unmapped rather than guessed).
+   */
+  size?: string;
+  /** Phase 3 — same treatment as `size`: free text, folded into keywords, never a structured filter no provider has confirmed. */
+  color?: string;
   minPrice?: number;
   maxPrice?: number;
   /** ISO 4217, applies to minPrice/maxPrice — required by eBay's own price filter whenever a price bound is set. */
@@ -58,13 +77,37 @@ export interface NormalizedSearchQuery {
    * marketplaces).
    */
   providers?: string[];
+  /**
+   * Phase 3 — final ordering of the AGGREGATED, combined result set,
+   * applied by SourcingService after dedup/enrichment (never by a
+   * provider — providers MUST ignore this, it is not a real search
+   * parameter on any provider's API). Deterministic and fully
+   * documented, never an opaque "relevance score":
+   * - 'price_asc' / 'price_desc': the result's own original `price`
+   *   (NOT currency-normalized — mixing currencies this way is honest
+   *   about what it is, a raw-number sort, not a real cross-currency
+   *   comparison).
+   * - 'normalized_price_asc' (the default when omitted, unchanged from
+   *   Phase 2's behavior): ascending by `normalizedPriceEur`, results
+   *   with no available rate placed last.
+   * - 'known_cost_asc': ascending by `estimatedKnownCostEur`, results
+   *   with no computable landed cost placed last.
+   * - 'match': see OpportunityRankingService.compareByMatch — a fixed,
+   *   documented multi-key comparator (constraint matches, then known
+   *   landed cost, then authenticity evidence, then price), never a
+   *   summed/weighted score.
+   */
+  sort?: 'price_asc' | 'price_desc' | 'normalized_price_asc' | 'known_cost_asc' | 'match';
   limit?: number;
   offset?: number;
   /**
-   * Accepted for future use by a Pricing/Margin service (not implemented
-   * in this step — see NormalizedSourcingResult's note on margin).
-   * Providers MUST ignore these; they are not real search filters on any
-   * provider's API.
+   * Phase 3 — when set, SourcingService attaches a real, honestly-scoped
+   * margin preview (estimatedMargin/estimatedMarginPercent) to every
+   * result whose estimatedKnownCostEur is computable, via the SAME
+   * PricingService engine calculate_margin already uses (never a second,
+   * duplicated margin formula) — see PricingService.fromSourcingResult.
+   * Never invented: absent entirely means no margin preview is attempted
+   * for any result. Interpreted in `currency` if set, else EUR.
    */
   targetResalePrice?: number;
   targetMargin?: number;
@@ -184,20 +227,73 @@ export interface NormalizedSourcingResult {
    * not a claim that landed cost is calculated today.
    */
   knownAdditionalCosts?: Array<{ type: string; amount: number; currency: string; description?: string }>;
+  /**
+   * Real, structured reasons `estimatedKnownCostEur` is undefined or
+   * incomplete — a controlled vocabulary (extend it for a real new
+   * reason, never a free-text guess): 'shipping_unknown' (no provider
+   * ever reports a shippingCost for this result),
+   * 'currency_conversion_unavailable' (a real cost line exists but no
+   * reliable FX rate converted it), 'import_tax_unknown' /
+   * 'customs_unknown' / 'provider_fee_unknown' /
+   * 'authentication_cost_unknown' (real cost categories that MAY apply
+   * but whose amount ADKSY has no data source for — labels, never
+   * fabricated numbers; no current provider populates these last four,
+   * they exist for a future provider/cost source that does). Phase 3:
+   * SourcingService itself now populates 'shipping_unknown' and
+   * 'currency_conversion_unavailable' automatically — see
+   * attachLandedCost.
+   */
   unknownCostFactors?: string[];
   /**
    * Phase 2 (real international providers) — the sum, in EUR, of every
    * cost line ADKSY actually knows a real amount for (price + shippingCost
    * + each knownAdditionalCosts entry), each independently converted via
    * CurrencyConversionService, set by SourcingService. Deliberately NOT a
-   * "total cost" — when `unknownCostFactors` is non-empty (e.g. import
-   * duties with no known amount), this number is real but incomplete, and
-   * is never presented as "prix tout compris". Undefined whenever ANY
-   * required conversion (price, or shippingCost/a knownAdditionalCosts
-   * line if present) was unavailable — a partial, possibly-misleading sum
-   * is never returned; it's all real known costs converted, or nothing.
+   * "total cost". Phase 3 tightened the rule: undefined whenever ANY
+   * relevant cost dimension is not resolvable — not just a failed
+   * conversion, but also a real cost that was simply never reported at
+   * all (e.g. no provider returned a shippingCost for this result). A
+   * real shippingCost of 0 (free shipping) still counts as known and
+   * never blocks this. See `unknownCostFactors` for exactly why, whenever
+   * this is undefined. Never a partial/misleading sum.
    */
   estimatedKnownCostEur?: number;
+  /**
+   * Phase 3 — real, computed reasons this specific result satisfies the
+   * caller's own search constraints (never a generic marketing phrase),
+   * e.g. "Within requested price (€350 ≤ €400)", "Requested brand 'Prada'
+   * found in the title". Set by SourcingService/OpportunityRankingService
+   * from the actual query + this result's own real fields — never
+   * fabricated, and empty (not undefined) when no query constraint could
+   * be confirmed against this result.
+   */
+  matchReasons?: string[];
+  /**
+   * Phase 3 — real, computed caveats about this specific result (e.g.
+   * "Authenticity is only the seller's own claim, not independently
+   * verified", "Price comparison against the requested max price is
+   * uncertain — no reliable EUR conversion rate was available",
+   * "Landed cost is incomplete — shipping cost unavailable"). Meant to be
+   * shown to the reseller alongside the result, not hidden internal
+   * detail. Empty (not undefined) when nothing warrants a warning.
+   */
+  warnings?: string[];
+  /**
+   * Phase 3 — a real margin PREVIEW, only computed when the caller
+   * supplied NormalizedSearchQuery.targetResalePrice AND this result's
+   * estimatedKnownCostEur is itself computable (see PricingService,
+   * called via PricingService.fromSourcingResult — the SAME engine
+   * calculate_margin uses, never a second formula). Deliberately NOT the
+   * same number calculate_margin would give on an actual marketplace
+   * listing: no marketplace selling fee is included here (no marketplace
+   * has been chosen yet at sourcing time) — this is landed-cost-only,
+   * "would this even be worth listing" preview. Undefined whenever no
+   * targetResalePrice was given, or the underlying calculation couldn't
+   * fully resolve (see PricingService.calculateMargin's own missingData).
+   */
+  estimatedMargin?: number;
+  /** Paired with estimatedMargin — undefined under the exact same conditions. */
+  estimatedMarginPercent?: number;
 }
 
 export interface SourcingProviderErrorInfo {
@@ -275,4 +371,13 @@ export interface SourcingSearchResponse {
   providersSkipped: string[];
   /** results.length, after deduplication — provided directly so the agent never has to (and never needs to) recompute it. */
   totalResults: number;
+  /**
+   * Phase 3 — real wall-clock time (ms) each QUERIED provider's own
+   * searchProducts call took, keyed by SourcingProvider.name. Only
+   * providers in providersSearched appear here (never a provider that was
+   * skipped/unavailable — there is no real duration to report for a call
+   * that never happened). Purely observability — never used to make a
+   * search/ranking decision.
+   */
+  providerLatencyMs: Record<string, number>;
 }

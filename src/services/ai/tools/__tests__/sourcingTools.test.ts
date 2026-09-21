@@ -64,6 +64,21 @@ describe('search_products tool definition', () => {
     it('rejects an unknown provider name', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['stockx'] }).success).toBe(false);
     });
+
+    it('accepts optional model/size/color (Phase 3)', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', model: 'Cut', size: '42', color: 'Black' }).success).toBe(true);
+    });
+
+    it('accepts a valid sort option and rejects an unknown one (Phase 3)', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', sort: 'match' }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', sort: 'price_asc' }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', sort: 'relevance' }).success).toBe(false);
+    });
+
+    it('accepts an optional targetResalePrice (Phase 3)', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', targetResalePrice: 600 }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', targetResalePrice: -10 }).success).toBe(false);
+    });
   });
 
   describe('handler', () => {
@@ -89,7 +104,7 @@ describe('search_products tool definition', () => {
       expect(result).toMatchObject({ status: 'SOURCE_NOT_CONFIGURED', results: [] });
     });
 
-    it('a successful search returns results plus a note that margin is not calculated', async () => {
+    it('a successful search returns results plus a note explaining margin is only a landed-cost preview, never invented', async () => {
       const fakeResult = {
         source: 'ebay', sourceUrl: 'https://x', title: 'Item', price: 10, currency: 'EUR',
         marketplace: 'EBAY_FR', images: [], authenticityStatus: 'claimed' as const,
@@ -100,7 +115,7 @@ describe('search_products tool definition', () => {
 
       expect(result.status).toBe('ok');
       expect(result.results).toEqual([fakeResult]);
-      expect(result.note).toMatch(/no margin/i);
+      expect(result.note).toMatch(/never invented/i);
     });
 
     it('provider errors are passed through to the agent, never hidden', async () => {
@@ -181,6 +196,40 @@ describe('search_products tool definition', () => {
       const result: any = await searchProductsTool.handler('ws-1', { query: 'x', providers: ['ebay'] });
 
       expect(result.providersSkipped).toEqual(['etsy']);
+    });
+
+    it('Phase 3 — model/size/color/sort/targetResalePrice are passed through unchanged to SourcingService.search', async () => {
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [] });
+
+      await searchProductsTool.handler('ws-1', { query: 'x', model: 'Cut', size: '42', color: 'Black', sort: 'match', targetResalePrice: 600 });
+
+      expect(searchMock).toHaveBeenCalledWith({ query: 'x', model: 'Cut', size: '42', color: 'Black', sort: 'match', targetResalePrice: 600 });
+    });
+
+    it('Phase 3 — providerLatencyMs is passed through unchanged, for observability only', async () => {
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [], providerLatencyMs: { ebay: 123 } });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
+
+      expect(result.providerLatencyMs).toEqual({ ebay: 123 });
+    });
+
+    it('Phase 3 — matchReasons/warnings/estimatedMargin flow through untouched as part of each result', async () => {
+      const fakeResult = {
+        source: 'ebay', sourceUrl: 'https://x', title: 'Item', price: 10, currency: 'EUR',
+        marketplace: 'EBAY_FR', images: [], authenticityStatus: 'claimed' as const,
+        matchReasons: ['Within the requested price range (~€10.00)'],
+        warnings: ["Authenticity is only the seller's own claim — not independently verified."],
+        estimatedMargin: 10, estimatedMarginPercent: 50,
+      };
+      searchMock.mockResolvedValue({ status: 'ok', results: [fakeResult], providerErrors: [] });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
+
+      expect(result.results[0].matchReasons).toEqual(fakeResult.matchReasons);
+      expect(result.results[0].warnings).toEqual(fakeResult.warnings);
+      expect(result.results[0].estimatedMargin).toBe(10);
+      expect(result.results[0].estimatedMarginPercent).toBe(50);
     });
   });
 });
