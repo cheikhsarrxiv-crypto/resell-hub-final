@@ -17,7 +17,12 @@
  * phase), and this module has no way to call it.
  */
 
-export type AuthenticityStatus = 'verified' | 'claimed' | 'unverified';
+// Mirrors src/services/sourcing/types.ts's own AuthenticityStatus
+// (deliberately a separate type, not imported — see this file's own
+// architecture notes) — 'unknown' added for the same reason: reserved
+// for a future source with no authenticity signal mechanism at all, not
+// emitted by any provider today.
+export type AuthenticityStatus = 'verified' | 'claimed' | 'unverified' | 'unknown';
 
 /**
  * FACTUAL data — copied verbatim from a real NormalizedSourcingResult that

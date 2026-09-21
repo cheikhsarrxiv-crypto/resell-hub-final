@@ -438,6 +438,30 @@ describe('create_product tool definition', () => {
       expect(createProductMock).toHaveBeenCalledTimes(1);
       expect(result.success).toBe(true);
     });
+
+    it('TEST Q — a Global Sourcing Engine-enriched search_products result (normalizedPriceEur, itemLocationCountry) still revalidates and reaches ProductService — the extra fields never block the match', async () => {
+      const enrichedSourcedItem: NormalizedSourcingResult = {
+        ...sourcedItem,
+        normalizedPriceEur: 445.2,
+        itemLocationCountry: 'GB',
+      };
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [enrichedSourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({
+        id: 'product-new-2',
+        sku: 'SKU-NEW-2',
+        title: validInput.title,
+        sourceMarketplace: 'ebay',
+        sourceId: enrichedSourcedItem.sourceId,
+        sourceUrl: enrichedSourcedItem.sourceUrl,
+        sellingPrice: 449,
+        purchasePrice: 200,
+      });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createProductMock).toHaveBeenCalledTimes(1);
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('preview()', () => {
