@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ProductService } from '@/services/ProductService';
+import { ProductService, PRODUCT_SKU_CONFLICT_MESSAGE } from '@/services/ProductService';
 import { createProductSchema } from '@/lib/validations';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 
@@ -61,6 +61,17 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     console.error('POST product error:', error);
+
+    // SKU-conflict fix: a clean, business-level 409 for the one specific
+    // conflict ProductService.createProduct now throws for a
+    // (workspaceId, sku) collision — mirrors the existing
+    // "already has an active subscription" -> 409 pattern in
+    // /api/stripe/checkout/route.ts. errorResponse() itself is
+    // deliberately left unchanged.
+    if (error instanceof Error && error.message === PRODUCT_SKU_CONFLICT_MESSAGE) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+
     return errorResponse(error);
   }
 }

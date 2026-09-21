@@ -1,7 +1,11 @@
 import { CreateProductInput, UpdateProductInput } from '@/lib/validations';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { SubscriptionService } from './SubscriptionService';
 import { ListingService } from './ListingService';
+
+/** Thrown by ProductService.createProduct on a (workspaceId, sku) conflict — see that method's own comment. Matched by message in /api/products' own route.ts, the same idiom already used for the "already has an active subscription" -> 409 case in /api/stripe/checkout/route.ts. */
+export const PRODUCT_SKU_CONFLICT_MESSAGE = 'A product with this SKU already exists in this workspace';
 
 export class ProductService {
   static async createProduct(workspaceId: string, data: CreateProductInput) {
@@ -27,30 +31,61 @@ export class ProductService {
       // Generate SKU if not provided
       const sku = data.sku || `SKU-${Date.now()}`;
 
-      // Create product
-      const product = await prisma.product.create({
-        data: {
-          ...data,
-          description: data.description || '',
-          sku,
-          workspaceId,
-        },
-      });
+      // Atomicity fix (read-only audit's CRITICAL #1): Product and its
+      // Inventory row must commit or roll back together. A Product
+      // without an Inventory row is an invalid, silently broken state —
+      // get_inventory/reserveInventory both treat a missing Inventory row
+      // as "no stock at all" (see those files' own comments), so every
+      // future sale of such a Product would fail to reserve stock without
+      // any visible error at creation time. Uses Prisma's interactive
+      // transaction ($transaction(async (tx) => ...)) rather than the
+      // array form already used elsewhere in this codebase (e.g.
+      // StorageService.setMainImage) because Inventory.productId depends
+      // on the Product row's own generated id, only known once
+      // tx.product.create resolves — the array form pre-builds every
+      // query before execution and cannot express that dependency.
+      const product = await prisma.$transaction(async (tx) => {
+        // Create product
+        const created = await tx.product.create({
+          data: {
+            ...data,
+            description: data.description || '',
+            sku,
+            workspaceId,
+          },
+        });
 
-      // Create inventory record
-      await prisma.inventory.create({
-        data: {
-          productId: product.id,
-          workspaceId,
-          quantity: data.quantity || 1,
-          available: data.quantity || 1,
-          reserved: 0,
-          syncStatus: 'synced',
-        },
+        // Create inventory record
+        await tx.inventory.create({
+          data: {
+            productId: created.id,
+            workspaceId,
+            quantity: data.quantity || 1,
+            available: data.quantity || 1,
+            reserved: 0,
+            syncStatus: 'synced',
+          },
+        });
+
+        return created;
       });
 
       return product;
     } catch (error) {
+      // SKU-conflict fix (read-only audit's CRITICAL #2): a (workspaceId,
+      // sku) collision on the existing @@unique([workspaceId, sku])
+      // constraint is turned into one clean, workspace-scoped business
+      // error — never the raw Prisma message, never a second Product,
+      // never a different SKU substituted automatically, never an
+      // automatic retry. Product has exactly one @@unique constraint
+      // besides its primary key, so any P2002 reaching this catch from
+      // tx.product.create is unambiguously this conflict. Same detection
+      // idiom already used in ListingService.createListing and
+      // actionTools.ts's reserveListingForPublish
+      // (`error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'`).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new Error(PRODUCT_SKU_CONFLICT_MESSAGE);
+      }
       throw error;
     }
   }
