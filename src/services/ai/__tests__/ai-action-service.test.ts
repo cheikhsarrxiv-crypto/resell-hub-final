@@ -93,8 +93,20 @@ vi.mock('@/services/ai/AiEntitlementService', async () => {
   };
 });
 
+// Same reasoning as the AiEntitlementService mock above — AiUsageService
+// is a separate, already-tested concern (see ai-usage-service.test.ts);
+// real AiUsageService.hasQuotaRemaining would call SubscriptionService/
+// prisma.workspaceAiOverride/aiUsagePeriod, none of which this file mocks.
+vi.mock('@/services/ai/AiUsageService', () => ({
+  AiUsageService: {
+    hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
+    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+  },
+}));
+
 import * as prismaModule from '@/lib/prisma';
 import { AiActionService } from '@/services/ai/AiActionService';
+import { AiUsageService } from '@/services/ai/AiUsageService';
 
 // __actionStore is a test-only export the mocked module above adds — not
 // part of the real @/lib/prisma module's type, hence the cast.
@@ -297,5 +309,71 @@ describe('AiActionService.cancelAction', () => {
     const proposed = await AiActionService.proposeAction(baseParams({ workspaceId: 'ws-A' }));
     const result = await AiActionService.cancelAction('ws-B', 'user-B', proposed.id);
     expect(result).toBeNull();
+  });
+});
+
+describe('AiActionService — AiUsageService.recordUsage is called only after a real COMPLETED success', () => {
+  beforeEach(() => {
+    __actionStore.clear();
+    vi.clearAllMocks();
+  });
+
+  it('COMPLETED (real handler success) -> recordUsage called exactly once, with action:${actionId}', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams());
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('COMPLETED');
+    expect(AiUsageService.recordUsage).toHaveBeenCalledTimes(1);
+    expect(AiUsageService.recordUsage).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ toolName: 'publish_listing', idempotencyKey: `action:${proposed.id}`, actionId: proposed.id })
+    );
+  });
+
+  it('FAILED (handler throws) -> recordUsage is never called — 0 consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'failing_tool' }));
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('CANCELLED -> recordUsage is never called — 0 consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams());
+    await AiActionService.cancelAction('ws-1', 'user-1', proposed.id);
+
+    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('EXPIRED -> recordUsage is never called — 0 consumption', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams());
+    __actionStore.get(proposed.id).expiresAt = new Date(Date.now() - 1000);
+
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('EXPIRED');
+    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('quota exceeded (AiUsageService.hasQuotaRemaining refuses) -> the handler never runs, action lands on FAILED, recordUsage never called', async () => {
+    (AiUsageService.hasQuotaRemaining as any).mockResolvedValueOnce({ allowed: false, reason: 'quota_exceeded' });
+
+    const proposed = await AiActionService.proposeAction(baseParams());
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(result?.error).toMatch(/quota/i);
+    expect(publishHandler).not.toHaveBeenCalled();
+    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('a handler that returns a controlled business error (no throw) is not billed either', async () => {
+    publishHandler.mockResolvedValueOnce({ error: 'Listing not found in this workspace.' });
+    const proposed = await AiActionService.proposeAction(baseParams());
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('COMPLETED'); // the action pipeline itself still completed — see AgentAction's own convention
+    expect((result?.result as any).error).toBe('Listing not found in this workspace.');
+    expect(AiUsageService.recordUsage).not.toHaveBeenCalled();
   });
 });

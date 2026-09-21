@@ -5,6 +5,7 @@ import { ADKSY_AI_FALLBACK_MESSAGE } from '@/lib/ai/knowledgeBase';
 import { AiToolRegistry } from './AiToolRegistry';
 import { AiActionService } from './AiActionService';
 import { AiEntitlementService, getRequiredCapabilityForTool } from './AiEntitlementService';
+import { AiUsageService } from './AiUsageService';
 import { AgentToolCategory } from './tools/types';
 
 const logger = createLogger('ai-agent');
@@ -134,6 +135,19 @@ export class AiAgentService {
     const capability = getRequiredCapabilityForTool(toolName);
     if (!capability) return false;
     return !(await AiEntitlementService.canUseCapability(workspaceId, capability));
+  }
+
+  /**
+   * AiUsageService — the commercial budget check, entirely independent of
+   * isCapabilityRefused above (entitlement = right, this = remaining
+   * budget; see AiUsageService's own header comment on why the two are
+   * never merged). A tool with no commercial cost (aiUsageConfig.ts) is
+   * never refused here, exactly like a tool with no capability mapping is
+   * never refused by isCapabilityRefused.
+   */
+  private static async isQuotaExceeded(workspaceId: string, toolName: string): Promise<boolean> {
+    const result = await AiUsageService.hasQuotaRemaining(workspaceId, toolName);
+    return !result.allowed;
   }
 
   private static buildSystemPrompt(): string {
@@ -385,6 +399,16 @@ export class AiAgentService {
               // on why the two are not yet merged into one check.
               resultPayload = { error: `The "${getRequiredCapabilityForTool(tool.name)}" capability is not available on this workspace's current plan.` };
               toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
+            } else if (await this.isQuotaExceeded(workspaceId, tool.name)) {
+              // AiUsageService — checked before proposing an AgentAction,
+              // same reasoning as the entitlement check above: a refused
+              // proposal never reaches the reseller as something to
+              // confirm. Re-checked again at confirm time in
+              // AiActionService.confirmAndExecute (the confirmation can
+              // arrive minutes later) — nothing is ever consumed here,
+              // only at real execution success (see AiUsageService).
+              resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
+              toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
             } else {
               // 'engage' — Phase 12A: a real, backend-computed preview
               // (never the model's own text) decides whether there is
@@ -439,9 +463,34 @@ export class AiAgentService {
               resultPayload = { error: 'Invalid tool input', details: parsed.error.flatten() };
             } else if (await this.isCapabilityRefused(workspaceId, tool.name)) {
               resultPayload = { error: `The "${getRequiredCapabilityForTool(tool.name)}" capability is not available on this workspace's current plan.` };
+            } else if (await this.isQuotaExceeded(workspaceId, tool.name)) {
+              // Checked BEFORE the handler runs, so an over-quota call
+              // never executes at all in the overwhelming common case
+              // (see AiUsageService's own header comment on the narrow,
+              // deliberately-bounded concurrency tradeoff this implies).
+              resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
             } else {
               try {
                 resultPayload = await tool.handler(workspaceId, parsed.data, { conversationId: resolvedConversationId, userId });
+                // AiUsageService — recorded only now, AFTER a real,
+                // non-throwing result. A controlled business error (the
+                // same `{error: string}` shape checked a few lines above
+                // for an 'engage' tool's preview) is treated as "did not
+                // really succeed" here too — never billed, exactly like a
+                // thrown exception below.
+                const succeeded = !(
+                  resultPayload &&
+                  typeof resultPayload === 'object' &&
+                  typeof (resultPayload as Record<string, unknown>).error === 'string'
+                );
+                if (succeeded) {
+                  await AiUsageService.recordUsage(workspaceId, {
+                    toolName: tool.name,
+                    idempotencyKey: `tool:${resolvedConversationId}:${block.id}`,
+                    conversationId: resolvedConversationId,
+                    toolUseId: block.id,
+                  });
+                }
               } catch (error) {
                 logger.error(`Tool "${tool.name}" handler failed`, error instanceof Error ? error : String(error), {
                   workspaceId,

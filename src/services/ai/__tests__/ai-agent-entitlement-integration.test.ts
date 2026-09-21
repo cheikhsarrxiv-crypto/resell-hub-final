@@ -63,6 +63,18 @@ vi.mock('@/services/sourcing/SourcingService', () => ({
   SourcingService: { search: searchMock },
 }));
 
+// This file is about AiEntitlementService's wiring specifically — the
+// commercial quota layer (AiUsageService) is a separate, already-tested
+// concern (see ai-usage-service.test.ts). Real AiUsageService.hasQuotaRemaining
+// would call prisma.workspaceAiOverride/aiUsagePeriod, neither mocked
+// above — always-true/no-op here keeps this file's own scope narrow.
+vi.mock('@/services/ai/AiUsageService', () => ({
+  AiUsageService: {
+    hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
+    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+  },
+}));
+
 import { AiAgentService } from '@/services/ai/AiAgentService';
 
 const BUSINESS_PLAN = { id: 'plan-business', name: 'business', aiAssistant: true, fulfillmentEnabled: true };

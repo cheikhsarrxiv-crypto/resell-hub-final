@@ -30,6 +30,8 @@ model User {
   notifications          Notification[]
   emailVerificationToken EmailVerificationToken?
   passwordResetToken     PasswordResetToken?
+  agentConversations     AgentConversation[]
+  agentActions           AgentAction[]
 
   @@index([email])
 }
@@ -83,6 +85,11 @@ model Workspace {
   syncLogs               SyncLog[]
   fulfillmentOrders      FulfillmentOrder[]
   webhooks               Webhook[]
+  agentConversations     AgentConversation[]
+  agentActions           AgentAction[]
+  aiUsageEvents          AiUsageEvent[]
+  aiUsagePeriods         AiUsagePeriod[]
+  aiUsageOverride        WorkspaceAiOverride?
 
   @@unique([userId, slug])
   @@index([userId])
@@ -649,4 +656,259 @@ model OnboardingData {
   completedAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+}
+
+// AI AGENT
+// Persists AiAgentService tool-use conversations — distinct from
+// AiChatService (the existing Q&A widget), which is deliberately
+// stateless (the client resends recent turns per request). The agent is
+// multi-step (search -> compare -> draft -> confirm across several tool
+// calls), so a server-side record is needed both to let a conversation
+// resume across requests and to audit exactly which tools were called for
+// a given workspace. Workspace-scoped like every other data model; a
+// conversation can never be read across workspaces (see
+// AiAgentService/verifyWorkspaceAccess).
+model AgentConversation {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  title       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  AgentMessage[]
+  actions   AgentAction[]
+
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+model AgentMessage {
+  id             String @id @default(cuid())
+  conversationId String
+
+  role String // 'user' | 'assistant' | 'tool_result'
+
+  // For role='user'/'assistant': the plain text turn.
+  // For role='tool_result': the JSON-stringified result AiToolRegistry
+  // returned — tool handlers are responsible for never including a
+  // token/secret in what they return, so nothing further is scrubbed here.
+  content String @db.Text
+
+  // Set only on an assistant turn that called a tool, and on the matching
+  // tool_result turn — correlates a call with its result (Anthropic's own
+  // tool_use block id), and records which tool ran and its category at
+  // call time (kept even if a tool's category changes later, for an
+  // accurate audit trail of what was actually allowed to run).
+  toolName     String?
+  toolUseId    String?
+  toolCategory String? // 'read' | 'write' | 'engage' | 'blocked'
+
+  createdAt DateTime @default(now())
+
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+// Phase 12A — ADKSY AI Agent Action Framework. A persisted record for any
+// tool categorized 'engage' (see AgentToolCategory in
+// src/services/ai/tools/types.ts) that the model asked to run: it captures
+// exactly what would happen, requires a separate explicit confirmation
+// from the reseller, and only then actually executes — the model itself
+// never gets direct access to Prisma/Stripe/marketplace credentials; see
+// AiActionService for the full propose -> confirm -> execute state
+// machine this table backs.
+//
+// Deliberately does NOT introduce a separate audit-log table: this row's
+// own status + confirmedAt/executedAt/updatedAt timestamps ARE the
+// durable audit trail (who proposed/confirmed/executed what, and when),
+// and AiActionService additionally emits structured logger events at each
+// transition for operational visibility — duplicating that into a second
+// table would just be the same facts twice.
+//
+// Workspace-scoped like every other Agent-related model: an action can
+// never be read, confirmed, cancelled, or executed across workspaces (see
+// AiActionService's own workspaceId-scoped queries).
+model AgentAction {
+  id             String @id @default(cuid())
+  workspaceId    String
+  userId         String
+  conversationId String
+
+  // The tool name that produced this action (e.g. 'publish_listing') —
+  // always one of AiToolRegistry's registered 'engage' tools; never a
+  // free-form string a client could invent (see AiActionService.proposeAction,
+  // the only place that creates a row here).
+  type String
+  // Copied from the tool's own category at proposal time (always 'engage'
+  // today — 'blocked' tools never reach this table at all, and
+  // 'read'/'write' tools auto-execute without ever needing one) so an
+  // audit read of an old row is accurate even if a tool's category is
+  // later changed.
+  category String
+
+  // PENDING_CONFIRMATION | CONFIRMED | EXECUTING | COMPLETED | FAILED |
+  // CANCELLED | EXPIRED — see src/lib/ai/agentActionStateMachine.ts for
+  // the only code allowed to decide which transitions are legal.
+  status String @default("PENDING_CONFIRMATION")
+
+  // JSON-stringified, Zod-validated tool input this action will run with
+  // if confirmed — captured once at proposal time so a later confirm can
+  // never be re-pointed at different input than what was actually shown
+  // to the reseller.
+  input String @db.Text
+  // JSON-stringified, backend-computed preview (see AgentToolDefinition.preview)
+  // — what the reseller actually sees before confirming. Never derived
+  // from the model's own text.
+  summary String @db.Text
+
+  confirmationRequired Boolean @default(true)
+  // Deterministic per (conversationId, toolUseId) at creation — see
+  // AiActionService.proposeAction — so the same Anthropic tool_use block
+  // can never create two rows, and a workspace-scoped unique index makes
+  // that a real DB-enforced guarantee, not just an application-level check.
+  idempotencyKey String
+
+  // Set only once execution finishes (COMPLETED/FAILED) — a JSON-stringified,
+  // sanitized outcome for COMPLETED, or a short user-facing message (never a
+  // raw exception/stack trace) for FAILED.
+  result String? @db.Text
+  error  String?
+
+  // A pending confirmation is only valid for a limited time (see
+  // AiActionService's TTL) — never indefinitely, and never executable once
+  // past this timestamp even if the row is still PENDING_CONFIRMATION when
+  // read.
+  expiresAt   DateTime
+  confirmedAt DateTime?
+  executedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace    Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId])
+  @@index([conversationId])
+  @@index([status])
+}
+
+// AI USAGE — commercial quota layer (AiUsageService), strictly separate from
+// AiEntitlementService ("do I have the right to use this capability?") and
+// from ratelimit.ts ("can I call this endpoint right now?" — infrastructure
+// protection, not a commercial budget). See AiUsageService.ts for the full
+// design rationale.
+//
+// One global AI Units budget per (workspace, billing period) — NOT one
+// quota per capability — to avoid several independent quota systems that
+// could accidentally stack. Each real tool execution has its own AI Units
+// cost (see aiUsageConfig.ts), summed into the single AiUsagePeriod bucket
+// below.
+
+// Append-only audit trail: one row per real, attempted consumption.
+// idempotencyKey mirrors AgentAction's own proven pattern exactly —
+// `tool:${conversationId}:${toolUseId}` for an auto-executed read/write
+// tool (Anthropic's own real tool_use block id, never a timestamp/random
+// UUID), `action:${actionId}` for an 'engage' tool (an AgentAction's own
+// id, itself already the product of AgentAction's own idempotent
+// propose/confirm flow). The (workspaceId, idempotencyKey) UNIQUE
+// constraint is the real, DB-enforced guard against double-counting under
+// retry or concurrent double-confirmation — the same role
+// AgentAction.idempotencyKey's own unique index already plays.
+//
+// status: 'RESERVED' is a short-lived internal state used only while
+// AiUsageService.recordUsage decides the outcome of the one write that won
+// the idempotency race — a caller never observes it, only 'RECORDED' (this
+// event really incremented AiUsagePeriod.unitsConsumed) or 'REJECTED'
+// (quota exceeded, or quota/period could not be resolved at all — fail
+// closed). A REJECTED row is never deleted (kept for audit) and never
+// counted twice.
+model AiUsageEvent {
+  id             String  @id @default(cuid())
+  workspaceId    String
+  conversationId String?
+  actionId       String?
+  toolUseId      String?
+
+  toolName   String // AiToolRegistry tool name, e.g. "search_products"
+  capability String // AiCapability at the time of recording (see AiEntitlementService) — kept even if the tool's own mapping changes later, for an accurate audit trail
+  units      Int // AI Units this event cost, resolved from aiUsageConfig.ts at record time — never recomputed retroactively from a possibly-changed barème
+  status     String @default("RESERVED") // RESERVED (transient, never returned to a caller) | RECORDED | REJECTED
+
+  idempotencyKey String
+
+  // The real billing period this consumption is attributed to — see
+  // AiUsageService's own period-resolution comment (real Subscription
+  // period when one exists, UTC calendar month for Free/no-subscription).
+  periodStart DateTime
+  periodEnd   DateTime
+
+  createdAt DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, periodStart])
+}
+
+// One row per (workspace, real billing period) — the fast, O(1)-read
+// aggregate counter AiUsageService actually checks/increments.
+// unitsConsumed is only ever mutated through the SAME atomic conditional
+// updateMany pattern ProductService.reserveInventory already uses on
+// Inventory.available (`WHERE unitsConsumed <= limit - units, DATA
+// {increment: units}`) — never a separate read-then-write, and never
+// wrapped in a $transaction/Serializable block (not needed: a single
+// conditional UPDATE is already atomic under PostgreSQL's own row lock).
+model AiUsagePeriod {
+  id          String @id @default(cuid())
+  workspaceId String
+
+  periodStart DateTime
+  periodEnd   DateTime
+
+  unitsConsumed Int @default(0)
+  // Snapshot of the monthly limit at the moment this period row was first
+  // created — kept for historical/audit display only. The live quota
+  // check/increment in AiUsageService always re-resolves the CURRENT limit
+  // (WorkspaceAiOverride, else the plan's default) instead of trusting
+  // this column alone, so a plan upgrade/downgrade mid-period is reflected
+  // immediately without recreating the counter row (see AiUsageService).
+  unitsLimit Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, periodStart, periodEnd])
+}
+
+// Enterprise custom quota — a single row overrides the plan's default AI
+// Units/month for exactly one workspace, so a new Enterprise contract with
+// a bespoke limit never requires a code change (see AiUsageService's
+// resolution order: this override, when present, always wins over the
+// plan's own default — regardless of which plan the workspace is actually
+// on, though in practice only Enterprise workspaces are expected to have
+// one). A workspace with no row here simply falls back to its plan's
+// default (aiUsageConfig.ts) — an Enterprise workspace works correctly
+// with zero rows in this table.
+model WorkspaceAiOverride {
+  id          String @id @default(cuid())
+  workspaceId String @unique
+
+  // Must be a real positive integer — AiUsageService treats 0/negative/
+  // missing as an invalid override and fails closed (refuses usage)
+  // rather than ever silently falling back to a more permissive default.
+  monthlyUnitsLimit Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }

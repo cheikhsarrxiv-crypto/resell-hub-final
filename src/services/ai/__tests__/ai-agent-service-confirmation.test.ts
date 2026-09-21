@@ -85,6 +85,17 @@ vi.mock('@/services/ai/AiEntitlementService', async () => {
   return { ...actual, AiEntitlementService: { canUseCapability: vi.fn().mockResolvedValue(true) } };
 });
 
+// Same reasoning as the AiEntitlementService mock above — AiUsageService
+// is a separate, already-tested concern (see ai-usage-service.test.ts);
+// real AiUsageService.hasQuotaRemaining would call SubscriptionService/
+// prisma.workspaceAiOverride/aiUsagePeriod, none of which this file mocks.
+vi.mock('@/services/ai/AiUsageService', () => ({
+  AiUsageService: {
+    hasQuotaRemaining: vi.fn().mockResolvedValue({ allowed: true }),
+    recordUsage: vi.fn().mockResolvedValue({ status: 'RECORDED', eventId: 'test-usage-event', units: 0 }),
+  },
+}));
+
 vi.mock('@/services/ai/AiToolRegistry', () => {
   const tools: unknown[] = [];
   return {
