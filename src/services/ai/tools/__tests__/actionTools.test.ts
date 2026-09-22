@@ -71,7 +71,7 @@ vi.mock('@/lib/prisma', () => ({
         const product = productStore.get(where.id);
         if (!product || product.workspaceId !== where.workspaceId) return null;
         if (where.deletedAt === null && product.deletedAt) return null;
-        return { id: product.id, sku: product.sku };
+        return { id: product.id, sku: product.sku, sourceUrl: product.sourceUrl ?? null };
       }),
     },
     marketplaceConnection: {
@@ -759,6 +759,27 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/no ebay connection/i);
     });
+
+    it('Phase 7: a draft is refused when the named productId\'s OWN recorded sourceUrl is a DIFFERENT sourced item — never publishes the wrong Product', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), sourceUrl: 'https://www.ebay.co.uk/itm/SOME-OTHER-ITEM' });
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/different sourced item|wrong product/i);
+    });
+
+    it('Phase 7: a draft IS accepted when the product\'s own recorded sourceUrl matches this exact draft\'s source', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), sourceUrl: sourcedItem.sourceUrl });
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toBeUndefined();
+      expect(summary.productId).toBe(DEFAULT_PRODUCT_ID);
+    });
+
+    it('Phase 7: a product with NO recorded source (manually created, sourceUrl null) is unaffected — the cross-check only applies to sourced products', async () => {
+      await seedReadyDraft('conv-1');
+      const summary: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toBeUndefined();
+    });
   });
 
   describe('handler() — the absolute safeguard against a real eBay call', () => {
@@ -807,6 +828,17 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.error).toMatch(/product not found/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('Phase 7: handler() also refuses to publish a draft under a product whose own recorded source is a different item, before any adapter call', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), sourceUrl: 'https://www.ebay.co.uk/itm/SOME-OTHER-ITEM' });
+      await seedReadyDraft('conv-1');
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/different sourced item|wrong product/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
       expect(listingStore.size).toBe(0);
     });
@@ -1211,6 +1243,19 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
       expect(summary.error).toMatch(/no etsy connection/i);
     });
+
+    it('Phase 7: a draft is refused when the named productId\'s OWN recorded sourceUrl is a DIFFERENT sourced item — never publishes the wrong Product', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), sourceUrl: 'https://www.ebay.co.uk/itm/SOME-OTHER-ITEM' });
+      await seedReadyEtsyDraft('conv-1');
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toMatch(/different sourced item|wrong product/i);
+    });
+
+    it('Phase 7: a product with NO recorded source (manually created, sourceUrl null) is unaffected for Etsy too', async () => {
+      await seedReadyEtsyDraft('conv-1');
+      const summary: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(summary.error).toBeUndefined();
+    });
   });
 
   describe('handler() — the absolute safeguard against a real Etsy call', () => {
@@ -1271,6 +1316,17 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, productId: 'does-not-exist' }, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.error).toMatch(/product not found/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
+    });
+
+    it('Phase 7: handler() also refuses to publish a draft under a product whose own recorded source is a different item, before any adapter call', async () => {
+      productStore.set(DEFAULT_PRODUCT_ID, { ...productStore.get(DEFAULT_PRODUCT_ID), sourceUrl: 'https://www.ebay.co.uk/itm/SOME-OTHER-ITEM' });
+      await seedReadyEtsyDraft('conv-1');
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/different sourced item|wrong product/i);
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
       expect(listingStore.size).toBe(0);
     });
@@ -1466,5 +1522,95 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       expect(secondAttempt.error).toBeTruthy();
       expect(listingStore.get(stuck.id).syncStatus).toBe('syncing');
     });
+  });
+});
+
+/**
+ * Phase 7, section 9 — "Publie sur eBay et Etsy": publish_listing and
+ * publish_etsy_listing are two entirely independent tool calls/AgentActions
+ * (no shared transaction, no orchestrator between them). If eBay succeeds
+ * and Etsy then fails, eBay's own real, already-synced Listing must never
+ * be rolled back — each marketplace's own outcome is reported on its own
+ * Listing row, independently.
+ */
+describe('Phase 7 — multi-marketplace publish independence (no rollback on partial failure)', () => {
+  const withProduct = { productId: DEFAULT_PRODUCT_ID };
+
+  beforeEach(async () => {
+    rows = [];
+    rowIdCounter = 0;
+    clock = 0;
+    listingIdCounter = 0;
+    vi.clearAllMocks();
+    delete process.env.ENABLE_REAL_EBAY_PUBLISH;
+    delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
+    dbDownFlag.value = false;
+    findPublishedOfferBySkuMock.mockReset().mockResolvedValue({ status: 'unable_to_verify', reason: 'not configured by this test' });
+    productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
+    connectionStore.set('ws-1:ebay', { id: 'conn-ebay-1' });
+    connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
+
+    process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+    process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+
+    // Ready for BOTH marketplaces from the SAME draft (see the
+    // listingDraftTools.test.ts "same draft, both marketplaces" proof).
+    pushToolCall('conv-1', 'tu-search', 'search_products', { query: 'prada' }, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, proposedPrice: 449, proposedCurrency: 'EUR' }, { conversationId: 'conv-1', userId: 'user-1' });
+    pushToolCall('conv-1', 'tu-gen', 'generate_listing_draft', {}, generated);
+    const edited: any = await editListingDraftTool.handler(
+      'ws-1',
+      {
+        sourceUrl: sourcedItem.sourceUrl,
+        patch: { ebayCategoryId: 15709, ebayMarketplaceId: 'EBAY_GB', etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' },
+      },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+    pushToolCall('conv-1', 'tu-edit', 'edit_listing_draft', {}, edited);
+  });
+
+  afterEach(() => {
+    delete process.env.ENABLE_REAL_EBAY_PUBLISH;
+    delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    dbDownFlag.value = false;
+  });
+
+  it('eBay succeeding and Etsy then failing leaves the eBay Listing synced and untouched — never rolled back', async () => {
+    createListingMock
+      .mockResolvedValueOnce({ externalId: 'EBAY-OK-1', status: 'active' }) // eBay call
+      .mockRejectedValueOnce({ type: 'VALIDATION_ERROR', message: 'Etsy rejected the listing', statusCode: 400 }); // Etsy call
+
+    const ebayResult: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+    expect(ebayResult.published).toBe(true);
+    expect(ebayResult.externalId).toBe('EBAY-OK-1');
+
+    await expect(
+      publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+    ).rejects.toBeTruthy();
+
+    // eBay's own real Listing row is untouched by Etsy's failure — no rollback, ever.
+    const ebayListing = listingStore.get(ebayResult.listingId);
+    expect(ebayListing.syncStatus).toBe('synced');
+    expect(ebayListing.externalId).toBe('EBAY-OK-1');
+
+    // Etsy's own Listing row (a distinct row, distinct marketplaceConnectionId) is independently marked failed.
+    const etsyListing = Array.from(listingStore.values()).find((l: any) => l.marketplaceConnectionId === 'conn-etsy-1');
+    expect(etsyListing.syncStatus).toBe('failed');
+
+    // Two distinct Listing rows for the SAME product — one per marketplace, never conflated.
+    expect(listingStore.size).toBe(2);
+  });
+
+  it('Etsy succeeding does not require or imply eBay also succeeded — each marketplace reports its own real outcome', async () => {
+    createListingMock.mockResolvedValueOnce({ externalId: 'ETSY-OK-1', status: 'active' });
+
+    const etsyResult: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(etsyResult.published).toBe(true);
+    // No eBay Listing exists at all — publish_listing was never even called.
+    expect(Array.from(listingStore.values()).some((l: any) => l.marketplaceConnectionId === 'conn-ebay-1')).toBe(false);
   });
 });

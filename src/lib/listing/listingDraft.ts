@@ -211,6 +211,15 @@ export function validateEbayDraft(draft: ListingDraft): MarketplaceListingValida
   }
   if (draft.source.images.length === 0) {
     warnings.push('No source images available.');
+  } else {
+    // Phase 7 — mapDraftToEbayInput forwards these URLs verbatim as
+    // imageUrls on a real publish (see EbayAdapter.createListing): they are
+    // the external source listing's own hotlinked photos, never re-hosted,
+    // reviewed, or verified for usage rights by ADKSY. Flagged explicitly
+    // rather than silently treated as ready-to-use — this project invents
+    // no legal solution for image rights, it only ever surfaces the real
+    // fact that these images are external and unreviewed.
+    warnings.push('Images are copied directly from the external source listing — not reviewed or re-hosted by ADKSY. Verify you have the right to use them before publishing.');
   }
   warnings.push(
     'Payment/return/fulfillment policies are not yet managed by ADKSY — eBay may still require configured seller policies before a real publish succeeds. This draft cannot verify that.'

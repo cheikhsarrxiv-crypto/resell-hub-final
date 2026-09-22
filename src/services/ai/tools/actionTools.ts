@@ -42,15 +42,34 @@ import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
 async function loadPublishableProduct(
   workspaceId: string,
   productId: string
-): Promise<{ product: { id: string; sku: string } } | { error: string }> {
+): Promise<{ product: { id: string; sku: string; sourceUrl: string | null } } | { error: string }> {
   const product = await prisma.product.findFirst({
     where: { id: productId, workspaceId, deletedAt: null },
-    select: { id: true, sku: true },
+    select: { id: true, sku: true, sourceUrl: true },
   });
   if (!product) {
     return { error: "Product not found in this workspace. Publishing requires an existing ADKSY product — sourceUrl never identifies one on its own." };
   }
   return { product };
+}
+
+/**
+ * Phase 7 audit finding: nothing previously checked that the productId a
+ * publish call names is actually THE product the draft (sourceUrl) was
+ * prepared for — a draft generated for one sourced item could be published
+ * under any other unrelated, workspace-owned Product's identity (its own
+ * real SKU), which is exactly the "publishes the wrong Product" risk this
+ * phase's audit called out. Only enforced when the product itself carries
+ * real source provenance (product.sourceUrl set, i.e. it was created via
+ * create_product from a sourced item) — a manually-created product (no
+ * recorded source) is unaffected, preserving that existing, legitimate use
+ * of a listing draft.
+ */
+function checkDraftMatchesProduct(product: { sourceUrl: string | null }, draftSourceItemId: string): { error: string } | null {
+  if (product.sourceUrl && product.sourceUrl !== draftSourceItemId) {
+    return { error: "This listing draft was prepared for a different sourced item than this product's own recorded source — refusing to publish it under the wrong product." };
+  }
+  return null;
 }
 
 async function loadMarketplaceConnectionForPublish(
@@ -591,6 +610,9 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
     if ('error' in productResult) return { error: productResult.error };
     const { product } = productResult;
 
+    const mismatch = checkDraftMatchesProduct(product, draft.source.sourceItemId);
+    if (mismatch) return { error: mismatch.error };
+
     const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'ebay', 'eBay');
     if ('error' in connectionResult) return { error: connectionResult.error };
 
@@ -634,6 +656,9 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
     const productResult = await loadPublishableProduct(workspaceId, input.productId);
     if ('error' in productResult) return { error: productResult.error };
     const { product } = productResult;
+
+    const mismatch = checkDraftMatchesProduct(product, draft.source.sourceItemId);
+    if (mismatch) return { error: mismatch.error };
 
     const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'ebay', 'eBay');
     if ('error' in connectionResult) return { error: connectionResult.error };
@@ -804,6 +829,9 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
     if ('error' in productResult) return { error: productResult.error };
     const { product } = productResult;
 
+    const mismatch = checkDraftMatchesProduct(product, draft.source.sourceItemId);
+    if (mismatch) return { error: mismatch.error };
+
     const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'etsy', 'Etsy');
     if ('error' in connectionResult) return { error: connectionResult.error };
 
@@ -843,6 +871,9 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
     const productResult = await loadPublishableProduct(workspaceId, input.productId);
     if ('error' in productResult) return { error: productResult.error };
     const { product } = productResult;
+
+    const mismatch = checkDraftMatchesProduct(product, draft.source.sourceItemId);
+    if (mismatch) return { error: mismatch.error };
 
     const connectionResult = await loadMarketplaceConnectionForPublish(workspaceId, 'etsy', 'Etsy');
     if ('error' in connectionResult) return { error: connectionResult.error };

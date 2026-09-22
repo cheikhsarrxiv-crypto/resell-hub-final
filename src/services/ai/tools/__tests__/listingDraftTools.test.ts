@@ -266,4 +266,61 @@ describe('edit_listing_draft', () => {
       expect(parsed.success).toBe(true);
     });
   });
+
+  /**
+   * Phase 7, section 6 — "Prepare-moi cette annonce pour eBay et Etsy":
+   * proves the architecture is Product -> ONE ListingDraft carrying BOTH
+   * marketplaces' own fields/validation, never two separate Products and
+   * never a shared draft that can only ever be ready for one marketplace
+   * at a time. Each marketplace's own readiness/errors/payload stays
+   * fully independent even though both live on the exact same draft
+   * object (see listingDraft.ts's own validateEbayDraft/validateEtsyDraft
+   * — never a single combined validator).
+   */
+  describe('Phase 7 — same draft prepared for BOTH eBay and Etsy (multi-marketplace, one Product)', () => {
+    it('a draft edited with ONLY eBay fields is ready for eBay but explicitly NOT ready for Etsy, with the specific missing fields named', async () => {
+      pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+      const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, proposedPrice: 449, proposedCurrency: 'EUR' }, { conversationId: 'conv-1', userId: 'user-1' });
+      pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+      const edited: any = await editListingDraftTool.handler(
+        'ws-1',
+        { sourceUrl: sourcedItem.sourceUrl, patch: { ebayCategoryId: 15709, ebayMarketplaceId: 'EBAY_GB' } },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(edited.marketplaceValidation.ebay.ready).toBe(true);
+      expect(edited.marketplaceValidation.etsy.ready).toBe(false);
+      expect(edited.marketplaceValidation.etsy.missingFields).toEqual(
+        expect.arrayContaining(['etsyTaxonomyId', 'etsyWhenMade', 'etsyWhoMade'])
+      );
+    });
+
+    it('adding the Etsy-only fields on top makes the SAME draft ready for BOTH marketplaces at once — no second Product, no second draft object needed', async () => {
+      pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+      const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, proposedPrice: 449, proposedCurrency: 'EUR' }, { conversationId: 'conv-1', userId: 'user-1' });
+      pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+      const ebayReady: any = await editListingDraftTool.handler(
+        'ws-1',
+        { sourceUrl: sourcedItem.sourceUrl, patch: { ebayCategoryId: 15709, ebayMarketplaceId: 'EBAY_GB' } },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+      pushDraftToolCall('conv-1', 'tu3', 'edit_listing_draft', {}, ebayReady);
+
+      const bothReady: any = await editListingDraftTool.handler(
+        'ws-1',
+        { sourceUrl: sourcedItem.sourceUrl, patch: { etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' } },
+        { conversationId: 'conv-1', userId: 'user-1' }
+      );
+
+      expect(bothReady.marketplaceValidation.ebay.ready).toBe(true);
+      expect(bothReady.marketplaceValidation.etsy.ready).toBe(true);
+      // Same underlying source item (same Product's provenance) for both.
+      expect(bothReady.draft.source.sourceUrl).toBe(sourcedItem.sourceUrl);
+      // Distinct, marketplace-specific fields coexist without conflict.
+      expect(bothReady.draft.fields.ebayCategoryId).toBe(15709);
+      expect(bothReady.draft.fields.etsyTaxonomyId).toBe(1234);
+    });
+  });
 });

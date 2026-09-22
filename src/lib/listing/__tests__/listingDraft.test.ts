@@ -162,6 +162,20 @@ describe('validateEbayDraft', () => {
     const result = validateEbayDraft(baseDraft());
     expect(result.warnings.some((w) => /polic/i.test(w))).toBe(true);
   });
+
+  it('Phase 7: warns that source images are external/unreviewed when present — never silently treated as ready-to-use', () => {
+    const result = validateEbayDraft(baseDraft());
+    expect(result.warnings.some((w) => /external source listing/i.test(w))).toBe(true);
+  });
+
+  it('Phase 7: the "no source images" warning and the "external/unreviewed" warning are mutually exclusive', () => {
+    const withImages = validateEbayDraft(baseDraft());
+    const withoutImages = validateEbayDraft(baseDraft({}, { images: [] }));
+
+    expect(withImages.warnings.some((w) => /no source images available/i.test(w))).toBe(false);
+    expect(withoutImages.warnings.some((w) => /external source listing/i.test(w))).toBe(false);
+    expect(withoutImages.warnings.some((w) => /no source images available/i.test(w))).toBe(true);
+  });
 });
 
 describe('mapDraftToEbayInput (Phase 12C-Prep — preview must match reality)', () => {
