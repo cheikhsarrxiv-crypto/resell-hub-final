@@ -22,12 +22,37 @@ export interface SourcingProviderErrorInfo {
   kind: string;
 }
 
-/** One search_products call's outcome, already reduced to what the UI needs. */
+/**
+ * One search_products call's outcome, already reduced to what the UI
+ * needs. Phase 4 (Global Sourcing Engine UI) adds the provider-provenance
+ * fields the backend has carried since Phase 1/2 (providersSearched/
+ * providersFailed/providersUnavailable/providersSkipped/totalResults) —
+ * previously extracted but never surfaced to the UI, so a partial-results
+ * situation (e.g. eBay succeeded, Etsy failed) was invisible. Each is a
+ * real, structurally-validated array/number, defaulting to an empty
+ * array/0 when the backend response doesn't carry it (an older/mocked
+ * response shape) — never fabricated, just "we don't know" rendered as
+ * "no such provider".
+ */
 export interface SourcingSearchOutcome {
   toolCallIndex: number;
   status: 'ok' | 'SOURCE_NOT_CONFIGURED' | 'unknown';
   results: NormalizedSourcingResult[];
   providerErrors: SourcingProviderErrorInfo[];
+  providersSearched: string[];
+  providersFailed: string[];
+  providersUnavailable: string[];
+  providersSkipped: string[];
+  totalResults: number;
+  /**
+   * Phase 4 — echoed back from the tool CALL's own input (never the
+   * result), so the UI can honestly say what was actually asked for
+   * (e.g. "recherche mondiale") without re-deriving it from the results.
+   * `undefined` when the input didn't set it — never defaulted to false/
+   * true, since "not requested" and "requested as false" both exist as
+   * real, distinct states in the underlying Zod schema.
+   */
+  requestedWorldwide?: boolean;
 }
 
 const AUTHENTICITY_STATUSES: readonly AuthenticityStatus[] = ['verified', 'claimed', 'unverified', 'unknown'];
@@ -68,6 +93,11 @@ function isProviderErrorInfo(value: unknown): value is SourcingProviderErrorInfo
   );
 }
 
+/** A real array of provider-name strings, or [] when the field is absent/malformed — never a guess at what it might have contained. */
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
 /**
  * Extracts every search_products outcome from one assistant message's
  * toolCalls (a conversation can, in principle, call it more than once in
@@ -87,12 +117,22 @@ export function extractSourcingOutcomes(toolCalls: unknown[] | undefined): Sourc
     const status = result.status === 'ok' || result.status === 'SOURCE_NOT_CONFIGURED' ? result.status : 'unknown';
     const rawResults = Array.isArray(result.results) ? result.results : [];
     const rawErrors = Array.isArray(result.providerErrors) ? result.providerErrors : [];
+    const validResults = rawResults.filter(isNormalizedSourcingResult);
+    const input = isRecord(call.input) ? call.input : undefined;
 
     outcomes.push({
       toolCallIndex: index,
       status,
-      results: rawResults.filter(isNormalizedSourcingResult),
+      results: validResults,
       providerErrors: rawErrors.filter(isProviderErrorInfo),
+      providersSearched: asStringArray(result.providersSearched),
+      providersFailed: asStringArray(result.providersFailed),
+      providersUnavailable: asStringArray(result.providersUnavailable),
+      providersSkipped: asStringArray(result.providersSkipped),
+      // Prefer the backend's own totalResults when it's a real number;
+      // otherwise fall back to what actually validated, never a guess.
+      totalResults: typeof result.totalResults === 'number' ? result.totalResults : validResults.length,
+      requestedWorldwide: typeof input?.worldwide === 'boolean' ? input.worldwide : undefined,
     });
   });
 
@@ -140,4 +180,40 @@ export function formatMarketplaceLabel(marketplace: string, source: string): str
     return 'Etsy';
   }
   return marketplace;
+}
+
+/**
+ * Phase 4 — French labels for NormalizedSourcingResult.unknownCostFactors'
+ * OWN controlled vocabulary (see src/services/sourcing/types.ts — this
+ * frontend module owns no separate list, it mirrors that exact backend
+ * enum). Never a translation of arbitrary/untrusted text: every key here
+ * is a fixed code ADKSY's own backend defines and documents, not
+ * something a provider/seller supplied — an unrecognized code (a future
+ * backend addition this file hasn't caught up with yet) falls back to the
+ * raw code rather than a guessed label.
+ */
+const UNKNOWN_COST_FACTOR_LABELS: Record<string, string> = {
+  shipping_unknown: 'Frais de livraison',
+  currency_conversion_unavailable: 'Conversion de devise indisponible',
+  import_tax_unknown: "Taxes d'importation",
+  customs_unknown: 'Frais de douane',
+  provider_fee_unknown: 'Frais de plateforme',
+  authentication_cost_unknown: "Frais d'authentification",
+};
+
+export function formatUnknownCostFactor(factor: string): string {
+  return UNKNOWN_COST_FACTOR_LABELS[factor] ?? factor;
+}
+
+/**
+ * Phase 4 — a display name for a bare SourcingProvider.name (e.g. from
+ * providersSearched/providersFailed/providersUnavailable/providersSkipped
+ * — no marketplace value available for these, unlike a specific result).
+ * Never a fabricated brand for a provider this file doesn't know about —
+ * falls back to the raw name.
+ */
+export function formatProviderName(source: string): string {
+  if (source === 'ebay') return 'eBay';
+  if (source === 'etsy') return 'Etsy';
+  return source;
 }

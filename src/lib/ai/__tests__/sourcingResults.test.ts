@@ -5,6 +5,7 @@ import {
   extractSourcingResults,
   formatSourcingPrice,
   formatMarketplaceLabel,
+  formatUnknownCostFactor,
 } from '@/lib/ai/sourcingResults';
 
 const validResult = {
@@ -125,6 +126,60 @@ describe('extractSourcingOutcomes', () => {
     expect(outcomes).toHaveLength(2);
     expect(outcomes[0].toolCallIndex).toBe(0);
     expect(outcomes[1].toolCallIndex).toBe(1);
+  });
+
+  describe('Phase 4 — provider provenance passthrough (partial results UI)', () => {
+    it('extracts providersSearched/providersFailed/providersUnavailable/providersSkipped/totalResults when the backend supplies them', () => {
+      const outcomes = extractSourcingOutcomes([
+        toolCall({
+          status: 'ok',
+          results: [validResult],
+          providersSearched: ['ebay', 'etsy'],
+          providersFailed: ['etsy'],
+          providersUnavailable: [],
+          providersSkipped: [],
+          totalResults: 1,
+        }),
+      ]);
+
+      expect(outcomes[0].providersSearched).toEqual(['ebay', 'etsy']);
+      expect(outcomes[0].providersFailed).toEqual(['etsy']);
+      expect(outcomes[0].providersUnavailable).toEqual([]);
+      expect(outcomes[0].providersSkipped).toEqual([]);
+      expect(outcomes[0].totalResults).toBe(1);
+    });
+
+    it('defaults every provenance array to [] and totalResults to results.length when the backend response omits them — never a guess, never a crash', () => {
+      const outcomes = extractSourcingOutcomes([toolCall({ status: 'ok', results: [validResult] })]);
+
+      expect(outcomes[0].providersSearched).toEqual([]);
+      expect(outcomes[0].providersFailed).toEqual([]);
+      expect(outcomes[0].providersUnavailable).toEqual([]);
+      expect(outcomes[0].providersSkipped).toEqual([]);
+      expect(outcomes[0].totalResults).toBe(1);
+    });
+
+    it('ignores a malformed (non-string-array) provenance field rather than throwing', () => {
+      const outcomes = extractSourcingOutcomes([
+        toolCall({ status: 'ok', results: [], providersFailed: 'not-an-array', providersSearched: [123, 'ebay'] }),
+      ]);
+
+      expect(outcomes[0].providersFailed).toEqual([]);
+      expect(outcomes[0].providersSearched).toEqual(['ebay']);
+    });
+  });
+});
+
+describe('formatUnknownCostFactor', () => {
+  it('translates every known backend code into a real French label', () => {
+    expect(formatUnknownCostFactor('shipping_unknown')).toBe('Frais de livraison');
+    expect(formatUnknownCostFactor('import_tax_unknown')).toBe("Taxes d'importation");
+    expect(formatUnknownCostFactor('customs_unknown')).toBe('Frais de douane');
+    expect(formatUnknownCostFactor('currency_conversion_unavailable')).toBe('Conversion de devise indisponible');
+  });
+
+  it('falls back to the raw code for an unrecognized factor, never a guessed label', () => {
+    expect(formatUnknownCostFactor('some_future_factor')).toBe('some_future_factor');
   });
 });
 
