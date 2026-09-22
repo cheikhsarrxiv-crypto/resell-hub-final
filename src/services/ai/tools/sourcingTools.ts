@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { SourcingService } from '@/services/sourcing/SourcingService';
+import { SourcingProviderRegistry } from '@/services/sourcing/SourcingProviderRegistry';
 import { AgentToolDefinition } from './types';
 
 // Only marketplace IDs EbayBrowseSourcingProvider actually supports today
@@ -86,7 +87,10 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
     "Use `sort` to control ordering: 'match' orders by real constraint matches first, then known landed cost, then authenticity evidence, then price — never an opaque score. " +
     'Set `targetResalePrice` to get a margin PREVIEW (estimatedMargin/estimatedMarginPercent) on results whose landed cost is known — this never includes a future ' +
     'marketplace selling fee (none has been chosen yet) and is never computed without an explicit targetResalePrice; never invent one on the reseller\'s behalf. ' +
-    'providerLatencyMs reports real per-provider search time, for transparency only — never used to rank results.',
+    'providerLatencyMs reports real per-provider search time, for transparency only — never used to rank results. ' +
+    "knownUnavailableSources lists real sources ADKSY researched but has no legitimate marketplace-search access to yet (e.g. Mercari/Rakuma/Yahoo Auctions Japan, Vestiaire Collective, Depop, Vinted), each with a real reason " +
+    "(SELL_SIDE_ONLY: the platform's own API only lets a seller manage their own listings; PARTNER_REQUIRED: a real API exists but needs a partner approval ADKSY doesn't have; NO_CONFIRMED_ACCESS: no official API/feed was found at all) — " +
+    'use this to explain why "worldwide" does not include a source the reseller asked about, never to imply the search covered it.',
   category: 'read',
   inputSchema: searchProductsInputSchema,
   jsonSchema: {
@@ -133,12 +137,21 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
   async handler(_workspaceId, input) {
     const response = await SourcingService.search(input);
 
+    // Phase 5 — real, sourced documentation of sources ADKSY has NO
+    // provider for at all (never a SourcingProvider, never queried, never
+    // confused with providersUnavailable/providersFailed above) — lets
+    // the Agent explain a real limitation (e.g. "no Japanese source yet —
+    // Mercari/Rakuma require partner access") instead of staying silent
+    // or implying "worldwide" already covers everywhere.
+    const knownUnavailableSources = SourcingProviderRegistry.getKnownUnavailableSources();
+
     if (response.status === 'SOURCE_NOT_CONFIGURED') {
       return {
         status: 'SOURCE_NOT_CONFIGURED',
         message: 'No sourcing provider is configured yet — this ADKSY instance cannot search for products right now.',
         results: [],
         providersUnavailable: response.providersUnavailable,
+        knownUnavailableSources,
       };
     }
 
@@ -156,6 +169,7 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       totalResults: response.totalResults,
       // Phase 3 — observability only, never used to rank/filter results.
       providerLatencyMs: response.providerLatencyMs,
+      knownUnavailableSources,
       note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. estimatedMargin/estimatedMarginPercent (when present) are a landed-cost-only preview, never including a marketplace selling fee, and only ever computed when targetResalePrice was explicitly given — never invented.",
     };
   },

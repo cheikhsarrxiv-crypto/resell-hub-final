@@ -381,3 +381,31 @@ export interface SourcingSearchResponse {
    */
   providerLatencyMs: Record<string, number>;
 }
+
+/**
+ * Phase 5 — real, honest reasons a real-world source is NOT a
+ * SourcingProvider today. Distinguishes exactly what kind of access gap
+ * blocks it, per this phase's own research (see
+ * SourcingProviderRegistry.getKnownUnavailableSources for the sourced,
+ * per-provider findings):
+ * - 'SELL_SIDE_ONLY': a real, official API exists, but it only lets a
+ *   seller manage THEIR OWN inventory (create/update/delete listings) —
+ *   never a marketplace-wide search/browse of OTHER sellers' listings.
+ *   Structurally unusable for sourcing regardless of credentials.
+ * - 'PARTNER_REQUIRED': a real API exists but is gated behind a
+ *   partner/business approval process with no public self-service
+ *   registration — technically real, but not something ADKSY can
+ *   configure today without that approval.
+ * - 'NO_CONFIRMED_ACCESS': no official, documented API/feed for
+ *   marketplace-wide search was found at all (only unofficial
+ *   scrapers/third-party tools this project will never use).
+ */
+export type KnownSourceAccessStatus = 'SELL_SIDE_ONLY' | 'PARTNER_REQUIRED' | 'NO_CONFIRMED_ACCESS';
+
+export interface KnownUnavailableSource {
+  /** A real, human-readable name — never a SourcingProvider.name (no SourcingProvider object exists for these at all). */
+  name: string;
+  status: KnownSourceAccessStatus;
+  /** One real, specific sentence citing what was actually found (or not found) — never vague ("not available"), see the registry's own sourced comment for each entry. */
+  reason: string;
+}

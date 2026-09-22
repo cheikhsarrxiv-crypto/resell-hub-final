@@ -231,5 +231,24 @@ describe('search_products tool definition', () => {
       expect(result.results[0].estimatedMargin).toBe(10);
       expect(result.results[0].estimatedMarginPercent).toBe(50);
     });
+
+    it('Phase 5 — knownUnavailableSources (real, researched access-gap documentation) is always included on a successful search', async () => {
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [] });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
+
+      expect(Array.isArray(result.knownUnavailableSources)).toBe(true);
+      expect(result.knownUnavailableSources.length).toBeGreaterThan(0);
+      expect(result.knownUnavailableSources.map((s: any) => s.name)).toContain('Mercari Japan');
+    });
+
+    it('Phase 5 — knownUnavailableSources is also included on SOURCE_NOT_CONFIGURED, so the agent can still explain real limitations', async () => {
+      searchMock.mockResolvedValue({ status: 'SOURCE_NOT_CONFIGURED', results: [], providerErrors: [], providersUnavailable: ['ebay', 'etsy'] });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
+
+      expect(Array.isArray(result.knownUnavailableSources)).toBe(true);
+      expect(result.knownUnavailableSources.length).toBeGreaterThan(0);
+    });
   });
 });

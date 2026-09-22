@@ -47,4 +47,64 @@ describe('SourcingProviderRegistry', () => {
     const second = SourcingProviderRegistry.getAllProviders().map((p) => p.name);
     expect(first).toEqual(second);
   });
+
+  describe('Phase 5 — getKnownUnavailableSources (real, sourced access-gap documentation, never a fake provider)', () => {
+    it('returns a non-empty list of real, named sources this session actually researched', () => {
+      const sources = SourcingProviderRegistry.getKnownUnavailableSources();
+      const names = sources.map((s) => s.name);
+
+      expect(names).toContain('Mercari Japan');
+      expect(names).toContain('Rakuma');
+      expect(names).toContain('Yahoo Auctions Japan');
+      expect(names).toContain('Grailed');
+      expect(names).toContain('Vestiaire Collective');
+      expect(names).toContain('Depop');
+      expect(names).toContain('Vinted');
+    });
+
+    it('every entry has a real, specific, non-empty reason — never a placeholder like "not available"', () => {
+      for (const source of SourcingProviderRegistry.getKnownUnavailableSources()) {
+        expect(source.reason.length).toBeGreaterThan(20);
+        expect(source.reason.toLowerCase()).not.toBe('not available');
+      }
+    });
+
+    it('every entry has one of the real, documented access-gap statuses, never an invented one', () => {
+      const validStatuses = ['SELL_SIDE_ONLY', 'PARTNER_REQUIRED', 'NO_CONFIRMED_ACCESS'];
+      for (const source of SourcingProviderRegistry.getKnownUnavailableSources()) {
+        expect(validStatuses).toContain(source.status);
+      }
+    });
+
+    it('never overlaps with a real SourcingProvider name — these are documentation entries, never confused with a real, queryable provider', () => {
+      const realProviderNames = SourcingProviderRegistry.getAllProviders().map((p) => p.name);
+      const knownUnavailableNames = SourcingProviderRegistry.getKnownUnavailableSources().map((s) => s.name);
+      for (const name of knownUnavailableNames) {
+        expect(realProviderNames).not.toContain(name);
+      }
+    });
+
+    it('Vestiaire Collective and Mercari Japan are classified SELL_SIDE_ONLY — a real API exists but only for managing a seller\'s own inventory', () => {
+      const sources = SourcingProviderRegistry.getKnownUnavailableSources();
+      expect(sources.find((s) => s.name === 'Mercari Japan')?.status).toBe('SELL_SIDE_ONLY');
+      expect(sources.find((s) => s.name === 'Vestiaire Collective')?.status).toBe('SELL_SIDE_ONLY');
+    });
+
+    it('Depop and Vinted are classified PARTNER_REQUIRED — a real API exists but is allowlist/approval-gated with no self-service', () => {
+      const sources = SourcingProviderRegistry.getKnownUnavailableSources();
+      expect(sources.find((s) => s.name === 'Depop')?.status).toBe('PARTNER_REQUIRED');
+      expect(sources.find((s) => s.name === 'Vinted')?.status).toBe('PARTNER_REQUIRED');
+    });
+
+    it('Yahoo Auctions Japan is classified NO_CONFIRMED_ACCESS — its own public API was officially discontinued', () => {
+      const sources = SourcingProviderRegistry.getKnownUnavailableSources();
+      const yahoo = sources.find((s) => s.name === 'Yahoo Auctions Japan');
+      expect(yahoo?.status).toBe('NO_CONFIRMED_ACCESS');
+      expect(yahoo?.reason).toMatch(/discontinued/i);
+    });
+
+    it('calling it never makes a network request or throws — pure, synchronous, static data', () => {
+      expect(() => SourcingProviderRegistry.getKnownUnavailableSources()).not.toThrow();
+    });
+  });
 });
