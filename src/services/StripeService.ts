@@ -2,9 +2,32 @@ import Stripe from 'stripe';
 import prisma from '@/lib/prisma';
 import { EmailService } from './EmailService';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  // Use default API version
-});
+/**
+ * Phase 10 production-readiness fix — this used to construct the Stripe
+ * client at MODULE LEVEL (`const stripe = new Stripe(process.env.
+ * STRIPE_SECRET_KEY!, {})`), which throws immediately ("Neither apiKey nor
+ * config.authenticator provided", verified directly against the real
+ * Stripe SDK) the instant this file is imported with STRIPE_SECRET_KEY
+ * unset — not when a Stripe method is actually called. Every route that
+ * imports StripeService (checkout/webhooks/portal) would fail to even
+ * load in any environment missing that one env var (a preview deployment,
+ * a misconfigured environment, or — a well-known Next.js/Vercel gotcha —
+ * during `next build` itself if the build step traces/evaluates the
+ * module without the secret present at build time), rather than failing
+ * only when Stripe is genuinely used. Lazily constructed and cached here
+ * instead: importing this file is now always safe; only an actual call
+ * into a StripeService method that needs Stripe fails, with a clear error,
+ * if the key is genuinely missing.
+ */
+let stripeClient: Stripe | null = null;
+function getStripeClient(): Stripe {
+  if (!stripeClient) {
+    stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      // Use default API version
+    });
+  }
+  return stripeClient;
+}
 
 export interface CheckoutSessionData {
   planId: string;
@@ -83,7 +106,7 @@ export class StripeService {
       let stripeCustomerId = workspace.stripeCustomerId;
 
       if (!stripeCustomerId) {
-        const customer = await stripe.customers.create({
+        const customer = await getStripeClient().customers.create({
           email: data.email,
           metadata: {
             workspaceId: data.workspaceId,
@@ -100,7 +123,7 @@ export class StripeService {
       }
 
       // Create checkout session using Stripe Price ID (BEST PRACTICE)
-      const session = await stripe.checkout.sessions.create({
+      const session = await getStripeClient().checkout.sessions.create({
         customer: stripeCustomerId,
         payment_method_types: ['card'],
         line_items: [
@@ -310,7 +333,7 @@ export class StripeService {
     signature: string
   ): Stripe.Event {
     try {
-      return stripe.webhooks.constructEvent(
+      return getStripeClient().webhooks.constructEvent(
         body,
         signature,
         process.env.STRIPE_WEBHOOK_SECRET!
@@ -334,7 +357,7 @@ export class StripeService {
         throw new Error('No Stripe customer found');
       }
 
-      const session = await stripe.billingPortal.sessions.create({
+      const session = await getStripeClient().billingPortal.sessions.create({
         customer: (workspace as any).stripeCustomerId,
         return_url: returnUrl,
       });
@@ -351,7 +374,7 @@ export class StripeService {
    */
   static async getSubscriptionDetails(stripeSubscriptionId: string) {
     try {
-      return await stripe.subscriptions.retrieve(stripeSubscriptionId);
+      return await getStripeClient().subscriptions.retrieve(stripeSubscriptionId);
     } catch (error) {
       console.error('[StripeService] Get subscription error:', error);
       throw error;
@@ -363,7 +386,7 @@ export class StripeService {
    */
   static async cancelSubscription(stripeSubscriptionId: string) {
     try {
-      const subscription = await stripe.subscriptions.cancel(stripeSubscriptionId);
+      const subscription = await getStripeClient().subscriptions.cancel(stripeSubscriptionId);
       return subscription;
     } catch (error) {
       console.error('[StripeService] Cancel subscription error:', error);
