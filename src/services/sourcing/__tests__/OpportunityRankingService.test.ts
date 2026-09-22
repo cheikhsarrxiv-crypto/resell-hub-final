@@ -142,6 +142,54 @@ describe('annotateResult — known-cost uncertainty warnings', () => {
   });
 });
 
+describe('annotateResult — Phase 6 factual risk signals', () => {
+  it('condition_unknown: warns when the result has no condition at all', () => {
+    const { warnings } = annotateResult(makeResult({ condition: undefined }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /condition is not reported/i.test(w))).toBe(true);
+  });
+
+  it('no condition_unknown warning when a real condition is reported', () => {
+    const { warnings } = annotateResult(makeResult({ condition: 'USED_EXCELLENT' }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /condition is not reported/i.test(w))).toBe(false);
+  });
+
+  it('seller_rating_unknown: warns when there is no seller at all', () => {
+    const { warnings } = annotateResult(makeResult({ seller: undefined }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /seller reputation is not reported/i.test(w))).toBe(true);
+  });
+
+  it('seller_rating_unknown: warns when a seller name exists but no rating evidence at all', () => {
+    const { warnings } = annotateResult(makeResult({ seller: { name: 'shop1' } }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /seller reputation is not reported/i.test(w))).toBe(true);
+  });
+
+  it('no seller_rating_unknown warning when real feedback evidence exists', () => {
+    const { warnings } = annotateResult(makeResult({ seller: { name: 'shop1', feedbackPercentage: 99.4 } }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /seller reputation is not reported/i.test(w))).toBe(false);
+  });
+
+  it('availability_unknown: warns when availability is not reported', () => {
+    const { warnings } = annotateResult(makeResult({ availability: undefined }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /availability is not reported/i.test(w))).toBe(true);
+  });
+
+  it('no availability_unknown warning when a real availability status is reported', () => {
+    const { warnings } = annotateResult(makeResult({ availability: 'IN_STOCK' }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /availability is not reported/i.test(w))).toBe(false);
+  });
+
+  it('a fully-complete result (condition + seller evidence + availability) gets none of the three Phase 6 risk warnings', () => {
+    const { warnings } = annotateResult(
+      makeResult({ condition: 'USED_EXCELLENT', seller: { name: 'shop1', feedbackPercentage: 99.4 }, availability: 'IN_STOCK' }),
+      { query: 'x' },
+      noBounds
+    );
+    expect(warnings.some((w) => /condition is not reported/i.test(w))).toBe(false);
+    expect(warnings.some((w) => /seller reputation is not reported/i.test(w))).toBe(false);
+    expect(warnings.some((w) => /availability is not reported/i.test(w))).toBe(false);
+  });
+});
+
 describe('compareByMatch — deterministic, documented, multi-key', () => {
   it('1) more real matchReasons sorts first', () => {
     const a = makeResult({ matchReasons: ['a', 'b'] });
@@ -161,7 +209,13 @@ describe('compareByMatch — deterministic, documented, multi-key', () => {
     expect(compareByMatch(cheaper, pricier)).toBeLessThan(0);
   });
 
-  it('3) stronger authenticity evidence sorts first when matches/cost tie', () => {
+  it('Phase 6 (3): a known shipping cost sorts before an unknown one, when matches/cost tie', () => {
+    const withShipping = makeResult({ shippingCost: 5, shippingCostCurrency: 'EUR' });
+    const withoutShipping = makeResult({ shippingCost: undefined });
+    expect(compareByMatch(withShipping, withoutShipping)).toBeLessThan(0);
+  });
+
+  it('3) stronger authenticity evidence sorts first when matches/cost/shipping tie', () => {
     const verified = makeResult({ authenticityStatus: 'verified' });
     const claimed = makeResult({ authenticityStatus: 'claimed' });
     expect(compareByMatch(verified, claimed)).toBeLessThan(0);
@@ -171,6 +225,24 @@ describe('compareByMatch — deterministic, documented, multi-key', () => {
     const withCondition = makeResult({ condition: 'used' });
     const withoutCondition = makeResult({ condition: undefined });
     expect(compareByMatch(withCondition, withoutCondition)).toBeLessThan(0);
+  });
+
+  it('Phase 6: real seller evidence (feedback score/percentage) sorts before none, when everything above ties', () => {
+    const withSellerEvidence = makeResult({ seller: { name: 'shop1', feedbackPercentage: 99.4 } });
+    const withoutSellerEvidence = makeResult({ seller: undefined });
+    expect(compareByMatch(withSellerEvidence, withoutSellerEvidence)).toBeLessThan(0);
+  });
+
+  it('Phase 6: a seller with only a name (no rating evidence) is treated the same as no seller at all for this tie-break', () => {
+    const nameOnly = makeResult({ seller: { name: 'shop1' } });
+    const noSeller = makeResult({ seller: undefined });
+    expect(compareByMatch(nameOnly, noSeller)).toBe(0);
+  });
+
+  it('Phase 6: a computed margin preview sorts before none, when everything above ties', () => {
+    const withMargin = makeResult({ estimatedMargin: 50, estimatedMarginPercent: 15 });
+    const withoutMargin = makeResult({ estimatedMargin: undefined });
+    expect(compareByMatch(withMargin, withoutMargin)).toBeLessThan(0);
   });
 
   it('5) ascending normalizedPriceEur is the final tie-break', () => {

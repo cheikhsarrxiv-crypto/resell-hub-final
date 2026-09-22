@@ -85,7 +85,13 @@ describe('SourcingService.search', () => {
         normalizedPriceEur: 10,
         unknownCostFactors: ['shipping_unknown'],
         matchReasons: [],
-        warnings: ["Authenticity is only the seller's own claim — not independently verified.", "Landed cost is incomplete — this listing's shipping cost is not reported."],
+        warnings: [
+          "Authenticity is only the seller's own claim — not independently verified.",
+          "Landed cost is incomplete — this listing's shipping cost is not reported.",
+          'Item condition is not reported by this source.',
+          'Seller reputation is not reported by this source.',
+          'Stock availability is not reported by this source.',
+        ],
       },
     ]);
     expect(response.providerErrors).toEqual([]);
@@ -578,6 +584,84 @@ describe('SourcingService.search', () => {
       const response = await SourcingService.search({ query: 'x', targetResalePrice: 20 });
 
       expect(response.results[0].estimatedMargin).toBeUndefined();
+    });
+
+    it('Phase 6 — echoes targetResalePrice back onto the result, only alongside a real computed margin', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', targetResalePrice: 20 });
+
+      expect(response.results[0].targetResalePrice).toBe(20);
+    });
+
+    it('Phase 6 — never echoes targetResalePrice when no margin was actually computed', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR' }); // shipping unknown -> no margin
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', targetResalePrice: 20 });
+
+      expect(response.results[0].targetResalePrice).toBeUndefined();
+    });
+  });
+
+  describe('Phase 6 — shippingCostEur / knownAdditionalCostsEur (independent EUR cost breakdown)', () => {
+    it('attaches a real, converted shippingCostEur whenever shipping is known and convertible', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR', shippingCost: 5, shippingCostCurrency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].shippingCostEur).toBe(5);
+      expect(response.results[0].estimatedKnownCostEur).toBe(15);
+    });
+
+    it('shippingCostEur stays undefined when shipping itself is unreported', async () => {
+      const result = fakeResult({ price: 10, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].shippingCostEur).toBeUndefined();
+    });
+
+    it('attaches a real, converted knownAdditionalCostsEur (sum) when every additional cost line converts', async () => {
+      const result = fakeResult({
+        price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR',
+        knownAdditionalCosts: [{ type: 'handling', amount: 3, currency: 'EUR' }, { type: 'insurance', amount: 2, currency: 'EUR' }],
+      });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].knownAdditionalCostsEur).toBe(5);
+      expect(response.results[0].estimatedKnownCostEur).toBe(15);
+    });
+
+    it('shippingCostEur is still populated even when a DIFFERENT cost line (knownAdditionalCosts) fails to convert and blocks the overall total', async () => {
+      const result = fakeResult({
+        price: 10, currency: 'EUR', shippingCost: 5, shippingCostCurrency: 'EUR',
+        knownAdditionalCosts: [{ type: 'handling', amount: 3, currency: 'JPY' }],
+      });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].estimatedKnownCostEur).toBeUndefined();
+      expect(response.results[0].shippingCostEur).toBe(5);
+      expect(response.results[0].knownAdditionalCostsEur).toBeUndefined();
+    });
+
+    it('knownAdditionalCostsEur stays undefined (never a partial sum) when one entry fails to convert', async () => {
+      const result = fakeResult({
+        price: 10, currency: 'EUR', shippingCost: 0, shippingCostCurrency: 'EUR',
+        knownAdditionalCosts: [{ type: 'handling', amount: 3, currency: 'EUR' }, { type: 'insurance', amount: 2, currency: 'JPY' }],
+      });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].knownAdditionalCostsEur).toBeUndefined();
     });
   });
 

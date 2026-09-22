@@ -294,6 +294,38 @@ export interface NormalizedSourcingResult {
   estimatedMargin?: number;
   /** Paired with estimatedMargin — undefined under the exact same conditions. */
   estimatedMarginPercent?: number;
+  /**
+   * Phase 6 — `shippingCost` independently converted to EUR via
+   * CurrencyConversionService, set by SourcingService. Exposed as its own
+   * field (distinct from the combined `estimatedKnownCostEur`) so the UI/
+   * Agent can show a real, converted shipping figure even when the
+   * OVERALL landed cost is undefined for an unrelated reason (e.g. a
+   * knownAdditionalCosts line that failed to convert). Undefined whenever
+   * shippingCost itself is unreported, or its own conversion is
+   * unavailable — never a guess, and never the same thing as "shipping is
+   * free" (that is a real, reported shippingCost of 0, still converted
+   * normally here).
+   */
+  shippingCostEur?: number;
+  /**
+   * Phase 6 — the sum of every `knownAdditionalCosts` entry, independently
+   * converted to EUR, set by SourcingService. Distinct from
+   * `estimatedKnownCostEur` (which also folds in price/shipping) so a
+   * caller can see the known-fees component on its own. Undefined
+   * whenever `knownAdditionalCosts` is empty/absent, or any entry's own
+   * conversion is unavailable — never a partial sum.
+   */
+  knownAdditionalCostsEur?: number;
+  /**
+   * Phase 6 — echoes NormalizedSearchQuery.targetResalePrice back onto
+   * THIS result, but ONLY when it was actually used to compute
+   * estimatedMargin/estimatedMarginPercent for this result (same gate,
+   * set by the same step) — so a reader never has to cross-reference the
+   * original query to understand what "estimatedMargin" was measured
+   * against. Never present without estimatedMargin also being present,
+   * and never a value the caller didn't actually supply.
+   */
+  targetResalePrice?: number;
 }
 
 export interface SourcingProviderErrorInfo {

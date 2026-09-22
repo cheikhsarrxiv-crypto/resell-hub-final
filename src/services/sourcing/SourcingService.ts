@@ -94,6 +94,13 @@ async function attachLandedCost(result: NormalizedSourcingResult): Promise<Norma
   let total = result.normalizedPriceEur;
   let blocked = false;
   let unknownCostFactors = result.unknownCostFactors ?? [];
+  // Phase 6 — exposed as their OWN fields, independent of whether the
+  // combined estimatedKnownCostEur ends up blocked for an unrelated
+  // reason (e.g. shipping known but a knownAdditionalCosts line fails to
+  // convert) — a real, converted shipping figure should still be shown
+  // even when the overall total can't be.
+  let shippingCostEur: number | undefined;
+  let knownAdditionalCostsEur: number | undefined;
 
   try {
     if (result.shippingCost === undefined) {
@@ -105,32 +112,50 @@ async function attachLandedCost(result: NormalizedSourcingResult): Promise<Norma
         unknownCostFactors = pushUnique(unknownCostFactors, 'currency_conversion_unavailable');
         blocked = true;
       } else {
+        shippingCostEur = conversion.amount;
         total += conversion.amount;
       }
     }
 
-    for (const cost of result.knownAdditionalCosts ?? []) {
-      const conversion = await CurrencyConversionService.convert(cost.amount, cost.currency, 'EUR');
-      if (conversion.amount === null) {
-        unknownCostFactors = pushUnique(unknownCostFactors, 'currency_conversion_unavailable');
-        blocked = true;
-      } else {
-        total += conversion.amount;
+    if (result.knownAdditionalCosts && result.knownAdditionalCosts.length > 0) {
+      let additionalTotal = 0;
+      let additionalFullyKnown = true;
+      for (const cost of result.knownAdditionalCosts) {
+        const conversion = await CurrencyConversionService.convert(cost.amount, cost.currency, 'EUR');
+        if (conversion.amount === null) {
+          unknownCostFactors = pushUnique(unknownCostFactors, 'currency_conversion_unavailable');
+          blocked = true;
+          additionalFullyKnown = false;
+        } else {
+          additionalTotal += conversion.amount;
+          total += conversion.amount;
+        }
       }
+      if (additionalFullyKnown) knownAdditionalCostsEur = additionalTotal;
     }
   } catch (error) {
     logger.error(
       `Landed cost conversion failed for a sourcing result from "${result.source}"`,
       error instanceof Error ? error : String(error)
     );
-    return { ...result, unknownCostFactors: unknownCostFactors.length > 0 ? unknownCostFactors : result.unknownCostFactors };
+    return {
+      ...result,
+      unknownCostFactors: unknownCostFactors.length > 0 ? unknownCostFactors : result.unknownCostFactors,
+      shippingCostEur,
+      knownAdditionalCostsEur,
+    };
   }
 
   if (blocked) {
-    return { ...result, unknownCostFactors: unknownCostFactors.length > 0 ? unknownCostFactors : undefined };
+    return {
+      ...result,
+      unknownCostFactors: unknownCostFactors.length > 0 ? unknownCostFactors : undefined,
+      shippingCostEur,
+      knownAdditionalCostsEur,
+    };
   }
 
-  return { ...result, estimatedKnownCostEur: total };
+  return { ...result, estimatedKnownCostEur: total, shippingCostEur, knownAdditionalCostsEur };
 }
 
 /**
@@ -197,7 +222,15 @@ async function attachMargin(result: NormalizedSourcingResult, query: NormalizedS
       return result;
     }
 
-    return { ...result, estimatedMargin: marginResult.marginAmount, estimatedMarginPercent: marginResult.marginPercent };
+    return {
+      ...result,
+      estimatedMargin: marginResult.marginAmount,
+      estimatedMarginPercent: marginResult.marginPercent,
+      // Phase 6 — echoed only alongside a real computed margin, so a
+      // reader never has to cross-reference the original query to know
+      // what estimatedMargin was measured against.
+      targetResalePrice: query.targetResalePrice,
+    };
   } catch (error) {
     logger.error(
       `Margin preview failed for a sourcing result from "${result.source}"`,

@@ -49,9 +49,10 @@ describe('SourcingResultCard', () => {
     expect(freeShipping).toContain('Livraison gratuite');
   });
 
-  it('never shows a shipping line at all when shippingCost is absent — never fabricated as 0', () => {
+  it('Phase 6: shows "Livraison : inconnue" (never fabricated as free/0) when shippingCost is absent', () => {
     const html = renderToStaticMarkup(<SourcingResultCard result={baseResult} />);
-    expect(html).not.toContain('Livraison');
+    expect(html).toContain('Livraison : inconnue');
+    expect(html).not.toContain('Livraison gratuite');
   });
 
   it('"claimed" is shown as a seller declaration, never as "authentic"', () => {
@@ -222,6 +223,42 @@ describe('SourcingResultCard', () => {
     it('M. never shows a margin block when no targetResalePrice-derived margin exists — never invented', () => {
       const html = renderToStaticMarkup(<SourcingResultCard result={baseResult} />);
       expect(html).not.toContain('Marge estimée');
+    });
+
+    it('Phase 6: shows "Revente cible" only when targetResalePrice is present alongside a real margin', () => {
+      const withTarget = renderToStaticMarkup(
+        <SourcingResultCard result={{ ...baseResult, estimatedMargin: 170, estimatedMarginPercent: 37.8, targetResalePrice: 450 }} />
+      );
+      expect(withTarget).toContain('Revente cible');
+      expect(withTarget).toContain('450');
+
+      const withoutTarget = renderToStaticMarkup(<SourcingResultCard result={{ ...baseResult, estimatedMargin: 170, estimatedMarginPercent: 37.8 }} />);
+      expect(withoutTarget).not.toContain('Revente cible');
+    });
+
+    it('Phase 6: margin amount and percent are each shown as their own "Marge estimée :" line', () => {
+      const html = renderToStaticMarkup(
+        <SourcingResultCard result={{ ...baseResult, estimatedMargin: 170, estimatedMarginPercent: 37.8, targetResalePrice: 450 }} />
+      );
+      const occurrences = html.match(/Marge estimée/g) ?? [];
+      expect(occurrences.length).toBe(2);
+      expect(html).toContain('170');
+      expect(html).toContain('37.8');
+    });
+
+    it('Phase 6: the margin block always includes a caveat that marketplace fees/import taxes are excluded from the estimate', () => {
+      const html = renderToStaticMarkup(<SourcingResultCard result={{ ...baseResult, estimatedMargin: 60, estimatedMarginPercent: 12.5 }} />);
+      expect(html).toContain('hors frais de vente marketplace');
+      expect(html).toContain("taxes d");
+      expect(html).toContain('import');
+    });
+
+    it('Phase 6: never labels the margin as a guaranteed "profit" — always an estimate', () => {
+      const html = renderToStaticMarkup(
+        <SourcingResultCard result={{ ...baseResult, estimatedMargin: 60, estimatedMarginPercent: 12.5 }} />
+      );
+      expect(html.toLowerCase()).not.toContain('profit');
+      expect(html.toLowerCase()).not.toContain('bénéfice garanti');
     });
 
     it('O. shows the real itemLocationCountry when present, omits it when absent', () => {

@@ -85,13 +85,13 @@ export function SourcingResultCard({ result, onCreateProduct }: SourcingResultCa
           )}
         </div>
 
-        {result.shippingCost !== undefined && (
-          <p className="text-xs text-gray-400">
-            {result.shippingCost === 0
+        <p className="text-xs text-gray-400">
+          {result.shippingCost === undefined
+            ? 'Livraison : inconnue'
+            : result.shippingCost === 0
               ? 'Livraison gratuite'
               : `Livraison ${formatSourcingPrice(result.shippingCost, result.shippingCostCurrency ?? result.currency)}`}
-          </p>
-        )}
+        </p>
 
         {(hasKnownCost || hasUnknownCosts) && (
           <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2.5 py-2 text-xs space-y-1">
@@ -118,11 +118,19 @@ export function SourcingResultCard({ result, onCreateProduct }: SourcingResultCa
         )}
 
         {hasMargin && (
-          <div className="rounded-lg bg-emerald-500/[0.06] border border-emerald-500/15 px-2.5 py-2 text-xs">
-            <p className="text-gray-400">Marge estimée (aperçu, hors frais de vente)</p>
-            <p className="font-medium text-emerald-400">
-              {formatSourcingPrice(result.estimatedMargin as number, 'EUR')} ({(result.estimatedMarginPercent as number).toFixed(1)} %)
+          <div className="rounded-lg bg-emerald-500/[0.06] border border-emerald-500/15 px-2.5 py-2 text-xs space-y-0.5">
+            {result.targetResalePrice !== undefined && (
+              <p className="text-gray-400">
+                Revente cible : <span className="text-gray-200">{formatSourcingPrice(result.targetResalePrice, 'EUR')}</span>
+              </p>
+            )}
+            <p className="text-gray-400">
+              Marge estimée : <span className="font-medium text-emerald-400">{formatSourcingPrice(result.estimatedMargin as number, 'EUR')}</span>
             </p>
+            <p className="text-gray-400">
+              Marge estimée : <span className="font-medium text-emerald-400">{(result.estimatedMarginPercent as number).toFixed(1)} %</span>
+            </p>
+            <p className="text-gray-500">Aperçu — hors frais de vente marketplace et taxes d&apos;import</p>
           </div>
         )}
 

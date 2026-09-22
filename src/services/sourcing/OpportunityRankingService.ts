@@ -1,10 +1,23 @@
 /**
- * Phase 3 — transparent opportunity annotation/ranking for the Global
- * Sourcing Engine. Deliberately NOT a black-box "AI score": every
- * matchReason/warning is a plain sentence describing a real fact already
- * present on the query or the result, and the 'match' sort (see
- * compareByMatch) is a fixed, documented, multi-key comparator — never a
- * single summed/weighted number.
+ * Phase 3/6 — ADKSY's Opportunity Analysis layer for the Global Sourcing
+ * Engine: transparent annotation (matchReasons/warnings/risks) and
+ * deterministic ranking for a NormalizedSourcingResult. Deliberately NOT
+ * a black-box "AI score": every matchReason/warning is a plain sentence
+ * describing a real fact already present on the query or the result, and
+ * the 'match' sort (see compareByMatch) is a fixed, documented, multi-key
+ * comparator — never a single summed/weighted number.
+ *
+ * Phase 6 note on naming: the brief that introduced this phase asked for
+ * an "OpportunityAnalysisService ou équivalent" covering match/cost/
+ * margin/authenticity analysis. Cost (attachLandedCost) and margin
+ * (attachMargin) already lived — correctly — in SourcingService.ts, next
+ * to the currency conversion they both depend on; moving them here would
+ * split a currency-dependent computation away from its own dependency for
+ * no functional gain. This file already covered match/authenticity/risk
+ * analysis and ranking (Phase 3) and is functionally ADKSY's "Opportunity
+ * Analysis" layer — Phase 6 extends it in place (real, structured risk
+ * warnings; a fuller, still fully documented ranking) rather than
+ * renaming/duplicating it.
  */
 import { NormalizedSearchQuery, NormalizedSourcingResult } from './types';
 
@@ -114,6 +127,21 @@ export function annotateResult(
     warnings.push(describeUnknownCostFactor(factor));
   }
 
+  // --- Phase 6: additional factual risk signals — real gaps in what this
+  // specific source reported, never a judgment call. Each fires only when
+  // the corresponding field is genuinely absent from this result; never
+  // conditioned on what the query asked for (these describe the LISTING's
+  // own completeness, independent of the search).
+  if (result.condition === undefined) {
+    warnings.push('Item condition is not reported by this source.');
+  }
+  if (result.seller === undefined || (result.seller.feedbackScore === undefined && result.seller.feedbackPercentage === undefined)) {
+    warnings.push('Seller reputation is not reported by this source.');
+  }
+  if (result.availability === undefined) {
+    warnings.push('Stock availability is not reported by this source.');
+  }
+
   return { matchReasons, warnings, excludedByPrice };
 }
 
@@ -124,16 +152,33 @@ const AUTHENTICITY_RANK: Record<NormalizedSourcingResult['authenticityStatus'], 
   unknown: 3,
 };
 
+/** Defined-first tie-break helper: 0 when `value` is defined, 1 when undefined — so `.sort` naturally puts the "known" side first without a magic-number scattered through compareByMatch. */
+function definedFirst(value: unknown): 0 | 1 {
+  return value !== undefined ? 0 : 1;
+}
+
 /**
  * Fixed, documented, multi-key comparator for NormalizedSearchQuery.sort
  * === 'match'. Never a single summed/weighted "score" — each tie-break
- * key is applied in this fixed order, exactly matching the priority the
- * Phase 3 brief itself specifies:
+ * key is applied in this fixed order, matching the priority this Global
+ * Sourcing Engine's own briefs (Phase 3, extended Phase 6) specify:
  *   1. more real constraint matches first (matchReasons.length, descending)
  *   2. a known landed cost before an unknown one, then ascending by it
- *   3. stronger authenticity evidence first (verified > claimed > unverified > unknown)
- *   4. a reported condition before none
- *   5. ascending normalizedPriceEur (undefined last)
+ *   3. a known shipping cost before an unknown one (Phase 6)
+ *   4. stronger authenticity evidence first (verified > claimed > unverified > unknown)
+ *   5. a reported condition before none
+ *   6. real seller evidence (a seller with a feedback score/percentage) before none (Phase 6)
+ *   7. a computed margin preview before none (Phase 6 — only meaningfully
+ *      differs when the caller supplied targetResalePrice, since that's
+ *      the only way estimatedMargin is ever set)
+ *   8. ascending normalizedPriceEur (undefined last)
+ * Section 5 of the Phase 6 brief also lists "size/color match" — no
+ * current provider ever returns size/color on a RESULT (only as SEARCH
+ * INPUT filters folded into keywords, see NormalizedSearchQuery's own
+ * comments), so there is no real per-result data to rank by; adding a
+ * key for it would mean comparing two results that are always equal on
+ * it, which is a no-op, not a real ranking signal — documented here
+ * rather than silently omitted.
  */
 export function compareByMatch(a: NormalizedSourcingResult, b: NormalizedSourcingResult): number {
   const matchDiff = (b.matchReasons?.length ?? 0) - (a.matchReasons?.length ?? 0);
@@ -147,12 +192,22 @@ export function compareByMatch(a: NormalizedSourcingResult, b: NormalizedSourcin
     return aKnownCost - bKnownCost;
   }
 
+  const shippingDiff = definedFirst(a.shippingCost) - definedFirst(b.shippingCost);
+  if (shippingDiff !== 0) return shippingDiff;
+
   const authenticityDiff = AUTHENTICITY_RANK[a.authenticityStatus] - AUTHENTICITY_RANK[b.authenticityStatus];
   if (authenticityDiff !== 0) return authenticityDiff;
 
-  const aHasCondition = a.condition !== undefined ? 0 : 1;
-  const bHasCondition = b.condition !== undefined ? 0 : 1;
-  if (aHasCondition !== bHasCondition) return aHasCondition - bHasCondition;
+  const conditionDiff = definedFirst(a.condition) - definedFirst(b.condition);
+  if (conditionDiff !== 0) return conditionDiff;
+
+  const aHasSellerEvidence = a.seller !== undefined && (a.seller.feedbackScore !== undefined || a.seller.feedbackPercentage !== undefined);
+  const bHasSellerEvidence = b.seller !== undefined && (b.seller.feedbackScore !== undefined || b.seller.feedbackPercentage !== undefined);
+  const sellerDiff = (aHasSellerEvidence ? 0 : 1) - (bHasSellerEvidence ? 0 : 1);
+  if (sellerDiff !== 0) return sellerDiff;
+
+  const marginDiff = definedFirst(a.estimatedMargin) - definedFirst(b.estimatedMargin);
+  if (marginDiff !== 0) return marginDiff;
 
   if (a.normalizedPriceEur === undefined && b.normalizedPriceEur === undefined) return 0;
   if (a.normalizedPriceEur === undefined) return 1;
