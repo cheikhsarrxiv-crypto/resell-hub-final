@@ -39,11 +39,29 @@ function formatOrderForAgent(order: NonNullable<Awaited<ReturnType<typeof OrderS
       ? {
           status: order.fulfillmentOrder.status,
           partner: order.fulfillmentOrder.partner.name,
+          // Phase 8 — the SHIPMENT's own status (a real, distinct column,
+          // e.g. 'in_transit'/'delivered') is never the same thing as the
+          // ORDER's own status above; both are surfaced separately so the
+          // Agent can never conflate them (see AiAgentService's own rule:
+          // Order.status = 'processing' must never be reworded as
+          // "shipped" just because a shipment happens to exist).
           tracking: order.fulfillmentOrder.shipment
             ? {
                 carrier: order.fulfillmentOrder.shipment.carrier,
                 trackingNumber: order.fulfillmentOrder.shipment.trackingNumber,
+                trackingUrl: order.fulfillmentOrder.shipment.trackingUrl,
                 status: order.fulfillmentOrder.shipment.status,
+                estimatedDelivery: order.fulfillmentOrder.shipment.estimatedDelivery?.toISOString() ?? null,
+                actualDelivery: order.fulfillmentOrder.shipment.actualDelivery?.toISOString() ?? null,
+                // Already fetched by OrderService.getOrder, most recent
+                // first — real, stored events only, never fabricated or
+                // reordered here.
+                events: order.fulfillmentOrder.shipment.trackingEvents.map((event) => ({
+                  status: event.status,
+                  location: event.location,
+                  description: event.description,
+                  timestamp: event.timestamp.toISOString(),
+                })),
               }
             : null,
         }

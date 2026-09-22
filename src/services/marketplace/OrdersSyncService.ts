@@ -92,22 +92,49 @@ export class OrdersSyncService {
             // Map status
             const mappedStatus = StatusMapper.mapToResellHub(marketplace, order.status)
 
-            // Upsert order (idempotent) — externalOrderId isn't a unique key in the schema, look it up manually
-            const existing = await prisma.order.findFirst({
-              where: { workspaceId, externalOrderId: order.externalOrderId },
-            })
+            // Phase 8 audit finding: Order has no DB-level unique
+            // constraint on (workspaceId, externalOrderId) — adding one is
+            // a real schema change (see this phase's own migration report),
+            // out of this phase's migration-free scope. Without it, a
+            // plain findFirst-then-create is a real TOCTOU race: two
+            // concurrent syncs (or two overlapping cron invocations) for
+            // the SAME externalOrderId could both see "not found" and both
+            // insert, creating two local Orders for one real marketplace
+            // sale. Closed here, with zero schema changes, using a real
+            // Postgres transaction-scoped advisory lock keyed by
+            // (workspaceId, marketplace, externalOrderId): the SECOND
+            // concurrent transaction blocks at pg_advisory_xact_lock until
+            // the FIRST commits (releasing the lock automatically), then
+            // re-reads and correctly takes the "existing" update branch
+            // instead of creating a duplicate. hashtext() is a real
+            // Postgres builtin (stable digest of the lock key into the
+            // int4 pg_advisory_xact_lock expects); a hash collision with a
+            // different (workspace, marketplace, externalOrderId) key would
+            // only ever cause harmless extra serialization, never a
+            // correctness issue, since the lock is merely a mutex — the
+            // actual dedup decision is still the real findFirst inside it.
+            const lockKey = `order-sync:${workspaceId}:${marketplace}:${order.externalOrderId}`
 
-            if (existing) {
-              await prisma.order.update({
-                where: { id: existing.id },
-                data: {
-                  status: mappedStatus,
-                  customerEmail: order.buyerEmail || '',
-                  totalPrice: order.totalPrice,
-                  updatedAt: new Date(),
-                },
+            const outcome = await prisma.$transaction(async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
+
+              const existing = await tx.order.findFirst({
+                where: { workspaceId, externalOrderId: order.externalOrderId },
               })
-            } else {
+
+              if (existing) {
+                const updated = await tx.order.update({
+                  where: { id: existing.id },
+                  data: {
+                    status: mappedStatus,
+                    customerEmail: order.buyerEmail || '',
+                    totalPrice: order.totalPrice,
+                    updatedAt: new Date(),
+                  },
+                })
+                return { isNew: false as const, order: updated }
+              }
+
               // Resolve each line's Product once, up front — reused below
               // both to pick the order's origin listing and to avoid
               // re-querying the same product a second time in the
@@ -117,7 +144,7 @@ export class OrdersSyncService {
                 if (!item.sku || resolvedProducts.has(item.sku)) {
                   continue
                 }
-                const product = await prisma.product.findUnique({
+                const product = await tx.product.findUnique({
                   where: { workspaceId_sku: { workspaceId, sku: item.sku } },
                 })
                 if (product) {
@@ -135,7 +162,7 @@ export class OrdersSyncService {
               const firstResolvedItem = (order.items || []).find((item) => item.sku && resolvedProducts.has(item.sku))
               if (firstResolvedItem?.sku) {
                 const firstProduct = resolvedProducts.get(firstResolvedItem.sku)!
-                const candidateListings = await prisma.listing.findMany({
+                const candidateListings = await tx.listing.findMany({
                   where: {
                     productId: firstProduct.id,
                     workspaceId,
@@ -150,7 +177,7 @@ export class OrdersSyncService {
                 }
               }
 
-              const createdOrder = await prisma.order.create({
+              const createdOrder = await tx.order.create({
                 data: {
                   workspaceId,
                   externalOrderId: order.externalOrderId,
@@ -172,6 +199,13 @@ export class OrdersSyncService {
                   status: mappedStatus,
                 },
               })
+
+              return { isNew: true as const, order: createdOrder, resolvedProducts }
+            })
+
+            if (outcome.isNew) {
+              const createdOrder = outcome.order
+              const resolvedProducts = outcome.resolvedProducts
 
               // STOCK: only reached on first sight of this order — the
               // "existing" branch above (status/price updates on later

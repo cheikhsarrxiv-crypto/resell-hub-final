@@ -24,8 +24,13 @@
 import crypto from 'crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('@/lib/prisma', () => ({
-  prisma: {
+// Phase 8 — see order-sync-inventory.test.ts's own comment: OrdersSyncService
+// now wraps its find-existing-or-create-Order decision in a real
+// prisma.$transaction guarded by a Postgres advisory lock. $transaction
+// here just invokes the callback with this SAME mocked `prisma` object as
+// `tx`, so every existing assertion below keeps working unchanged.
+vi.mock('@/lib/prisma', () => {
+  const prismaMock: any = {
     syncLog: { create: vi.fn(), update: vi.fn(), findFirst: vi.fn() },
     order: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     orderItem: { create: vi.fn() },
@@ -34,8 +39,11 @@ vi.mock('@/lib/prisma', () => ({
     // findMany is used to resolve Order.listingId (0/1/many active listings
     // for the product on this marketplace). Defaults to 0 candidates below.
     listing: { findMany: vi.fn() },
-  },
-}))
+    $executeRaw: vi.fn(async () => undefined),
+    $transaction: vi.fn(async (callback: (tx: any) => Promise<any>) => callback(prismaMock)),
+  };
+  return { prisma: prismaMock };
+})
 
 import { prisma } from '@/lib/prisma'
 import { OrdersSyncService } from '@/services/marketplace/OrdersSyncService'

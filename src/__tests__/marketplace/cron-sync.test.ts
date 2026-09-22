@@ -17,15 +17,25 @@ import crypto from 'crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { NextRequest } from 'next/server'
 
-vi.mock('@/lib/prisma', () => ({
-  prisma: {
+// Phase 8 — OrdersSyncService now wraps its find-existing-or-create-Order
+// decision in a real prisma.$transaction guarded by a Postgres advisory
+// lock (closes a duplicate-order race with no DB-level unique constraint
+// to lean on — see that file's own comment). $transaction here just invokes
+// the callback with this SAME mocked `prisma` object as `tx`, so every
+// existing assertion on `prisma.order.*`/`prisma.product.*` keeps working
+// unchanged. $executeRaw (the advisory lock statement) is a no-op mock.
+vi.mock('@/lib/prisma', () => {
+  const prismaMock: any = {
     marketplaceConnection: { findMany: vi.fn(), findUnique: vi.fn() },
     syncLog: { create: vi.fn(), update: vi.fn(), findFirst: vi.fn() },
     order: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
-    listing: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    listing: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), findMany: vi.fn(async () => []) },
     product: { findUnique: vi.fn() },
-  },
-}))
+    $executeRaw: vi.fn(async () => undefined),
+    $transaction: vi.fn(async (callback: (tx: any) => Promise<any>) => callback(prismaMock)),
+  };
+  return { prisma: prismaMock };
+})
 
 import { prisma } from '@/lib/prisma'
 import { GET as syncOrdersGET } from '@/app/api/cron/sync-orders/route'
