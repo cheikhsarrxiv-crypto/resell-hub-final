@@ -9,6 +9,7 @@ import {
   Home,
   Settings,
   ShoppingCart,
+  Sparkles,
   Zap,
   Package,
   ShoppingBag,
@@ -51,6 +52,7 @@ export function DashboardLayout({
       ]
     : [
         { name: 'Dashboard', href: `${baseUrl}`, icon: Home },
+        { name: 'Agent', href: `${baseUrl}/agent`, icon: Sparkles },
         { name: 'Products', href: `${baseUrl}/products`, icon: Package },
         { name: 'Listings', href: `${baseUrl}/listings`, icon: FileText },
         { name: 'Orders', href: `${baseUrl}/orders`, icon: ShoppingCart },

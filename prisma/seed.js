@@ -158,6 +158,13 @@ const PLANS = [
     fulfillmentEnabled: true,
     advancedAnalytics: true,
     apiAccess: true,
+    // The full AI Agent (search/compare/draft/publish tool-use, see
+    // AiAgentService) is a Business-tier feature — gated server-side via
+    // SubscriptionService.hasFeature(workspaceId, 'aiAssistant') in
+    // /api/ai/agent. This field previously existed in the schema but was
+    // never set by any plan, so it was effectively dead — this is the
+    // first real use of it.
+    aiAssistant: true,
     stripePriceIdMonthly: process.env.STRIPE_PRICE_ID_BUSINESS_MONTHLY || null,
     stripePriceIdAnnual: process.env.STRIPE_PRICE_ID_BUSINESS_ANNUAL || null,
   },
@@ -174,6 +181,9 @@ const PLANS = [
     fulfillmentEnabled: true,
     advancedAnalytics: true,
     apiAccess: true,
+    // Enterprise includes everything Business does (see aiAssistant note
+    // on the 'business' plan above).
+    aiAssistant: true,
     // No Stripe Price ID for Enterprise (custom pricing)
     stripePriceIdMonthly: null,
     stripePriceIdAnnual: null,

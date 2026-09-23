@@ -73,8 +73,15 @@ function getMarketplaceConfig(marketplaceName: string): { normalized: Marketplac
  * imports). Without this, adapter.createListing() always throws "Access
  * token required" even for a fully-connected eBay/Etsy account, because
  * a freshly-constructed adapter has no token of its own.
+ *
+ * Exported (Phase 12C-Offline) so the Agent's publish_listing tool
+ * (src/services/ai/tools/actionTools.ts) can reuse the exact same
+ * authenticated-adapter path a real publish would use, rather than
+ * duplicating this OAuth/config wiring — its own real-call branch is
+ * gated separately (see isRealEbayPublishEnabled) and is never exercised
+ * outside a properly configured environment.
  */
-async function getAuthenticatedAdapter(
+export async function getAuthenticatedAdapter(
   workspaceId: string,
   marketplaceName: string
 ): Promise<MarketplaceAdapter> {

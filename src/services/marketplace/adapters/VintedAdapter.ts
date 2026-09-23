@@ -27,7 +27,17 @@
  *
  * NEXT STEP: apply for Vinted Pro Integrations access; once granted,
  * implement this adapter for real following the same pattern as
- * EbayAdapter.ts / EtsyAdapter.ts.
+ * EbayAdapter.ts / EtsyAdapter.ts. At that point, this marketplace also
+ * needs to be added to SUPPORTED_MARKETPLACES in
+ * src/app/api/marketplace/{connect,callback,disconnect}/[marketplace]/route.ts
+ * and to AdapterFactory.getMarketplaceAdapterConfig() — both
+ * deliberately exclude Vinted today (see that file's own comment) so the
+ * app never exposes a "Connect Vinted" action that would just throw.
+ *
+ * RE-VERIFIED (no partner access obtained, no change from the above):
+ * same finding confirmed again via a fresh search of Vinted Pro
+ * Integrations' public docs — still allowlist-only, no self-service
+ * application process documented.
  */
 
 import MarketplaceAdapter from "@/services/marketplace/MarketplaceAdapter"

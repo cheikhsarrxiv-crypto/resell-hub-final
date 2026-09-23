@@ -92,23 +92,29 @@ export class ErrorNormalizer {
       }
     }
 
+    // Network errors — checked BEFORE the 5xx fallback below (Phase
+    // 12C-Prep fix): a network-level failure (fetch() itself throwing,
+    // e.g. a timeout) carries no real HTTP status at all, so the
+    // statusCode extraction above falls back to 500 — which used to make
+    // this branch unreachable dead code, since `statusCode >= 500` was
+    // checked first and always matched, miscategorizing every real
+    // network failure as a generic SERVER_ERROR instead of NETWORK_ERROR.
+    if (error?.code === "ECONNREFUSED" || error?.code === "ENOTFOUND" || error?.code === "ETIMEDOUT") {
+      return {
+        type: ErrorType.NETWORK_ERROR,
+        message: "Network error connecting to eBay. Will retry.",
+        statusCode: 503,
+        retryable: true,
+        originalError: error,
+      }
+    }
+
     // 5xx Server errors
     if (statusCode >= 500) {
       return {
         type: ErrorType.SERVER_ERROR,
         message: "eBay server error. Will retry automatically.",
         statusCode,
-        retryable: true,
-        originalError: error,
-      }
-    }
-
-    // Network errors
-    if (error?.code === "ECONNREFUSED" || error?.code === "ENOTFOUND" || error?.code === "ETIMEDOUT") {
-      return {
-        type: ErrorType.NETWORK_ERROR,
-        message: "Network error connecting to eBay. Will retry.",
-        statusCode: 503,
         retryable: true,
         originalError: error,
       }

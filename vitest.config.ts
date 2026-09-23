@@ -19,4 +19,15 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  // tsconfig.json sets "jsx": "preserve" (Next.js's own SWC compiler does
+  // the real JSX transform at build time) — Vite's own transform (oxc, in
+  // this Vite version) would otherwise inherit that and leave JSX
+  // untouched, which fails to parse in Vitest's transform pipeline. This
+  // overrides it for Vitest only (no effect on `next build`/`next dev`,
+  // and no new dependency: oxc already ships inside vite) so .test.tsx
+  // files (e.g. Phase 11A's Agent UI component tests) can render
+  // components via react-dom/server's renderToStaticMarkup.
+  oxc: {
+    jsx: 'react-jsx',
+  },
 });
