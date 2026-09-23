@@ -1,0 +1,43 @@
+-- Data-only migration: flips Plan.aiAssistant to true for the Business
+-- and Enterprise plans, on any environment where those rows already
+-- existed before the AI Agent feature was built (aiAssistant defaults to
+-- false in the schema, so every Plan row created before this commit has
+-- it false regardless of tier).
+--
+-- Why this exists as a migration and not just a seed-script change:
+-- prisma/seed-plans-production.js — the only script safe to run against
+-- a real production database — deliberately only creates Plan rows that
+-- don't exist yet (`upsert({ update: {} })`); it never modifies a Plan
+-- row that is already there. On any environment where 'business'/
+-- 'enterprise' rows were created before this feature existed, nothing in
+-- that script would ever set aiAssistant=true on them. A migration is
+-- the one mechanism in this project that is guaranteed to run exactly
+-- once, automatically, as part of the same `prisma migrate deploy` step
+-- every other schema change already goes through — no separate manual
+-- script invocation to remember.
+--
+-- Scope, exactly two columns/rows touched, nothing else:
+--   - Only the `aiAssistant` column. Every other column on Plan (price,
+--     currency, billingPeriod, stripePriceIdMonthly/Annual, maxProducts/
+--     Listings/Orders/Marketplaces/Users, fulfillmentEnabled,
+--     advancedAnalytics, apiAccess, autoDelistEnabled, createdAt) is
+--     left exactly as it was.
+--   - Only rows where name IN ('business', 'enterprise') — no other plan
+--     (free/starter/pro) is touched.
+--   - No other table: no User, Workspace, Subscription, or any other
+--     model is read or written by this migration.
+--
+-- Idempotent: the `AND "aiAssistant" = false` guard means every run
+-- after the first matches zero rows (UPDATE 0). Safe to have in the
+-- migration history permanently and safe if `prisma migrate resolve`
+-- or a re-run ever applies it more than once on the same database.
+--
+-- If a given environment has no 'business'/'enterprise' Plan row at all
+-- (e.g. a brand new database, seeded fresh via prisma/seed.js or
+-- prisma/seed-plans-production.js, both of which already set
+-- aiAssistant=true at creation time as of this feature), this UPDATE
+-- simply matches zero rows and does nothing — no row is fabricated here.
+UPDATE "Plan"
+SET "aiAssistant" = true
+WHERE "name" IN ('business', 'enterprise')
+  AND "aiAssistant" = false;
