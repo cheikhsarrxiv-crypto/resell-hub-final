@@ -33,42 +33,19 @@ export abstract class MarketplaceAdapter implements IMarketplaceAdapter {
   }
 
   /**
-   * Get OAuth authorization URL
-   * 
-   * STATUS: ABSTRACT - Subclass must implement
+   * Authentication is deliberately NOT part of this abstract class
+   * (multi-marketplace auth architecture, Option B — typed auth
+   * strategies). getOAuthUrl()/exchangeAuthCode()/refreshToken() used to
+   * be declared here as mandatory abstract methods; they now live on the
+   * separate OAuthConnectable interface (src/types/marketplace.ts),
+   * implemented only by adapters whose marketplace actually uses OAuth
+   * (EbayAdapter, EtsyAdapter, DepopAdapter). A marketplace with a
+   * genuinely different auth model (Vinted Pro Integrations: manual
+   * access key + signing key, HMAC-signed requests, no OAuth flow at
+   * all — confirmed via official docs research) implements
+   * ManualCredentialConnectable instead, and is never forced to
+   * implement OAuth methods that would have no real meaning for it.
    */
-  abstract getOAuthUrl(state: string, scopes: string[]): string
-
-  /**
-   * Exchange authorization code for tokens
-   * 
-   * STATUS: ABSTRACT - Subclass must implement
-   * 
-   * SECURITY:
-   * - Never called directly; routed through TokenManager
-   * - Tokens returned immediately encrypted
-   * - Never stored in adapter instance
-   */
-  abstract exchangeAuthCode(code: string): Promise<{
-    accessToken: string
-    refreshToken?: string
-    expiresIn?: number
-  }>
-
-  /**
-   * Refresh expired access token
-   * 
-   * STATUS: ABSTRACT - Subclass must implement
-   * 
-   * SECURITY:
-   * - Only TokenManager calls this
-   * - Refresh token is passed in encrypted
-   * - New token is returned for re-encryption
-   */
-  abstract refreshToken(refreshToken: string): Promise<{
-    accessToken: string
-    expiresIn?: number
-  }>
 
   /**
    * Get all active listings for connected seller

@@ -52,9 +52,14 @@
  */
 
 import MarketplaceAdapter from "@/services/marketplace/MarketplaceAdapter"
-import { Marketplace, MarketplaceAdapterConfig } from "@/types/marketplace"
+import { Marketplace, MarketplaceAdapterConfig, OAuthConnectable } from "@/types/marketplace"
 
-export class DepopAdapter extends MarketplaceAdapter {
+// Multi-marketplace auth architecture (Option B): Depop's real Selling
+// API uses OAuth 2.0 Authorization Code + PKCE (confirmed via official
+// docs during the Depop/Vinted/Vestiaire audit), so it implements
+// OAuthConnectable — same auth shape as eBay/Etsy, still blocked below
+// on obtaining real partner access, unchanged from before this file.
+export class DepopAdapter extends MarketplaceAdapter implements OAuthConnectable {
   marketplace = Marketplace.DEPOP
 
   constructor(config: MarketplaceAdapterConfig) {

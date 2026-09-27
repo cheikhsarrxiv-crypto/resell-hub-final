@@ -15,11 +15,16 @@ import {
   MarketplaceListing,
   MarketplaceListingInput,
   MarketplaceOrder,
+  OAuthConnectable,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
 import { logger } from '@/lib/logger'
 
-export class EbayAdapter extends MarketplaceAdapter {
+// Multi-marketplace auth architecture (Option B): eBay uses a real OAuth
+// 2.0 flow, so it implements OAuthConnectable — getOAuthUrl/exchangeAuthCode/
+// refreshToken below are unchanged, only this class's own declared
+// capabilities changed.
+export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable {
   marketplace = Marketplace.EBAY
   private baseUrl: string
   private authUrl: string

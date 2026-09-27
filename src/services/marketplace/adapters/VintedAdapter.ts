@@ -41,10 +41,28 @@
  */
 
 import MarketplaceAdapter from "@/services/marketplace/MarketplaceAdapter"
-import { Marketplace, MarketplaceAdapterConfig } from "@/types/marketplace"
+import { Marketplace, MarketplaceAdapterConfig, ManualCredentialConnectable, ManualCredentials } from "@/types/marketplace"
 
-export class VintedAdapter extends MarketplaceAdapter {
+/**
+ * Multi-marketplace auth architecture (Option B): Vinted Pro Integrations
+ * has NO OAuth flow at all (confirmed via official docs during the
+ * Depop/Vinted/Vestiaire audit) — a workspace generates an access key +
+ * signing key manually in Vinted's own Pro portal, outside ADKSY, and
+ * every request must be HMAC-SHA256 signed with the signing key. This
+ * class therefore implements ManualCredentialConnectable instead of
+ * OAuthConnectable, and getOAuthUrl()/exchangeAuthCode()/refreshToken()
+ * are deliberately NOT implemented here — they no longer exist on the
+ * base MarketplaceAdapter's required contract, so this adapter is never
+ * forced to fake them.
+ */
+export class VintedAdapter extends MarketplaceAdapter implements ManualCredentialConnectable {
   marketplace = Marketplace.VINTED
+
+  // Stored only in memory, on this instance — never logged, never
+  // persisted here (persistence/encryption is MarketplaceConnectionService's
+  // job, via TokenManager, exactly like an OAuth adapter's access token
+  // is never persisted by the adapter itself either).
+  private credentials: { accessKey: string; signingKey: string } | null = null
 
   constructor(config: MarketplaceAdapterConfig) {
     super(config)
@@ -67,16 +85,20 @@ export class VintedAdapter extends MarketplaceAdapter {
     )
   }
 
-  getOAuthUrl(state: string, scopes: string[]): string {
-    return this.throwNotSupported()
-  }
-
-  async exchangeAuthCode(code: string): Promise<any> {
-    return this.throwNotSupported()
-  }
-
-  async refreshToken(refreshToken: string): Promise<any> {
-    return this.throwNotSupported()
+  /**
+   * Stores the workspace-provided access key + signing key on this
+   * instance, for this adapter's own later use when signing a real
+   * request (once implemented). Makes no network call — never confuses
+   * "credentials look structurally present" with "credentials are
+   * genuinely valid against Vinted", which only a real API call
+   * (validateConnection, once implemented) could ever confirm.
+   */
+  setManualCredentials(credentials: ManualCredentials): void {
+    const { accessKey, signingKey } = credentials
+    if (!accessKey || !signingKey) {
+      throw new Error('VintedAdapter: setManualCredentials requires both a non-empty accessKey and signingKey')
+    }
+    this.credentials = { accessKey, signingKey }
   }
 
   async getListings(limit?: number, offset?: number): Promise<any[]> {
@@ -120,6 +142,14 @@ export class VintedAdapter extends MarketplaceAdapter {
   }
 
   async validateConnection(): Promise<boolean> {
+    // A distinct, more useful error for a real programming mistake
+    // (calling validateConnection before setManualCredentials) — never
+    // masked behind the generic "BLOCKED" message below, which is
+    // reserved for the real, current limitation (no Vinted partner
+    // access), not for a caller bug.
+    if (!this.credentials) {
+      throw new Error('VintedAdapter: setManualCredentials must be called before validateConnection()')
+    }
     return this.throwNotSupported()
   }
 }

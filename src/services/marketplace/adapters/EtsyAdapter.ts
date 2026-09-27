@@ -31,11 +31,18 @@ import {
   MarketplaceListingInput,
   MarketplaceOrder,
   MarketplaceOrderTrackingInfo,
+  OAuthConnectable,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
 import crypto from 'crypto'
 
-export class EtsyAdapter extends MarketplaceAdapter {
+// Multi-marketplace auth architecture (Option B): Etsy uses OAuth 2.0 +
+// PKCE, so it implements OAuthConnectable — the PKCE-specific extra
+// methods below (getCodeVerifier/setCodeVerifier) stay exactly as they
+// were, accessed via the same duck-typed cast MarketplaceConnectionService
+// already used before this change; only this class's own declared
+// capabilities changed.
+export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable {
   marketplace = Marketplace.ETSY
   private baseUrl = 'https://api.etsy.com/v3/application'
   private tokenUrl = 'https://api.etsy.com/v3/public/oauth/token'

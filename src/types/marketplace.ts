@@ -14,6 +14,38 @@ export enum Marketplace {
   VINTED = "vinted",
 }
 
+/**
+ * Multi-marketplace auth architecture (Option B — typed auth strategies).
+ * The real authentication model for each marketplace, verified against
+ * official sources during the Depop/Vinted/Vestiaire audit — never
+ * guessed:
+ * - 'oauth': a real OAuth 2.0 authorization flow (eBay: standard;
+ *   Etsy/Depop: OAuth 2.0 + PKCE). These marketplaces' adapters implement
+ *   OAuthConnectable.
+ * - 'manual_credentials': no OAuth flow exists at all — Vinted Pro
+ *   Integrations requires the workspace to generate an access key +
+ *   signing key manually in Vinted's own Pro portal (outside ADKSY) and
+ *   enter them directly; every request is then HMAC-SHA256 signed with
+ *   the signing key. These marketplaces' adapters implement
+ *   ManualCredentialConnectable instead of OAuthConnectable.
+ * Vestiaire Collective is deliberately absent from both this enum and
+ * this map — its real authentication model was NOT confirmed in the
+ * prior audit (docs unreachable), so no entry is guessed here.
+ */
+export type MarketplaceAuthType = 'oauth' | 'manual_credentials';
+
+export const MARKETPLACE_AUTH_TYPE: Readonly<Record<Marketplace, MarketplaceAuthType>> = {
+  [Marketplace.EBAY]: 'oauth',
+  [Marketplace.ETSY]: 'oauth',
+  [Marketplace.DEPOP]: 'oauth',
+  [Marketplace.VINTED]: 'manual_credentials',
+};
+
+/** Pure lookup, no adapter instantiation — the authoritative source of truth for which connection path a marketplace uses. */
+export function getMarketplaceAuthType(marketplace: Marketplace): MarketplaceAuthType {
+  return MARKETPLACE_AUTH_TYPE[marketplace];
+}
+
 export enum MarketplaceConnectionStatus {
   CONNECTED = "connected",
   EXPIRED = "expired",
@@ -84,21 +116,22 @@ export interface MarketplaceAdapterConfig {
   sandboxMode?: boolean;
 }
 
+/**
+ * Base contract every marketplace adapter implements, regardless of how
+ * it authenticates. Authentication-specific capabilities (getOAuthUrl/
+ * exchangeAuthCode/refreshToken for OAuth marketplaces, setManualCredentials
+ * for HMAC/API-key ones) were removed from this interface — see
+ * OAuthConnectable / ManualCredentialConnectable below. This is Option B
+ * of the multi-marketplace auth architecture audit: a marketplace whose
+ * real authentication model isn't OAuth (Vinted Pro Integrations: an
+ * access key + signing key generated manually in Vinted's own portal,
+ * with every request HMAC-signed — confirmed via official docs research,
+ * never guessed) must never be forced to implement OAuth methods that
+ * have no real meaning for it.
+ */
 export interface IMarketplaceAdapter {
   marketplace: Marketplace;
-  
-  // Authentication
-  getOAuthUrl(state: string, scopes: string[]): string;
-  exchangeAuthCode(code: string): Promise<{
-    accessToken: string;
-    refreshToken?: string;
-    expiresIn?: number;
-  }>;
-  refreshToken(refreshToken: string): Promise<{
-    accessToken: string;
-    expiresIn?: number;
-  }>;
-  
+
   // Listing operations
   getListings(limit?: number, offset?: number): Promise<MarketplaceListing[]>;
   getListing(listingId: string): Promise<MarketplaceListing>;
@@ -123,6 +156,75 @@ export interface IMarketplaceAdapter {
   
   // Health check
   validateConnection(): Promise<boolean>;
+}
+
+/**
+ * Implemented by adapters whose marketplace uses a real OAuth 2.0
+ * authorization flow — eBay (standard), Etsy and Depop (OAuth 2.0 +
+ * PKCE). Identical in shape to the 3 methods previously declared
+ * directly on IMarketplaceAdapter — EbayAdapter/EtsyAdapter's existing
+ * method bodies are unchanged by this split, only their class's
+ * `implements` clause changes.
+ */
+export interface OAuthConnectable {
+  getOAuthUrl(state: string, scopes: string[]): string;
+  exchangeAuthCode(code: string): Promise<{
+    accessToken: string;
+    refreshToken?: string;
+    expiresIn?: number;
+  }>;
+  refreshToken(refreshToken: string): Promise<{
+    accessToken: string;
+    expiresIn?: number;
+  }>;
+}
+
+/**
+ * A marketplace-specific set of manually-entered credential values —
+ * plain string keys, deliberately not a fixed {accessKey, signingKey}
+ * shape at this interface level, so a future manual-credential
+ * marketplace with different field names is never forced into Vinted's
+ * own vocabulary. The concrete adapter (VintedAdapter) is the only place
+ * that knows which keys it actually needs and validates their presence.
+ */
+export type ManualCredentials = Record<string, string>;
+
+/**
+ * Implemented by adapters whose marketplace has NO OAuth authorization
+ * flow at all — today: Vinted Pro Integrations. The workspace generates
+ * its credentials manually, outside ADKSY (Vinted's own Pro portal), and
+ * enters them directly; there is no authUrl to redirect to and no `code`
+ * to exchange. setManualCredentials() only stores the values on the
+ * adapter instance for its own subsequent use (e.g. computing an
+ * HMAC-SHA256 signature per request) — it never makes a network call
+ * itself; validateConnection() (already part of IMarketplaceAdapter,
+ * required for every adapter) is what actually confirms the credentials
+ * work, once a real API implementation exists.
+ */
+export interface ManualCredentialConnectable {
+  setManualCredentials(credentials: ManualCredentials): void;
+}
+
+/**
+ * Real TypeScript type predicates (never `any`) for narrowing a plain
+ * IMarketplaceAdapter to its actual auth capability at runtime — used by
+ * MarketplaceConnectionService before calling an auth-specific method,
+ * so calling the wrong one on an adapter that doesn't implement it fails
+ * with a clear, specific error instead of "is not a function".
+ */
+export function isOAuthConnectable(adapter: IMarketplaceAdapter): adapter is IMarketplaceAdapter & OAuthConnectable {
+  const candidate = adapter as unknown as OAuthConnectable;
+  return (
+    typeof candidate.getOAuthUrl === 'function' &&
+    typeof candidate.exchangeAuthCode === 'function' &&
+    typeof candidate.refreshToken === 'function'
+  );
+}
+
+export function isManualCredentialConnectable(
+  adapter: IMarketplaceAdapter
+): adapter is IMarketplaceAdapter & ManualCredentialConnectable {
+  return typeof (adapter as unknown as ManualCredentialConnectable).setManualCredentials === 'function';
 }
 
 // ============================================================================

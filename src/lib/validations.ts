@@ -136,6 +136,27 @@ export const connectMarketplaceSchema = z.object({
   accountId: z.string().optional(),
 });
 
+/**
+ * POST /api/marketplace/connect-manual/[marketplace] body (multi-marketplace
+ * auth architecture, Option B). Deliberately a generic string record, not
+ * a fixed {accessKey, signingKey} shape — MarketplaceConnectionService.
+ * connectWithManualCredentials/the adapter's own setManualCredentials are
+ * what actually know and validate which keys a given marketplace needs
+ * (Vinted: accessKey + signingKey). Capped at 2 entries here too (same
+ * limit MarketplaceConnectionService enforces) so an oversized/malformed
+ * body is rejected before it ever reaches the service.
+ */
+export const connectManualCredentialsSchema = z.object({
+  credentials: z
+    .record(z.string(), z.string().min(1, 'Credential values must not be empty'))
+    .refine((value) => Object.keys(value).length > 0, {
+      message: 'At least one credential value is required',
+    })
+    .refine((value) => Object.keys(value).length <= 2, {
+      message: 'At most 2 credential values are supported',
+    }),
+});
+
 // Subscriptions
 export const changeSubscriptionSchema = z.object({
   planId: z.string().min(1),
@@ -184,3 +205,4 @@ export type ChangeSubscriptionInput = z.infer<typeof changeSubscriptionSchema>;
 export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;
 export type AiAgentMessageInput = z.infer<typeof aiAgentMessageSchema>;
 export type ResetPasswordWithTokenInput = z.infer<typeof resetPasswordWithTokenSchema>;
+export type ConnectManualCredentialsInput = z.infer<typeof connectManualCredentialsSchema>;
