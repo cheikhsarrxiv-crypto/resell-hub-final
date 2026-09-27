@@ -159,20 +159,20 @@ describe('AiEntitlementService — real Stripe status matrix, inherited from Sub
   });
 
   it.each(['canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'paused', 'some_future_status'])(
-    'status "%s" on the Business plan -> falls back to Free, which now ALSO grants ai_chat (Free has aiAssistant: true too) — but not fulfillment (Free has fulfillmentEnabled: false)',
+    'status "%s" on the Business plan -> every capability refused, even ai_chat — a lapsed paid subscription never inherits Free\'s own aiAssistant:true just because it falls back to that plan row',
     async (status) => {
       workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(status, BUSINESS_PLAN));
-      expect(await AiEntitlementService.canUseCapability('ws-1', 'ai_chat')).toBe(true);
+      expect(await AiEntitlementService.canUseCapability('ws-1', 'ai_chat')).toBe(false);
       expect(await AiEntitlementService.canUseCapability('ws-1', 'fulfillment')).toBe(false);
     }
   );
 
-  it('an inactive subscription status is reported as refused_subscription_inactive, not refused_plan_insufficient (using "fulfillment" — the one capability Free\'s own flags still refuse)', async () => {
+  it('an inactive subscription status is reported as refused_subscription_inactive, not refused_plan_insufficient — even for ai_chat, which Free\'s own plan flag would otherwise grant', async () => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('canceled', BUSINESS_PLAN));
 
-    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'fulfillment');
+    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'ai_chat');
 
-    expect(result).toEqual({ capability: 'fulfillment', status: 'refused_subscription_inactive' });
+    expect(result).toEqual({ capability: 'ai_chat', status: 'refused_subscription_inactive' });
   });
 
   it('a genuinely active subscription whose plan just lacks the capability is reported as refused_plan_insufficient', async () => {

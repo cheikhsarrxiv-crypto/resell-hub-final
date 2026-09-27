@@ -4,9 +4,21 @@
  * Subscription row whose Stripe status doesn't grant access (canceled/
  * unpaid/incomplete/incomplete_expired/unrecognized) — treating it exactly
  * like "no subscription at all" (falls back to the real Free plan) rather
- * than trusting a stale paid planId. hasFeature/getPlanLimits/isLimitReached
- * all resolve through getSubscription(), so this single fix cascades to all
- * three without duplicating the check anywhere else.
+ * than trusting a stale paid planId. getPlanLimits/isLimitReached resolve
+ * through getSubscription() alone, so the plan-swap fix cascades to both
+ * without duplicating anything.
+ *
+ * hasFeature() needs one more thing on top of the plan swap (added in a
+ * later task): the Free plan itself now legitimately grants a real
+ * feature (aiAssistant — the AI Agent is available on every plan, Free
+ * included). Swapping `plan` to Free is no longer enough on its own to
+ * keep a LAPSED PAID subscription (canceled/unpaid/incomplete_expired/
+ * paused/...) from silently inheriting whatever Free grants — hasFeature
+ * therefore also checks `subscription.status` explicitly. A genuine Free
+ * workspace (no subscription row at all) is unaffected: getSubscription
+ * fabricates status: 'active' for it, which is access-granting. See
+ * "a Free-plan feature must never leak to a lapsed paid subscription"
+ * below for the test that directly proves this distinction.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -50,6 +62,11 @@ vi.mock('@/lib/prisma', () => {
 
 import { SubscriptionService, ACCESS_GRANTING_SUBSCRIPTION_STATUSES } from '@/services/SubscriptionService';
 
+// aiAssistant: true matches the real prisma/seed.js value — the AI Agent
+// is available on every plan, Free included. Kept true here deliberately
+// (not false) so these tests actually exercise the real-world case this
+// file's own header comment describes, rather than a value that would
+// mask the bug it was written to catch.
 const FREE_PLAN = {
   id: 'plan-free',
   name: 'free',
@@ -61,7 +78,35 @@ const FREE_PLAN = {
   fulfillmentEnabled: false,
   advancedAnalytics: false,
   apiAccess: false,
-  aiAssistant: false,
+  aiAssistant: true,
+};
+
+const STARTER_PLAN = {
+  id: 'plan-starter',
+  name: 'starter',
+  maxProducts: 100,
+  maxListings: 300,
+  maxOrders: 500,
+  maxMarketplaces: 3,
+  maxUsers: 1,
+  fulfillmentEnabled: false,
+  advancedAnalytics: false,
+  apiAccess: false,
+  aiAssistant: true,
+};
+
+const PRO_PLAN = {
+  id: 'plan-pro',
+  name: 'pro',
+  maxProducts: 500,
+  maxListings: 1500,
+  maxOrders: 2000,
+  maxMarketplaces: 4,
+  maxUsers: 1,
+  fulfillmentEnabled: true,
+  advancedAnalytics: true,
+  apiAccess: false,
+  aiAssistant: true,
 };
 
 const BUSINESS_PLAN = {
@@ -72,6 +117,20 @@ const BUSINESS_PLAN = {
   maxOrders: 10000,
   maxMarketplaces: 4,
   maxUsers: 5,
+  fulfillmentEnabled: true,
+  advancedAnalytics: true,
+  apiAccess: true,
+  aiAssistant: true,
+};
+
+const ENTERPRISE_PLAN = {
+  id: 'plan-enterprise',
+  name: 'enterprise',
+  maxProducts: 999999,
+  maxListings: 999999,
+  maxOrders: 999999,
+  maxMarketplaces: 4,
+  maxUsers: 999,
   fulfillmentEnabled: true,
   advancedAnalytics: true,
   apiAccess: true,
@@ -109,8 +168,11 @@ describe('SubscriptionService — subscription status access (fail-closed)', () 
     });
 
     it('active + feature disabled on the plan -> refused (plan-level gate still applies)', async () => {
+      // aiAssistant is true on Free too now, so fulfillmentEnabled (still
+      // false on Free) is the one that actually proves the plan-level
+      // gate, independent of subscription status.
       workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', FREE_PLAN));
-      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(false);
+      expect(await SubscriptionService.hasFeature('ws-1', 'fulfillmentEnabled')).toBe(false);
     });
 
     it('trialing -> granted (never actually produced today, but Stripe-correct)', async () => {
@@ -174,9 +236,9 @@ describe('SubscriptionService — subscription status access (fail-closed)', () 
   });
 
   describe('fail-closed edge cases', () => {
-    it('no subscription at all -> Free plan, unaffected by this fix (pre-existing behavior)', async () => {
+    it('no subscription at all -> a genuine Free workspace -> gets Free\'s own aiAssistant:true (this is the case the status check must NOT block)', async () => {
       workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(null));
-      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(false);
+      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(true);
     });
 
     it('subscription references a plan but Free plan lookup fails -> hasFeature still refuses rather than crashing or silently granting access', async () => {
@@ -188,14 +250,45 @@ describe('SubscriptionService — subscription status access (fail-closed)', () 
       expect(result).toBe(false);
     });
 
-    it('workspace not found -> hasFeature returns false, never throws', async () => {
+    it('workspace not found -> indistinguishable from "no subscription at all" (getSubscription\'s own pre-existing limitation, unrelated to this fix) -> same genuine-Free outcome, never throws', async () => {
       workspaceFindUniqueMock.mockResolvedValue(null);
-      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(false);
+      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(true);
     });
 
     it('isAccessGrantingStatus is a pure allow-list — an unrecognized status is never granted', () => {
       expect(SubscriptionService.isAccessGrantingStatus('some_made_up_status')).toBe(false);
       expect(ACCESS_GRANTING_SUBSCRIPTION_STATUSES.has('some_made_up_status')).toBe(false);
+    });
+  });
+
+  describe('AI Agent access matrix — hasFeature(workspaceId, \'aiAssistant\') (this task\'s exact commercial rule)', () => {
+    it.each([
+      ['free', FREE_PLAN],
+      ['starter', STARTER_PLAN],
+      ['pro', PRO_PLAN],
+      ['business', BUSINESS_PLAN],
+      ['enterprise', ENTERPRISE_PLAN],
+    ])('%s plan, active subscription -> AI Agent authorized', async (_name, plan) => {
+      workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', plan));
+      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(true);
+    });
+
+    it('a genuine Free workspace (no subscription row at all) -> AI Agent authorized', async () => {
+      workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(null));
+      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(true);
+    });
+
+    it.each(['canceled', 'unpaid', 'incomplete_expired', 'paused'])(
+      'a %s Business subscription -> AI Agent refused, never falls back to Free\'s own access',
+      async (status) => {
+        workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(status, BUSINESS_PLAN));
+        expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(false);
+      }
+    );
+
+    it('past_due keeps its exact existing behavior (grace period, not a lockout) — never changed by this fix', async () => {
+      workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('past_due', BUSINESS_PLAN));
+      expect(await SubscriptionService.hasFeature('ws-1', 'aiAssistant')).toBe(true);
     });
   });
 
@@ -210,13 +303,21 @@ describe('SubscriptionService — subscription status access (fail-closed)', () 
     });
   });
 
-  describe('free feature (no plan gate) remains available regardless of status', () => {
-    it('a feature the Free plan already grants stays available even on a canceled subscription', async () => {
+  describe('a Free-plan feature must never leak to a lapsed paid subscription just because it falls back to the same Plan row', () => {
+    it('a feature Free plan grants IS available on a genuine Free workspace (no subscription at all)', async () => {
+      const freeWithFeature = { ...FREE_PLAN, apiAccess: true };
+      planFindUniqueMock.mockResolvedValue(freeWithFeature);
+      workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(null));
+
+      expect(await SubscriptionService.hasFeature('ws-1', 'apiAccess')).toBe(true);
+    });
+
+    it('the SAME feature is refused on a canceled paid subscription, even though it falls back to the exact same Free plan row', async () => {
       const freeWithFeature = { ...FREE_PLAN, apiAccess: true };
       planFindUniqueMock.mockResolvedValue(freeWithFeature);
       workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('canceled', BUSINESS_PLAN));
 
-      expect(await SubscriptionService.hasFeature('ws-1', 'apiAccess')).toBe(true);
+      expect(await SubscriptionService.hasFeature('ws-1', 'apiAccess')).toBe(false);
     });
   });
 });

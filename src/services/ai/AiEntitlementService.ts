@@ -186,8 +186,18 @@ export class AiEntitlementService {
         | null
         | undefined;
 
-      const aiEnabled = Boolean(plan?.aiAssistant);
-      const fulfillmentEnabled = Boolean(plan?.fulfillmentEnabled);
+      // A real paid subscription that fell back to the Free plan because
+      // its Stripe status is no longer access-granting (canceled/unpaid/
+      // incomplete_expired/paused/...) must never inherit Free's own
+      // aiAssistant/fulfillmentEnabled just because `plan` was swapped to
+      // it — see SubscriptionService.hasFeature's own comment on this
+      // exact distinction. A genuine Free workspace (no subscription at
+      // all) fabricates status: 'active' in getSubscription, which IS
+      // access-granting, so it is unaffected by this check.
+      const statusGrantsAccess = Boolean(subscription) && SubscriptionService.isAccessGrantingStatus(subscription.status);
+
+      const aiEnabled = statusGrantsAccess && Boolean(plan?.aiAssistant);
+      const fulfillmentEnabled = statusGrantsAccess && Boolean(plan?.fulfillmentEnabled);
 
       const capabilities = ALL_CAPABILITIES.reduce((acc, capability) => {
         acc[capability] = capability === 'fulfillment' ? aiEnabled && fulfillmentEnabled : aiEnabled;
