@@ -25,17 +25,24 @@ import { AiEntitlementService, TOOL_CAPABILITIES, getRequiredCapabilityForTool, 
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
 
 // The 5 real plans from prisma/seed.js, exact flags — never a value this
-// file invents. Starter/Free have no `aiAssistant` field set at all in
-// seed.js (schema default: false); Pro has `fulfillmentEnabled: true` but
-// still no `aiAssistant` — deliberately kept exactly as seeded, since that
-// combination is precisely what proves the matrix's "aiAssistant gates
-// everything, fulfillmentEnabled only additionally narrows fulfillment"
-// design (see AiEntitlementService's own header comment).
-const FREE_PLAN = { id: 'plan-free', name: 'free', aiAssistant: false, fulfillmentEnabled: false };
-const STARTER_PLAN = { id: 'plan-starter', name: 'starter', aiAssistant: false, fulfillmentEnabled: false };
-const PRO_PLAN = { id: 'plan-pro', name: 'pro', aiAssistant: false, fulfillmentEnabled: true };
+// file invents. Commercial correction (this task): every real plan now
+// has aiAssistant: true — the AI Agent is available on all 5, the AI
+// Units quota (not this flag) is what actually differentiates them.
+// fulfillmentEnabled stays true only for pro/business/enterprise (a real,
+// pre-existing, unrelated feature flag) — exactly the combination that
+// proves the matrix's "aiAssistant gates everything, fulfillmentEnabled
+// only additionally narrows fulfillment" design (see
+// AiEntitlementService's own header comment).
+const FREE_PLAN = { id: 'plan-free', name: 'free', aiAssistant: true, fulfillmentEnabled: false };
+const STARTER_PLAN = { id: 'plan-starter', name: 'starter', aiAssistant: true, fulfillmentEnabled: false };
+const PRO_PLAN = { id: 'plan-pro', name: 'pro', aiAssistant: true, fulfillmentEnabled: true };
 const BUSINESS_PLAN = { id: 'plan-business', name: 'business', aiAssistant: true, fulfillmentEnabled: true };
 const ENTERPRISE_PLAN = { id: 'plan-enterprise', name: 'enterprise', aiAssistant: true, fulfillmentEnabled: true };
+// No real plan has aiAssistant: false anymore — kept only as a synthetic
+// fixture to prove the refusal mechanism itself still works correctly
+// (e.g. for a future disabled/suspended plan), never asserted to be a
+// real plan's current state.
+const NO_AI_PLAN = { id: 'plan-no-ai', name: 'hypothetical-no-ai', aiAssistant: false, fulfillmentEnabled: false };
 
 const ALL_CAPABILITIES: readonly AiCapability[] = [
   'ai_chat',
@@ -74,21 +81,23 @@ describe('AiEntitlementService.getPlanEntitlements — Plan -> Capability matrix
   });
 
   it.each([
-    ['free', FREE_PLAN, false],
-    ['starter', STARTER_PLAN, false],
-    ['pro', PRO_PLAN, false],
-  ])('%s plan (aiAssistant unset today) -> every capability is false, even where fulfillmentEnabled is true', async (_name, plan) => {
+    ['free', FREE_PLAN],
+    ['starter', STARTER_PLAN],
+  ])('%s plan (aiAssistant true, fulfillmentEnabled false) -> every capability true EXCEPT fulfillment', async (_name, plan) => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', plan));
 
     const entitlements = await AiEntitlementService.getPlanEntitlements('ws-1');
 
+    expect(entitlements.capabilities.fulfillment).toBe(false);
     for (const capability of ALL_CAPABILITIES) {
-      expect(entitlements.capabilities[capability]).toBe(false);
+      if (capability === 'fulfillment') continue;
+      expect(entitlements.capabilities[capability]).toBe(true);
     }
     expect(entitlements.planName).toBe(plan.name);
   });
 
   it.each([
+    ['pro', PRO_PLAN],
     ['business', BUSINESS_PLAN],
     ['enterprise', ENTERPRISE_PLAN],
   ])('%s plan (aiAssistant true, fulfillmentEnabled true) -> every capability is true', async (_name, plan) => {
@@ -101,10 +110,17 @@ describe('AiEntitlementService.getPlanEntitlements — Plan -> Capability matrix
     }
   });
 
-  it('fulfillment is ANDed with fulfillmentEnabled — a hypothetical plan with aiAssistant true but fulfillmentEnabled false has every capability EXCEPT fulfillment', async () => {
-    // No real plan in seed.js has this exact combination today — this
-    // proves the AND logic itself stays correct if one ever does, without
-    // asserting such a plan currently exists.
+  it('a plan with aiAssistant: false (no real plan today, but the mechanism must still refuse everything correctly) -> every capability is false', async () => {
+    workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', NO_AI_PLAN));
+
+    const entitlements = await AiEntitlementService.getPlanEntitlements('ws-1');
+
+    for (const capability of ALL_CAPABILITIES) {
+      expect(entitlements.capabilities[capability]).toBe(false);
+    }
+  });
+
+  it('fulfillment is ANDed with fulfillmentEnabled — a plan with aiAssistant true but fulfillmentEnabled false has every capability EXCEPT fulfillment (the real Free/Starter combination today)', async () => {
     const hypotheticalPlan = { id: 'plan-hypothetical', name: 'hypothetical', aiAssistant: true, fulfillmentEnabled: false };
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', hypotheticalPlan));
 
@@ -118,12 +134,16 @@ describe('AiEntitlementService.getPlanEntitlements — Plan -> Capability matrix
   });
 
   it('workspace isolation: two workspaces on different plans never affect each other', async () => {
+    // 'sourcing' no longer distinguishes Free from Business (both true
+    // today) — 'fulfillment' still does (Free: fulfillmentEnabled false;
+    // Business: true), so it remains the right capability to prove
+    // isolation with.
     workspaceFindUniqueMock.mockImplementation(async ({ where }: any) =>
       where.id === 'ws-business' ? makeWorkspace('active', BUSINESS_PLAN) : makeWorkspace('active', FREE_PLAN)
     );
 
-    expect(await AiEntitlementService.canUseCapability('ws-business', 'sourcing')).toBe(true);
-    expect(await AiEntitlementService.canUseCapability('ws-free', 'sourcing')).toBe(false);
+    expect(await AiEntitlementService.canUseCapability('ws-business', 'fulfillment')).toBe(true);
+    expect(await AiEntitlementService.canUseCapability('ws-free', 'fulfillment')).toBe(false);
   });
 });
 
@@ -139,35 +159,39 @@ describe('AiEntitlementService — real Stripe status matrix, inherited from Sub
   });
 
   it.each(['canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'paused', 'some_future_status'])(
-    'status "%s" on the Business plan -> falls back to Free, every capability refused',
+    'status "%s" on the Business plan -> falls back to Free, which now ALSO grants ai_chat (Free has aiAssistant: true too) — but not fulfillment (Free has fulfillmentEnabled: false)',
     async (status) => {
       workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(status, BUSINESS_PLAN));
-      expect(await AiEntitlementService.canUseCapability('ws-1', 'ai_chat')).toBe(false);
+      expect(await AiEntitlementService.canUseCapability('ws-1', 'ai_chat')).toBe(true);
+      expect(await AiEntitlementService.canUseCapability('ws-1', 'fulfillment')).toBe(false);
     }
   );
 
-  it('an inactive subscription status is reported as refused_subscription_inactive, not refused_plan_insufficient', async () => {
+  it('an inactive subscription status is reported as refused_subscription_inactive, not refused_plan_insufficient (using "fulfillment" — the one capability Free\'s own flags still refuse)', async () => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('canceled', BUSINESS_PLAN));
 
-    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'ai_chat');
+    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'fulfillment');
 
-    expect(result).toEqual({ capability: 'ai_chat', status: 'refused_subscription_inactive' });
+    expect(result).toEqual({ capability: 'fulfillment', status: 'refused_subscription_inactive' });
   });
 
   it('a genuinely active subscription whose plan just lacks the capability is reported as refused_plan_insufficient', async () => {
-    workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', PRO_PLAN));
+    // No real plan lacks a capability while active anymore (every real
+    // plan has aiAssistant: true) — NO_AI_PLAN is a synthetic fixture
+    // proving the mechanism itself still reports this correctly.
+    workspaceFindUniqueMock.mockResolvedValue(makeWorkspace('active', NO_AI_PLAN));
 
     const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'ai_chat');
 
     expect(result).toEqual({ capability: 'ai_chat', status: 'refused_plan_insufficient' });
   });
 
-  it('no subscription at all -> refused_plan_insufficient (never mislabeled as "inactive" — getSubscription\'s own default status is "active")', async () => {
+  it('no subscription at all -> refused_plan_insufficient (never mislabeled as "inactive" — getSubscription\'s own default status is "active"), using "fulfillment" since Free now grants ai_chat', async () => {
     workspaceFindUniqueMock.mockResolvedValue(makeWorkspace(null, FREE_PLAN));
 
-    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'ai_chat');
+    const result = await AiEntitlementService.getCapabilityStatus('ws-1', 'fulfillment');
 
-    expect(result).toEqual({ capability: 'ai_chat', status: 'refused_plan_insufficient' });
+    expect(result).toEqual({ capability: 'fulfillment', status: 'refused_plan_insufficient' });
   });
 
   it('an authorized capability is reported as authorized', async () => {
@@ -196,12 +220,10 @@ describe('AiEntitlementService — fail-closed edge cases', () => {
     expect(workspaceFindUniqueMock).not.toHaveBeenCalled();
   });
 
-  it('workspace not found -> every capability false, never throws', async () => {
+  it('workspace not found -> falls back to Free (same as "no subscription at all") -> fulfillment still refused, never throws', async () => {
     workspaceFindUniqueMock.mockResolvedValue(null);
     const entitlements = await AiEntitlementService.getPlanEntitlements('ws-does-not-exist');
-    for (const capability of ALL_CAPABILITIES) {
-      expect(entitlements.capabilities[capability]).toBe(false);
-    }
+    expect(entitlements.capabilities.fulfillment).toBe(false);
   });
 
   it('a workspace with a subscription but no real Plan row (planId dangling) -> every capability false', async () => {

@@ -44,13 +44,16 @@ describe('seed-plans-production.js — buildPlans', () => {
     expect(free.price).toBe(0);
     expect(free.stripePriceIdMonthly).toBeNull();
     expect(free.stripePriceIdAnnual).toBeNull();
+    expect(free.aiAssistant).toBe(true);
 
     const starter = plans.find((p: any) => p.name === 'starter');
     expect(starter.price).toBe(19);
+    expect(starter.aiAssistant).toBe(true);
 
     const pro = plans.find((p: any) => p.name === 'pro');
     expect(pro.price).toBe(49);
     expect(pro.fulfillmentEnabled).toBe(true);
+    expect(pro.aiAssistant).toBe(true);
 
     const business = plans.find((p: any) => p.name === 'business');
     expect(business.price).toBe(99);
@@ -59,6 +62,13 @@ describe('seed-plans-production.js — buildPlans', () => {
     const enterprise = plans.find((p: any) => p.name === 'enterprise');
     expect(enterprise.price).toBe(0);
     expect(enterprise.aiAssistant).toBe(true);
+  });
+
+  it('the AI Agent is available on every plan — aiAssistant is true for all 5 (commercial correction: not Business/Enterprise-only)', () => {
+    const plans = seedPlans.buildPlans({});
+    for (const plan of plans) {
+      expect(plan.aiAssistant).toBe(true);
+    }
   });
 
   it('never hardcodes a Stripe Price ID — missing env vars become null, never a fabricated value', () => {

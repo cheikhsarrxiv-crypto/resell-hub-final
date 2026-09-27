@@ -6,7 +6,10 @@
  *
  * Distinct from /api/ai/chat (AiChatService), which remains untouched and
  * unaffected — that route stays a plain, ungated Q&A assistant. This
- * route is the new, tool-using Agent, gated to the Business plan.
+ * route is the new, tool-using Agent, available on every plan (Free
+ * included) — differentiated by AI Units quota (AiUsageService), not by a
+ * plan-level lockout. The aiAssistant feature check below is a plain
+ * on/off kill switch, true for every real plan today.
  *
  * SECURITY: workspaceId is derived exclusively from the authenticated
  * session (session.user.workspaceId, re-verified via verifyWorkspaceAccess
@@ -33,8 +36,8 @@ export const dynamic = 'force-dynamic';
  * GET /api/ai/agent?conversationId=...
  * Phase 11D — restores a persisted conversation's UI-visible history
  * (see AiAgentService.getConversationHistory). Same auth/workspace/
- * Business gate as POST, deliberately: reading old Agent output is the
- * same paid capability as generating new output. Not rate-limited by
+ * aiAssistant gate as POST, deliberately: reading old Agent output goes
+ * through the same check as generating new output. Not rate-limited by
  * checkAiAgent — that budget protects real LLM/tool calls, not reading a
  * workspace's own already-computed history back.
  */
@@ -55,7 +58,7 @@ export async function GET(request: NextRequest) {
     const hasAgentAccess = await SubscriptionService.hasFeature(workspaceId, 'aiAssistant');
     if (!hasAgentAccess) {
       return NextResponse.json(
-        { error: 'The AI Agent is available on the Business plan. Upgrade to unlock it.' },
+        { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.' },
         { status: 403 }
       );
     }
@@ -105,16 +108,18 @@ export async function POST(request: NextRequest) {
     // throws here and is caught below as a 401/403.
     const workspaceId = await verifyWorkspaceAccess(session.user.workspaceId);
 
-    // Business-tier gate, enforced server-side (not just hidden in the
+    // On/off kill switch, enforced server-side (not just hidden in the
     // UI) — reuses the existing Plan.aiAssistant flag and
     // SubscriptionService.hasFeature, exactly the mechanism already used
-    // for fulfillmentEnabled/advancedAnalytics/apiAccess. This is a
-    // deliberately different check from /api/ai/chat, which has no plan
-    // gate at all today — the full Agent is a new, paid capability.
+    // for fulfillmentEnabled/advancedAnalytics/apiAccess. True for every
+    // real plan today (Free included) — the AI Agent is available on all
+    // plans; usage is limited by AI Units quota (AiUsageService), never
+    // by this flag alone. Left in place as a genuine kill switch, e.g. to
+    // disable the Agent globally without touching every capability check.
     const hasAgentAccess = await SubscriptionService.hasFeature(workspaceId, 'aiAssistant');
     if (!hasAgentAccess) {
       return NextResponse.json(
-        { error: 'The AI Agent is available on the Business plan. Upgrade to unlock it.' },
+        { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.' },
         { status: 403 }
       );
     }

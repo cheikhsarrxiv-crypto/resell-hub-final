@@ -1,9 +1,17 @@
 /**
- * Real-DB tests proving the AI Agent's Business-tier gate and its
+ * Real-DB tests proving the AI Agent's aiAssistant kill switch and its
  * workspace isolation are actually enforced against real data, not just
  * asserted by source inspection (see agent-route-security.test.ts for the
  * route-wiring-order checks, which can't hit a real DB the same way the
  * route imports next/server).
+ *
+ * Commercial correction (this task): the AI Agent is now available on
+ * every plan, Free included — aiAssistant is true for all 5 real plans.
+ * The gate this file exercises (SubscriptionService.hasFeature(
+ * workspaceId, 'aiAssistant')) therefore now returns true for Free too;
+ * it stays in place purely as an on/off kill switch. The real per-plan
+ * differentiation is the AI Units quota (AiUsageService/aiUsageConfig.ts),
+ * not this flag.
  *
  * Requires the new AgentConversation/AgentMessage tables (see
  * prisma/migrations/20260917120000_add_ai_agent_conversations) to exist
@@ -31,7 +39,7 @@ async function ensurePlans() {
   const freeFields = {
     displayName: 'Free', price: 0,
     maxProducts: 10, maxListings: 20, maxOrders: 50, maxMarketplaces: 2, maxUsers: 1,
-    aiAssistant: false,
+    aiAssistant: true,
   };
   const businessFields = {
     displayName: 'Business', price: 99,
@@ -68,7 +76,7 @@ async function cleanup(ids: { userId: string; workspaceId: string; subscriptionI
   await prisma.user.delete({ where: { id: ids.userId } }).catch(() => {});
 }
 
-describe.skipIf(!dbAvailable)('AI Agent Business gate — SubscriptionService.hasFeature("aiAssistant")', () => {
+describe.skipIf(!dbAvailable)('AI Agent access — SubscriptionService.hasFeature("aiAssistant") is true for every plan', () => {
   it('is true for a workspace on the Business plan', async () => {
     const { business } = await ensurePlans();
     const { user, workspace, subscription } = await createWorkspaceOnPlan(business.id);
@@ -81,13 +89,13 @@ describe.skipIf(!dbAvailable)('AI Agent Business gate — SubscriptionService.ha
     }
   });
 
-  it('is false for a workspace on the Free plan', async () => {
+  it('is ALSO true for a workspace on the Free plan (commercial correction — the AI Agent is no longer Business-only)', async () => {
     const { free } = await ensurePlans();
     const { user, workspace, subscription } = await createWorkspaceOnPlan(free.id);
 
     try {
       const hasAccess = await SubscriptionService.hasFeature(workspace.id, 'aiAssistant');
-      expect(hasAccess).toBe(false);
+      expect(hasAccess).toBe(true);
     } finally {
       await cleanup({ userId: user.id, workspaceId: workspace.id, subscriptionId: subscription.id });
     }

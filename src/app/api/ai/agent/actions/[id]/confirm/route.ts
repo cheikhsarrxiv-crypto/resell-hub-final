@@ -9,8 +9,8 @@
  * click, a browser retry, or two concurrent requests.
  *
  * SECURITY: workspaceId is derived exclusively from the authenticated
- * session, never from the request. Same auth/workspace/Business gate as
- * every other Agent route.
+ * session, never from the request. Same auth/workspace/aiAssistant gate
+ * as every other Agent route.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
@@ -45,7 +45,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     const hasAgentAccess = await SubscriptionService.hasFeature(workspaceId, 'aiAssistant');
     if (!hasAgentAccess) {
       return NextResponse.json(
-        { error: 'The AI Agent is available on the Business plan. Upgrade to unlock it.' },
+        { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.' },
         { status: 403 }
       );
     }

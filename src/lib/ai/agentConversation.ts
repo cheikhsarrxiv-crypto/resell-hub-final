@@ -174,9 +174,10 @@ export function mapAgentErrorToMessage(status: number | null, backendMessage?: s
     return 'Votre session a expiré. Veuillez vous reconnecter.';
   }
   if (status === 403) {
-    if (backendMessage && /business/i.test(backendMessage)) {
-      return 'Agent IA est disponible avec le forfait Business.';
-    }
+    // The AI Agent is available on every plan today — a 403 here means
+    // something other than "wrong plan" (e.g. the on/off kill switch is
+    // off, or workspace access failed) — never a Business-specific
+    // upsell claim, which would now be misleading.
     return "Vous n'avez pas accès à l'Agent IA pour le moment.";
   }
   if (status === 429) {

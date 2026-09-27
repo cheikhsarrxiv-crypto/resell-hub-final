@@ -88,6 +88,10 @@ function buildPlans(env = process.env) {
       fulfillmentEnabled: false,
       advancedAnalytics: false,
       apiAccess: false,
+      // The AI Agent is available on every plan (see prisma/seed.js's own
+      // comment on this field) — usage is limited by AI Units quota, not
+      // by this flag.
+      aiAssistant: true,
       stripePriceIdMonthly: null,
       stripePriceIdAnnual: null,
     },
@@ -104,6 +108,7 @@ function buildPlans(env = process.env) {
       fulfillmentEnabled: false,
       advancedAnalytics: false,
       apiAccess: false,
+      aiAssistant: true,
       stripePriceIdMonthly: env.STRIPE_PRICE_ID_STARTER_MONTHLY || null,
       stripePriceIdAnnual: env.STRIPE_PRICE_ID_STARTER_ANNUAL || null,
     },
@@ -120,6 +125,7 @@ function buildPlans(env = process.env) {
       fulfillmentEnabled: true,
       advancedAnalytics: true,
       apiAccess: false,
+      aiAssistant: true,
       stripePriceIdMonthly: env.STRIPE_PRICE_ID_PRO_MONTHLY || null,
       stripePriceIdAnnual: env.STRIPE_PRICE_ID_PRO_ANNUAL || null,
     },

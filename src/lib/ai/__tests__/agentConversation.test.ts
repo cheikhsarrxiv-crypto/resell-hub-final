@@ -164,13 +164,13 @@ describe('mapAgentErrorToMessage', () => {
     expect(mapAgentErrorToMessage(401)).toBe('Votre session a expiré. Veuillez vous reconnecter.');
   });
 
-  it('403 with a Business-plan backend message -> the Business upsell message', () => {
-    expect(mapAgentErrorToMessage(403, 'The AI Agent is available on the Business plan. Upgrade to unlock it.')).toBe(
-      'Agent IA est disponible avec le forfait Business.'
+  it('403 never special-cases a Business-plan backend message anymore — the Agent is available on every plan now, so that would be a misleading upsell claim', () => {
+    expect(mapAgentErrorToMessage(403, 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.')).toBe(
+      "Vous n'avez pas accès à l'Agent IA pour le moment."
     );
   });
 
-  it('403 without a Business-plan backend message -> a generic access message, not a fabricated upsell claim', () => {
+  it('403 with any other backend message -> the same generic access message, never echoed', () => {
     expect(mapAgentErrorToMessage(403, 'No workspace found for this account')).toBe(
       "Vous n'avez pas accès à l'Agent IA pour le moment."
     );

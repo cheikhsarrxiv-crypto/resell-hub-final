@@ -2,9 +2,9 @@
  * GET /api/ai/agent/actions/:id
  * Phase 12A — reads the current state of one AgentAction (for the
  * frontend to poll/refresh a pending confirmation, or check the outcome
- * after confirming). Same auth/workspace/Business gate as
- * /api/ai/agent — this is the same paid capability, just reading one of
- * its action records back.
+ * after confirming). Same auth/workspace/aiAssistant gate as
+ * /api/ai/agent — reading one of its action records back goes through
+ * the same check.
  *
  * SECURITY: workspaceId is derived exclusively from the authenticated
  * session (session.user.workspaceId, re-verified via verifyWorkspaceAccess
@@ -41,7 +41,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const hasAgentAccess = await SubscriptionService.hasFeature(workspaceId, 'aiAssistant');
     if (!hasAgentAccess) {
       return NextResponse.json(
-        { error: 'The AI Agent is available on the Business plan. Upgrade to unlock it.' },
+        { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.' },
         { status: 403 }
       );
     }
