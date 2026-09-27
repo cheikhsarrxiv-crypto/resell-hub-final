@@ -20,9 +20,9 @@
 import { TavilyWebSearchProvider } from '@/services/websourcing/providers/TavilyWebSearchProvider';
 
 const TEST_QUERIES = [
-  'Louis Vuitton Nano Speedy between 200 and 300 EUR',
-  'Nike Tech Fleece black size L under 80 EUR Europe',
-  'vintage designer leather jacket under 150 EUR France Germany Italy',
+  'Louis Vuitton Nano Speedy bag 200 300 EUR for sale',
+  'Nike Tech Fleece black size L under 80 EUR buy',
+  'Moncler Maya jacket under 500 EUR for sale Europe',
 ];
 
 async function main() {
