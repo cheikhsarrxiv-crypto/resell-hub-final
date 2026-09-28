@@ -74,6 +74,7 @@ describe.skipIf(!dbAvailable)(
       try {
         await StripeService.createCheckoutSession({
           planId: plan.id,
+          billingPeriod: 'monthly',
           workspaceId: workspace.id,
           email: user.email,
           successUrl: 'https://example.com/success',
@@ -87,6 +88,7 @@ describe.skipIf(!dbAvailable)(
           workspaceId: workspace.id,
           planId: plan.id,
           planName: plan.name,
+          billingPeriod: 'monthly',
         };
 
         // Pre-existing Session-level metadata must still be present (not removed).

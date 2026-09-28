@@ -162,6 +162,16 @@ export const changeSubscriptionSchema = z.object({
   planId: z.string().min(1),
 });
 
+// POST /api/stripe/checkout — the client only ever supplies WHICH plan and
+// WHICH billing cycle; the actual Stripe Price ID is always resolved
+// server-side from the Plan row (see StripeService.createCheckoutSession).
+// billingPeriod is a strict enum on purpose — no free-form string reaches
+// the Price ID lookup.
+export const stripeCheckoutSchema = z.object({
+  planId: z.string().min(1, 'Plan ID is required'),
+  billingPeriod: z.enum(['monthly', 'annual']),
+});
+
 // AI Assistant
 export const aiChatMessageSchema = z.object({
   message: z.string().min(1, 'Message is required').max(4000, 'Message is too long'),

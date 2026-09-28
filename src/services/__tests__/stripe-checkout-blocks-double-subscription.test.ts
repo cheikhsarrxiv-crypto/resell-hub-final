@@ -110,6 +110,7 @@ describe.skipIf(!dbAvailable)('StripeService.createCheckoutSession — blocks a 
         await expect(
           StripeService.createCheckoutSession({
             planId: entities.plan.id,
+            billingPeriod: 'monthly',
             workspaceId: entities.workspace.id,
             email: entities.user.email,
             successUrl: 'https://example.com/success',
@@ -142,6 +143,7 @@ describe.skipIf(!dbAvailable)('StripeService.createCheckoutSession — blocks a 
       try {
         const session = await StripeService.createCheckoutSession({
           planId: entities.plan.id,
+          billingPeriod: 'monthly',
           workspaceId: entities.workspace.id,
           email: entities.user.email,
           successUrl: 'https://example.com/success',
@@ -175,6 +177,7 @@ describe.skipIf(!dbAvailable)('StripeService.createCheckoutSession — blocks a 
     try {
       const session = await StripeService.createCheckoutSession({
         planId: plan.id,
+        billingPeriod: 'monthly',
         workspaceId: workspace.id,
         email: user.email,
         successUrl: 'https://example.com/success',
