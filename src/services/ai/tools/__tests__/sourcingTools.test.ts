@@ -61,6 +61,11 @@ describe('search_products tool definition', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['ebay', 'etsy'] }).success).toBe(true);
     });
 
+    it('accepts "web" (Global Web Sourcing) in the providers allowlist, alone or combined with ebay/etsy', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['web'] }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['ebay', 'etsy', 'web'] }).success).toBe(true);
+    });
+
     it('rejects an unknown provider name', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', providers: ['stockx'] }).success).toBe(false);
     });
@@ -179,6 +184,14 @@ describe('search_products tool definition', () => {
       await searchProductsTool.handler('ws-1', { query: 'x', providers: ['ebay'] });
 
       expect(searchMock).toHaveBeenCalledWith({ query: 'x', providers: ['ebay'] });
+    });
+
+    it('a providers: ["web"] allowlist is passed through unchanged to SourcingService.search (Global Web Sourcing)', async () => {
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [] });
+
+      await searchProductsTool.handler('ws-1', { query: 'x', providers: ['web'] });
+
+      expect(searchMock).toHaveBeenCalledWith({ query: 'x', providers: ['web'] });
     });
 
     it('providersSkipped is passed through unchanged (Phase 2)', async () => {

@@ -1,6 +1,7 @@
 import { KnownUnavailableSource, SourcingProvider } from './types';
 import { EbayBrowseSourcingProvider } from './providers/EbayBrowseSourcingProvider';
 import { EtsySourcingProvider } from './providers/EtsySourcingProvider';
+import { WebSourcingProvider } from './providers/WebSourcingProvider';
 
 /**
  * Phase 5 — sources this project's own research (this session) confirmed
@@ -98,7 +99,7 @@ const KNOWN_UNAVAILABLE_SOURCES: KnownUnavailableSource[] = [
 export class SourcingProviderRegistry {
   /** Every provider ADKSY knows about, real or not-yet-configured. */
   static getAllProviders(): SourcingProvider[] {
-    return [new EbayBrowseSourcingProvider(), new EtsySourcingProvider()];
+    return [new EbayBrowseSourcingProvider(), new EtsySourcingProvider(), new WebSourcingProvider()];
   }
 
   /** Subset of getAllProviders() whose isConfigured() is currently true. */

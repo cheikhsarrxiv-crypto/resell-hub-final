@@ -13,6 +13,7 @@ describe('SourcingProviderRegistry', () => {
     const names = providers.map((p) => p.name);
     expect(names).toContain('ebay');
     expect(names).toContain('etsy');
+    expect(names).toContain('web');
   });
 
   it('real, honest, non-empty metadata for every provider (name/displayName/capabilities) — never a placeholder', () => {

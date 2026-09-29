@@ -122,6 +122,17 @@ export function annotateResult(
     warnings.push('This provider does not report any authenticity signal at all.');
   }
 
+  // --- Global Web Sourcing — a general web result is never a structured
+  // marketplace API response: the fields shown were extracted
+  // automatically from an indexed web page, not read from a marketplace's
+  // own listing data model. Attached here (not by WebSourcingProvider
+  // itself) because SourcingService.search's final annotation step
+  // REPLACES a provider's own `warnings` with this function's return
+  // value — see WebSourcingProvider.ts's own header comment.
+  if (result.source === 'web') {
+    warnings.push('This result comes from a general web search (not a structured marketplace API) — details were extracted automatically and may be incomplete or inexact.');
+  }
+
   // --- Known-cost uncertainty ---
   for (const factor of result.unknownCostFactors ?? []) {
     warnings.push(describeUnknownCostFactor(factor));
