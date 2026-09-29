@@ -213,6 +213,144 @@ describe('EbayAdapter - Real API Calls', () => {
 })
 
 // ============================================================================
+// TEST 5.5: EbayAdapter OAuth endpoints — Phase 10.5 regression protection
+//
+// Phase 10 found that exchangeAuthCode()/refreshToken() called
+// `${authUrl}/oauth2/token` (auth[.sandbox].ebay.com — the BROWSER
+// redirect host, correct only for /oauth2/authorize) instead of the API
+// host's `/identity/v1/oauth2/token`. Fixed in Phase 10.5. These tests
+// assert the EXACT URL fetch() is called with, for both sandbox and
+// production, for all three OAuth entry points — they must fail again if
+// auth.ebay.com/oauth2/token or auth.sandbox.ebay.com/oauth2/token is ever
+// reintroduced for the token exchange/refresh calls.
+// ============================================================================
+
+describe('EbayAdapter — OAuth endpoint hosts (Phase 10.5 regression protection)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function tokenResponseMock() {
+    return vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ access_token: 'tok', refresh_token: 'rtok', expires_in: 7200 }),
+      text: async () => JSON.stringify({ access_token: 'tok', refresh_token: 'rtok', expires_in: 7200 }),
+    })) as any
+  }
+
+  function makeAdapter(sandboxMode?: boolean) {
+    return new EbayAdapter({
+      clientId: 'test-client-id',
+      clientSecret: 'test-client-secret',
+      redirectUri: 'http://localhost/callback',
+      sandboxMode,
+    })
+  }
+
+  it('A. exchangeAuthCode (sandbox) -> POST https://api.sandbox.ebay.com/identity/v1/oauth2/token', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(true).exchangeAuthCode('auth-code-123')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.sandbox.ebay.com/identity/v1/oauth2/token')
+    expect(url).not.toContain('auth.sandbox.ebay.com')
+    expect(init.method).toBe('POST')
+  })
+
+  it('B. exchangeAuthCode (production) -> POST https://api.ebay.com/identity/v1/oauth2/token', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(false).exchangeAuthCode('auth-code-123')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.ebay.com/identity/v1/oauth2/token')
+    expect(url).not.toContain('auth.ebay.com')
+  })
+
+  it('C. refreshToken (sandbox) -> POST https://api.sandbox.ebay.com/identity/v1/oauth2/token', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(true).refreshToken('refresh-token-abc')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.sandbox.ebay.com/identity/v1/oauth2/token')
+    expect(url).not.toContain('auth.sandbox.ebay.com')
+  })
+
+  it('D. refreshToken (production) -> POST https://api.ebay.com/identity/v1/oauth2/token', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(false).refreshToken('refresh-token-abc')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://api.ebay.com/identity/v1/oauth2/token')
+    expect(url).not.toContain('auth.ebay.com')
+  })
+
+  it('E. getOAuthUrl (sandbox) -> https://auth.sandbox.ebay.com/oauth2/authorize (never the api.* host)', () => {
+    const url = makeAdapter(true).getOAuthUrl('state-123', [])
+
+    expect(url.startsWith('https://auth.sandbox.ebay.com/oauth2/authorize?')).toBe(true)
+    // Only the host is asserted here — the querystring legitimately
+    // contains "api.ebay.com" inside OAuth *scope* URIs (e.g.
+    // https://api.ebay.com/oauth/api_scope/sell.inventory), which is
+    // unrelated to which host serves this endpoint.
+    expect(new URL(url).host).toBe('auth.sandbox.ebay.com')
+  })
+
+  it('F. getOAuthUrl (production) -> https://auth.ebay.com/oauth2/authorize (never the api.* host)', () => {
+    const url = makeAdapter(false).getOAuthUrl('state-123', [])
+
+    expect(url.startsWith('https://auth.ebay.com/oauth2/authorize?')).toBe(true)
+    expect(new URL(url).host).toBe('auth.ebay.com')
+  })
+
+  it('exchangeAuthCode never mixes an auth.* host with the /identity/v1/oauth2/token path', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(true).exchangeAuthCode('code')
+    await makeAdapter(false).exchangeAuthCode('code')
+
+    for (const [url] of fetchMock.mock.calls) {
+      expect(url).toMatch(/^https:\/\/api(\.sandbox)?\.ebay\.com\/identity\/v1\/oauth2\/token$/)
+    }
+  })
+
+  // Phase 12C-Prep §7.E: an explicit negative assertion against the exact
+  // old, buggy endpoint construction (`${authUrl}/oauth2/token`), on top
+  // of the URL-shape assertions above.
+  it('never calls the old `${authUrl}/oauth2/token` endpoint for token exchange or refresh, sandbox or production', async () => {
+    const fetchMock = tokenResponseMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await makeAdapter(true).exchangeAuthCode('code')
+    await makeAdapter(false).exchangeAuthCode('code')
+    await makeAdapter(true).refreshToken('rtok')
+    await makeAdapter(false).refreshToken('rtok')
+
+    const oldSandboxEndpoint = 'https://auth.sandbox.ebay.com/oauth2/token'
+    const oldProductionEndpoint = 'https://auth.ebay.com/oauth2/token'
+
+    for (const [url] of fetchMock.mock.calls) {
+      expect(url).not.toBe(oldSandboxEndpoint)
+      expect(url).not.toBe(oldProductionEndpoint)
+    }
+  })
+})
+
+// ============================================================================
 // TEST 6: EbayAdapter.createListing() - publish step (network mocked)
 //
 // Real eBay Sandbox is unreachable from this environment (no egress to
@@ -223,12 +361,20 @@ describe('EbayAdapter - Real API Calls', () => {
 // ============================================================================
 
 describe('EbayAdapter - createListing() calls the required publish step', () => {
+  // Phase 12C-Prep: currency/condition/ebay.{categoryId,marketplaceId} are
+  // now required by createListing (previously hardcoded EUR/USED_GOOD/
+  // EBAY_FR) — every fixture in this section must supply them, exactly
+  // like a real caller (ListingService, the future publish_listing action)
+  // would have to.
   const baseListing = {
     title: 'Test item',
     description: 'A test item description',
     price: 10,
     quantity: 1,
     sku: 'TEST-SKU-1',
+    currency: 'GBP',
+    condition: 'USED_GOOD',
+    ebay: { categoryId: 15709, marketplaceId: 'EBAY_GB' },
   }
 
   function mockFetchSequence(responses: Array<{ ok: boolean; status?: number; json: any }>) {

@@ -39,13 +39,27 @@
  * (email contact required per their docs). Once granted, the real
  * OAuth endpoints and payload schemas will be available and this
  * adapter can be implemented following the same pattern as
- * EbayAdapter.ts / EtsyAdapter.ts.
+ * EbayAdapter.ts / EtsyAdapter.ts. At that point, this marketplace also
+ * needs to be added to SUPPORTED_MARKETPLACES in
+ * src/app/api/marketplace/{connect,callback,disconnect}/[marketplace]/route.ts
+ * and to AdapterFactory.getMarketplaceAdapterConfig() — both
+ * deliberately exclude Depop today (see that file's own comment) so the
+ * app never exposes a "Connect Depop" action that would just throw.
+ *
+ * RE-VERIFIED (no partner access obtained, no change from the above):
+ * same finding confirmed again via a fresh search of Depop's public
+ * Selling API docs — still "contact us first", no self-service signup.
  */
 
 import MarketplaceAdapter from "@/services/marketplace/MarketplaceAdapter"
-import { Marketplace, MarketplaceAdapterConfig } from "@/types/marketplace"
+import { Marketplace, MarketplaceAdapterConfig, OAuthConnectable } from "@/types/marketplace"
 
-export class DepopAdapter extends MarketplaceAdapter {
+// Multi-marketplace auth architecture (Option B): Depop's real Selling
+// API uses OAuth 2.0 Authorization Code + PKCE (confirmed via official
+// docs during the Depop/Vinted/Vestiaire audit), so it implements
+// OAuthConnectable — same auth shape as eBay/Etsy, still blocked below
+// on obtaining real partner access, unchanged from before this file.
+export class DepopAdapter extends MarketplaceAdapter implements OAuthConnectable {
   marketplace = Marketplace.DEPOP
 
   constructor(config: MarketplaceAdapterConfig) {

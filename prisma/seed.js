@@ -107,7 +107,11 @@ const PLANS = [
     fulfillmentEnabled: false,
     advancedAnalytics: false,
     apiAccess: false,
-    // No Stripe Price ID needed for Free plan
+    // The AI Agent is available on every plan (see AiEntitlementService's
+    // own header comment) — usage is limited by AI Units quota
+    // (aiUsageConfig.ts), not by this flag. No Stripe Price ID needed for
+    // Free plan.
+    aiAssistant: true,
     stripePriceIdMonthly: null,
     stripePriceIdAnnual: null,
   },
@@ -124,6 +128,7 @@ const PLANS = [
     fulfillmentEnabled: false,
     advancedAnalytics: false,
     apiAccess: false,
+    aiAssistant: true,
     // TODO: Configure in Stripe and add Price ID
     // Format: price_1234567890abcdefghijklmn
     stripePriceIdMonthly: process.env.STRIPE_PRICE_ID_STARTER_MONTHLY || null,
@@ -142,6 +147,7 @@ const PLANS = [
     fulfillmentEnabled: true,
     advancedAnalytics: true,
     apiAccess: false,
+    aiAssistant: true,
     stripePriceIdMonthly: process.env.STRIPE_PRICE_ID_PRO_MONTHLY || null,
     stripePriceIdAnnual: process.env.STRIPE_PRICE_ID_PRO_ANNUAL || null,
   },
@@ -158,6 +164,13 @@ const PLANS = [
     fulfillmentEnabled: true,
     advancedAnalytics: true,
     apiAccess: true,
+    // The AI Agent (search/compare/draft/publish tool-use, see
+    // AiAgentService) is available on every plan, Free included — gated
+    // server-side via SubscriptionService.hasFeature(workspaceId,
+    // 'aiAssistant') in /api/ai/agent purely as an on/off kill switch.
+    // The real per-plan differentiation is the AI Units quota
+    // (aiUsageConfig.ts's PLAN_MONTHLY_AI_UNITS), not this flag.
+    aiAssistant: true,
     stripePriceIdMonthly: process.env.STRIPE_PRICE_ID_BUSINESS_MONTHLY || null,
     stripePriceIdAnnual: process.env.STRIPE_PRICE_ID_BUSINESS_ANNUAL || null,
   },
@@ -174,6 +187,7 @@ const PLANS = [
     fulfillmentEnabled: true,
     advancedAnalytics: true,
     apiAccess: true,
+    aiAssistant: true,
     // No Stripe Price ID for Enterprise (custom pricing)
     stripePriceIdMonthly: null,
     stripePriceIdAnnual: null,

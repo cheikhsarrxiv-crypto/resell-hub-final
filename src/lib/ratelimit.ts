@@ -29,6 +29,10 @@ const DEFAULT_CONFIGS = {
   fulfillment: { points: 100, duration: 3600 }, // 100 per hour
   emailVerification: { points: 3, duration: 3600 }, // 3 per hour
   aiChat: { points: 20, duration: 3600 }, // 20 per hour (per workspace)
+  // Lower than aiChat: a single agent turn can make several tool calls
+  // (each one a real DB/API operation), so it costs more per request than
+  // a plain Q&A message.
+  aiAgent: { points: 12, duration: 3600 }, // 12 per hour (per workspace)
   forgotPasswordIp: { points: 5, duration: 3600 }, // 5 per hour per IP
   forgotPasswordEmail: { points: 3, duration: 3600 }, // 3 per hour per email
   resetPasswordIp: { points: 10, duration: 3600 }, // 10 per hour per IP
@@ -235,6 +239,10 @@ export class RateLimiterService {
 
   async checkAiChat(workspaceId: string): Promise<RateLimitResult> {
     return this.check(workspaceId, 'aiChat');
+  }
+
+  async checkAiAgent(workspaceId: string): Promise<RateLimitResult> {
+    return this.check(workspaceId, 'aiAgent');
   }
 
   async checkForgotPasswordIP(ip: string): Promise<RateLimitResult> {

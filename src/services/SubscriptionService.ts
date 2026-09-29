@@ -111,7 +111,20 @@ export class SubscriptionService {
   }
 
   /**
-   * Check if workspace has feature enabled
+   * Check if workspace has feature enabled.
+   *
+   * getSubscription() falls back to the Free plan in TWO genuinely
+   * different situations (see its own comment): (1) no subscription row
+   * at all — a real Free-tier workspace, whose fabricated `status` is
+   * 'active' — and (2) a real paid Subscription whose Stripe status is
+   * no longer access-granting (canceled/unpaid/incomplete_expired/
+   * paused/...), whose REAL non-granting status is preserved on the
+   * returned object even though `plan` was swapped to Free. Only (1) is
+   * a genuine Free workspace. Falling back to the same Plan row in case
+   * (2) must never be read as "this workspace now has Free access" — a
+   * lapsed paid subscription is refused every feature, even one the Free
+   * plan itself happens to grant (e.g. aiAssistant), which is why this
+   * checks `status` explicitly rather than trusting the plan flag alone.
    */
   static async hasFeature(
     workspaceId: string,
@@ -121,6 +134,10 @@ export class SubscriptionService {
       const subscription = await this.getSubscription(workspaceId);
 
       if (!subscription?.plan) {
+        return false;
+      }
+
+      if (!this.isAccessGrantingStatus(subscription.status)) {
         return false;
       }
 

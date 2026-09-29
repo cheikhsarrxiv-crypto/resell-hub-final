@@ -29,10 +29,11 @@ let listingIdCounter = 0;
 // publish_listing/publish_etsy_listing's new productId requirement and
 // their reserve-then-publish Listing bookkeeping can be exercised for
 // real, never just stubbed to always succeed.
-const { productStore, connectionStore, listingStore } = vi.hoisted(() => ({
+const { productStore, connectionStore, listingStore, productImageRows } = vi.hoisted(() => ({
   productStore: new Map<string, any>(),
   connectionStore: new Map<string, any>(), // key: `${workspaceId}:${marketplaceId}`
   listingStore: new Map<string, any>(),
+  productImageRows: [] as any[],
 }));
 
 // Listing-reconciliation fix — Test 9 (Étape 9) flag: when
@@ -128,6 +129,14 @@ vi.mock('@/lib/prisma', () => ({
         }
         Object.assign(row, data);
         return { count: 1 };
+      }),
+    },
+    productImage: {
+      // AI-first listing workflow — create_product's own best-effort
+      // attach-real-source-images step.
+      createMany: vi.fn(async ({ data }: any) => {
+        productImageRows.push(...data);
+        return { count: data.length };
       }),
     },
   },
@@ -307,6 +316,7 @@ describe('create_product tool definition', () => {
     rows = [];
     rowIdCounter = 0;
     clock = 0;
+    productImageRows.length = 0;
     vi.clearAllMocks();
   });
 
@@ -616,6 +626,98 @@ describe('create_product tool definition', () => {
       await expect(
         createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' })
       ).rejects.toThrow('Something genuinely unexpected');
+    });
+  });
+
+  describe('handler() — real source image attachment (AI-first listing workflow)', () => {
+    it('attaches the sourced item\'s own real images as REAL-provenance ProductImage rows, never re-hosted', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(1);
+      expect(productImageRows).toHaveLength(1);
+      expect(productImageRows[0]).toMatchObject({
+        productId: 'product-1',
+        url: sourcedItem.images[0],
+        sourceType: 'REAL',
+        sourceUrl: sourcedItem.images[0],
+        isMain: true,
+      });
+    });
+
+    it('the preview honestly states how many real images will be attached before anything is created', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const preview: any = await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(preview.sourceImageCount).toBe(1);
+      expect(preview.message).toMatch(/1 real photo/i);
+    });
+
+    it('a source item with no images attaches none, never fabricates a placeholder image', async () => {
+      const noImageItem = { ...sourcedItem, images: [] };
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [noImageItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(0);
+      expect(productImageRows).toHaveLength(0);
+    });
+
+    it('AI-first listing workflow: also attaches any AI-GENERATED images already produced for this draft, each with real generation metadata', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(2); // 1 real + 1 generated
+      expect(productImageRows).toHaveLength(2);
+      const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
+      expect(generatedRow).toMatchObject({ url: 'https://oaidalleapi.example/img1.png', productId: 'product-1', sourceUrl: null });
+      expect(JSON.parse(generatedRow.generationMetadata)).toMatchObject({ provider: 'openai', model: 'dall-e-3', prompt: 'a prompt' });
+    });
+
+    it('the preview also reports how many AI-generated images will be attached', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+
+      const preview: any = await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(preview.generatedImageCount).toBe(1);
+      expect(preview.message).toMatch(/AI-generated photo/i);
+    });
+
+    it('a failure while attaching images never undoes or fails the already-created product', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+      const { prisma } = await import('@/lib/prisma');
+      (prisma.productImage.createMany as any).mockRejectedValueOnce(new Error('storage down'));
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.productId).toBe('product-1');
+      expect(result.attachedImages).toBe(0);
     });
   });
 });

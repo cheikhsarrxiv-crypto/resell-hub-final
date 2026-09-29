@@ -31,6 +31,7 @@ function getStripeClient(): Stripe {
 
 export interface CheckoutSessionData {
   planId: string;
+  billingPeriod: 'monthly' | 'annual';
   workspaceId: string;
   email: string;
   successUrl: string;
@@ -59,9 +60,23 @@ export class StripeService {
         throw new Error('Plan not found');
       }
 
-      // CRITICAL: Verify plan has Stripe Price ID
-      if (!plan.stripePriceIdMonthly) {
-        throw new Error(`Plan ${plan.name} not configured for Stripe. Missing Price ID.`);
+      // The client only ever supplies WHICH billing cycle it wants — the
+      // actual Stripe Price ID always comes from the Plan row in the DB,
+      // never trusted from the request otherwise. 'monthly'/'annual' is
+      // enforced as a strict enum by stripeCheckoutSchema before this is
+      // ever reached (see /api/stripe/checkout/route.ts).
+      const priceId =
+        data.billingPeriod === 'annual' ? plan.stripePriceIdAnnual : plan.stripePriceIdMonthly;
+
+      // CRITICAL: Verify the plan actually has a Stripe Price ID for the
+      // requested billing cycle — e.g. Enterprise has neither (it's a
+      // "Contact us" plan, never sold through Checkout), and a plan could
+      // in principle have one cycle configured but not the other. Refuse
+      // cleanly rather than ever sending `price: null`/undefined to Stripe.
+      if (!priceId) {
+        throw new Error(
+          `Plan ${plan.name} is not configured for ${data.billingPeriod} billing in Stripe. Missing Price ID.`
+        );
       }
 
       // SECURITY: Verify workspace exists and is accessible
@@ -128,7 +143,7 @@ export class StripeService {
         payment_method_types: ['card'],
         line_items: [
           {
-            price: plan.stripePriceIdMonthly, // Use Price ID, not price_data
+            price: priceId, // Use Price ID (resolved above for the requested billing cycle), not price_data
             quantity: 1,
           },
         ],
@@ -139,16 +154,22 @@ export class StripeService {
           workspaceId: data.workspaceId,
           planId: data.planId,
           planName: plan.name,
+          billingPeriod: data.billingPeriod,
         },
         // Checkout Session metadata (above) is NOT copied to the Subscription
         // it creates — it must be set here explicitly, or the
         // customer.subscription.* webhooks (which read subscription.metadata)
-        // never see workspaceId/planId at all.
+        // never see workspaceId/planId at all. billingPeriod is carried
+        // here for display/audit purposes only — handleSubscriptionUpdated
+        // never trusts it; the real source of truth for "which plan is
+        // this subscription on now" is always the live Price ID Stripe
+        // reports on the subscription's own line item.
         subscription_data: {
           metadata: {
             workspaceId: data.workspaceId,
             planId: data.planId,
             planName: plan.name,
+            billingPeriod: data.billingPeriod,
           },
         },
       });
@@ -235,6 +256,31 @@ export class StripeService {
 
   /**
    * Handle subscription updated webhook
+   *
+   * D-1 fix: previously this only updated status/currentPeriodStart/End —
+   * never Subscription.planId. A plan change made through the Stripe
+   * customer portal (e.g. Starter -> Pro) would fire this event with a
+   * new price on the subscription, but ADKSY kept showing the OLD plan
+   * forever, since nothing here ever re-resolved it.
+   *
+   * The new plan is now resolved from the REAL Price ID Stripe reports on
+   * the subscription's own first line item
+   * (subscription.items.data[0].price.id) — never from
+   * subscription.metadata.planId, which is only ever set once at Checkout
+   * time and is never updated by Stripe when the price changes later.
+   * Matched against BOTH stripePriceIdMonthly and stripePriceIdAnnual, so
+   * a portal-driven monthly<->annual switch is resolved correctly too.
+   *
+   * If the Price ID doesn't match any real Plan row, this throws rather
+   * than guessing — the webhook route's own WebhookLog mechanism marks the
+   * event "failed" and lets Stripe's normal retry schedule reprocess it
+   * (see that route's own header comment), which is appropriate if the
+   * mismatch is transient (e.g. a Plan row not yet seeded); a genuinely
+   * unrecognized Price ID needs an operator to add it to a real Plan
+   * before this event can ever succeed. Nothing is written to the DB in
+   * that case, so the Subscription row is left fully consistent (old
+   * plan/status/dates all still in sync with each other) rather than
+   * partially updated.
    */
   static async handleSubscriptionUpdated(subscription: Stripe.Subscription) {
     try {
@@ -253,16 +299,35 @@ export class StripeService {
         throw new Error('Subscription not found');
       }
 
+      const priceId = subscription.items?.data?.[0]?.price?.id;
+      if (!priceId) {
+        throw new Error(`Subscription ${subscription.id} update event has no price id on its first line item`);
+      }
+
+      const plan = await prisma.plan.findFirst({
+        where: {
+          OR: [{ stripePriceIdMonthly: priceId }, { stripePriceIdAnnual: priceId }],
+        },
+      });
+
+      if (!plan) {
+        console.error(
+          `[StripeService] Subscription ${subscription.id} (workspace ${workspaceId}) updated to unrecognized Stripe Price ID "${priceId}" — no matching Plan found. Subscription left unchanged; this event will be retried.`
+        );
+        throw new Error(`Unrecognized Stripe Price ID: ${priceId}`);
+      }
+
       await prisma.subscription.update({
         where: { id: workspace.subscription.id },
         data: {
+          planId: plan.id,
           status: subscription.status as any,
           currentPeriodStart: new Date((subscription as any).current_period_start * 1000),
           currentPeriodEnd: new Date((subscription as any).current_period_end * 1000),
         },
       });
 
-      console.log(`[StripeService] Subscription updated for workspace ${workspaceId}`);
+      console.log(`[StripeService] Subscription updated for workspace ${workspaceId}: now on plan "${plan.name}"`);
     } catch (error) {
       console.error('[StripeService] Subscription updated error:', error);
       throw error;

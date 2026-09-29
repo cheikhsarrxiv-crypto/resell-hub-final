@@ -278,6 +278,15 @@ describe('SourcingResultCard', () => {
       expect(withoutCallback).not.toContain('Créer un produit');
     });
 
+    it('AI-first listing workflow: renders "Sélectionner ce produit" only when onSelect is provided, as its own real button', () => {
+      const withCallback = renderToStaticMarkup(<SourcingResultCard result={baseResult} onSelect={() => {}} />);
+      expect(withCallback).toContain('Sélectionner ce produit');
+      expect(withCallback).toContain('<button');
+
+      const withoutCallback = renderToStaticMarkup(<SourcingResultCard result={baseResult} />);
+      expect(withoutCallback).not.toContain('Sélectionner ce produit');
+    });
+
     it('X. accessible labels disambiguate multiple identical-looking action links/buttons by title', () => {
       const html = renderToStaticMarkup(<SourcingResultCard result={baseResult} onCreateProduct={() => {}} />);
       expect(html).toContain(`aria-label="Voir l’annonce : ${baseResult.title}"`);
@@ -481,16 +490,18 @@ describe('SourcingResultsGrid', () => {
       expect(html).toContain('Etsy');
     });
 
-    it('Q. wires each card\'s "Créer un produit" only when onSend is provided', () => {
+    it('Q. wires each card\'s "Créer un produit" and "Sélectionner ce produit" only when onSend is provided', () => {
       const withSend = renderToStaticMarkup(
         <SourcingResultsGrid toolCalls={[{ name: 'search_products', result: { status: 'ok', results: [baseResult] } }]} onSend={() => {}} />
       );
       expect(withSend).toContain('Créer un produit');
+      expect(withSend).toContain('Sélectionner ce produit');
 
       const withoutSend = renderToStaticMarkup(
         <SourcingResultsGrid toolCalls={[{ name: 'search_products', result: { status: 'ok', results: [baseResult] } }]} />
       );
       expect(withoutSend).not.toContain('Créer un produit');
+      expect(withoutSend).not.toContain('Sélectionner ce produit');
     });
 
     it('W. mobile-first layout: the results grid defaults to a single column, expanding only at sm/lg breakpoints', () => {

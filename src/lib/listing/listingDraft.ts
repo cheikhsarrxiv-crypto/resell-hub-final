@@ -70,6 +70,10 @@ export interface ListingDraftFields {
   sku?: string;
   condition?: string;
   size?: string;
+  /** No source equivalent, exactly like `size` — see that field's own comment. Only ever set by an explicit user edit, never generated. */
+  color?: string;
+  /** Same rule as `color`/`size`: no NormalizedSourcingResult field to copy from, so this can ONLY ever come from an explicit user edit. */
+  material?: string;
   /** Etsy-only, optional — see validateEtsyDraft. Never inferred/guessed; only ever set by an explicit user edit. */
   etsyTaxonomyId?: number;
   etsyWhenMade?: string;
@@ -96,6 +100,26 @@ export interface ListingDraftFields {
 
 export type ListingDraftFieldKey = keyof ListingDraftFields;
 
+/**
+ * AI-first listing workflow — one real image an ImageGenerationProvider
+ * actually produced (see src/services/imagegen/types.ts's own
+ * GeneratedImageResult, which this mirrors exactly). Deliberately kept
+ * OUT of `fields`/`source`: it is neither a source FACT (source.images
+ * already covers those) nor a user-editable proposal — it's provider
+ * output with its own real provenance, which must never be lost or
+ * confused with a real product photo. `prompt` is always the exact text
+ * actually sent to the provider — built ONLY from this draft's own known
+ * facts (see generate_listing_draft_image's own handler), never shown to
+ * imply it was invented freely.
+ */
+export interface GeneratedListingImage {
+  url: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  generatedAt: string;
+}
+
 export interface ListingDraft {
   source: ListingDraftSource;
   fields: ListingDraftFields;
@@ -105,6 +129,14 @@ export interface ListingDraft {
   editedFieldKeys: ListingDraftFieldKey[];
   /** The pre-edit value for every key in editedFieldKeys — so an edit is never a silent, unrecoverable overwrite of what was originally proposed. */
   originalValues: Partial<ListingDraftFields>;
+  /**
+   * AI-first listing workflow — real AI-generated images attached to
+   * this draft, ONLY ever appended by generate_listing_draft_image after
+   * a real ImageGenerationProvider call succeeded. Absent/empty is the
+   * normal, honest state whenever no generation was requested or none
+   * succeeded — never defaulted to a placeholder.
+   */
+  generatedImages?: GeneratedListingImage[];
 }
 
 /**
@@ -138,6 +170,19 @@ export function applyDraftEdit(draft: ListingDraft, patch: Partial<ListingDraftF
     fields: nextFields,
     editedFieldKeys: Array.from(editedFieldKeys),
     originalValues,
+  };
+}
+
+/**
+ * Appends one real, provider-produced image to the draft. Pure — returns
+ * a new draft, never mutates the one passed in, and never touches
+ * `source.images`/`fields` (a generated image is neither a source fact
+ * nor an editable field — see GeneratedListingImage's own comment).
+ */
+export function addGeneratedImage(draft: ListingDraft, image: GeneratedListingImage): ListingDraft {
+  return {
+    ...draft,
+    generatedImages: [...(draft.generatedImages ?? []), image],
   };
 }
 
@@ -251,7 +296,12 @@ export function mapDraftToEbayInput(draft: ListingDraft): Record<string, unknown
     quantity: draft.fields.quantity,
     sku: draft.fields.sku,
     condition: draft.fields.condition,
-    images: draft.source.images,
+    // Real source photos first, AI-generated ones appended after — never
+    // the reverse (see this project's own rule: prefer real images when
+    // both exist). Generated image URLs are provider-hosted and
+    // time-limited (see OpenAIImageGenerationProvider's own comment on
+    // dall-e-3 URL expiry) — a real, documented limitation, not hidden.
+    images: [...draft.source.images, ...(draft.generatedImages ?? []).map((img) => img.url)],
     ebay: {
       categoryId: draft.fields.ebayCategoryId,
       marketplaceId: draft.fields.ebayMarketplaceId,

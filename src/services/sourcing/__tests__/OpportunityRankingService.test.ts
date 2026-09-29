@@ -125,6 +125,20 @@ describe('annotateResult — authenticity warnings/matchReasons', () => {
   });
 });
 
+describe('annotateResult — Global Web Sourcing generic-web-result warning', () => {
+  it('a result with source "web" always gets the generic web-result warning', () => {
+    const { warnings } = annotateResult(makeResult({ source: 'web' }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /general web search/i.test(w))).toBe(true);
+  });
+
+  it('a result from a real structured provider (ebay/etsy) never gets the generic web-result warning', () => {
+    const ebayWarnings = annotateResult(makeResult({ source: 'ebay' }), { query: 'x' }, noBounds).warnings;
+    const etsyWarnings = annotateResult(makeResult({ source: 'etsy' }), { query: 'x' }, noBounds).warnings;
+    expect(ebayWarnings.some((w) => /general web search/i.test(w))).toBe(false);
+    expect(etsyWarnings.some((w) => /general web search/i.test(w))).toBe(false);
+  });
+});
+
 describe('annotateResult — known-cost uncertainty warnings', () => {
   it('translates unknownCostFactors into real, human-readable warnings', () => {
     const { warnings } = annotateResult(makeResult({ unknownCostFactors: ['shipping_unknown'] }), { query: 'x' }, noBounds);

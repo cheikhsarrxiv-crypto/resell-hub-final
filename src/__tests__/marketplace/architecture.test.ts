@@ -244,6 +244,25 @@ describe("Adapter Interface", () => {
     expect(typeof adapter.validateConnection).toBe("function")
   })
 
+  it("Vinted adapter has no OAuth methods at all — multi-marketplace auth architecture, Option B", async () => {
+    const { VintedAdapter } = await import("@/services/marketplace/adapters/VintedAdapter")
+
+    const adapter = new VintedAdapter({
+      clientId: "test",
+      clientSecret: "test",
+      redirectUri: "http://localhost"
+    })
+
+    // Vinted's real auth model has no OAuth flow at all (confirmed via
+    // official docs) — getOAuthUrl/exchangeAuthCode/refreshToken are no
+    // longer part of the base contract, so VintedAdapter never
+    // implements them, not even as a throwing placeholder.
+    expect((adapter as any).getOAuthUrl).toBeUndefined()
+    expect((adapter as any).exchangeAuthCode).toBeUndefined()
+    expect((adapter as any).refreshToken).toBeUndefined()
+    expect(typeof adapter.setManualCredentials).toBe("function")
+  })
+
   it("Vinted adapter is blocked pending allowlisted Pro Integrations access", async () => {
     const { VintedAdapter } = await import("@/services/marketplace/adapters/VintedAdapter")
 
@@ -253,11 +272,18 @@ describe("Adapter Interface", () => {
       redirectUri: "http://localhost"
     })
 
-    // Methods throw BLOCKED (a real "Vinted Pro Integrations" API exists,
-    // but access requires an allowlisted Vinted Pro account — see
-    // VintedAdapter.ts header comment). Not "NOT_SUPPORTED": that
-    // implied no API exists at all, which is no longer accurate.
-    expect(() => adapter.getOAuthUrl("state", [])).toThrow("BLOCKED")
+    // Calling validateConnection() before setManualCredentials is a
+    // caller bug, distinct from the real "no partner access" limitation.
+    await expect(adapter.validateConnection()).rejects.toThrow("setManualCredentials must be called")
+
+    adapter.setManualCredentials({ accessKey: "test-access-key", signingKey: "test-signing-key" })
+
+    // Once credentials are set, the real limitation still applies: a
+    // real "Vinted Pro Integrations" API exists, but access requires an
+    // allowlisted Vinted Pro account — see VintedAdapter.ts header
+    // comment. Not "NOT_SUPPORTED": that implied no API exists at all,
+    // which is no longer accurate.
+    await expect(adapter.validateConnection()).rejects.toThrow("BLOCKED")
   })
 
   it("Depop adapter is blocked pending partner access", async () => {

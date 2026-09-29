@@ -14,7 +14,7 @@ const SUPPORTED_EBAY_MARKETPLACES = ['EBAY_FR', 'EBAY_GB', 'EBAY_DE', 'EBAY_IT',
 // SourcingProviderRegistry.getAllProviders() manually, same pattern as
 // SUPPORTED_EBAY_MARKETPLACES above, so an invalid provider name is
 // rejected by Zod before ever reaching SourcingService.
-const SUPPORTED_PROVIDER_NAMES = ['ebay', 'etsy'] as const;
+const SUPPORTED_PROVIDER_NAMES = ['ebay', 'etsy', 'web'] as const;
 
 const searchProductsInputSchema = z
   .object({
@@ -65,15 +65,27 @@ const searchProductsInputSchema = z
 export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProductsInputSchema>> = {
   name: 'search_products',
   description:
-    'Search for sourcing opportunities across configured external providers (currently: eBay via its official Browse API, and Etsy via its official Open API v3 ' +
-    'public marketplace-wide listings search — both read-only, public listings). ' +
+    'Search for sourcing opportunities across configured external providers: eBay via its official Browse API, Etsy via its official Open API v3 ' +
+    'public marketplace-wide listings search (both read-only, structured provider APIs), and "web" — a GENERAL WEB SEARCH (currently via Tavily) that can surface ' +
+    'individual, already-indexed pages from sites ADKSY has no official marketplace-search API for at all (e.g. Vinted, Vestiaire Collective, Depop, Grailed, independent boutiques) ' +
+    'by extracting listing fields from each page\'s own text with an AI step. This is fundamentally weaker than eBay/Etsy\'s structured APIs: it can only ever find SOME pages a search ' +
+    'engine happens to have indexed, never a complete or authoritative listing of any site\'s inventory, and it never grants ADKSY real API access to a site (see knownUnavailableSources, ' +
+    'which stays accurate regardless of "web" results). A "web" result excluded from the response for lacking a confidently-extracted price/currency is never surfaced with an invented value — ' +
+    'it is silently dropped, so a query that matches only vague, price-less pages can legitimately return zero "web" results even though pages about it exist online. ' +
     'Can search multiple eBay marketplaces (countries) at once for price comparison, or set worldwide=true to search every marketplace ADKSY has real, ' +
     'configured access to for that provider — this means "every source ADKSY can currently, legitimately reach", never literally the entire internet; ' +
     'the response\'s providersSearched/providersUnavailable/providersSkipped fields say exactly which sources were actually queried, unavailable, or excluded. ' +
-    'Use `providers` (e.g. ["ebay"]) to restrict the search to specific providers instead of all configured ones. ' +
-    "Returns real listings only — never a fabricated result. If no provider is configured, returns status SOURCE_NOT_CONFIGURED. " +
-    "Each result's authenticityStatus is 'verified' only when a provider's own institutional program covers the item (currently only eBay's Authenticity Guarantee — Etsy has no such program, so Etsy results are never 'verified'); " +
-    "otherwise 'claimed' (the seller's own listing, not independently checked), 'unverified' (no usable content), or 'unknown'. Never upgrade this yourself. " +
+    'Use `providers` (e.g. ["ebay"], or ["web"] for a general web search only) to restrict the search to specific providers instead of all configured ones. ' +
+    "Returns real listings only — never a fabricated result. Distinguish these outcomes precisely when reporting back to the reseller: (1) status SOURCE_NOT_CONFIGURED — no " +
+    "provider at all is configured on this ADKSY instance right now, a setup gap, not \"no results\"; (2) status ok with results: [] and providersSearched non-empty — the configured " +
+    "provider(s) were genuinely queried and found nothing, a real empty outcome; (3) a providerErrors entry for a provider — that specific provider hit a temporary engine/network " +
+    "problem (see its kind: timeout/auth/rate_limit/upstream_error/unknown) and may be worth retrying, results from OTHER providers in the same response are still real and unaffected; " +
+    "(4) for \"web\" specifically, a candidate page was found but couldn't be turned into a result because it lacked a confident price/currency, or wasn't really a product offer at all — " +
+    "this is invisible in the response (the candidate is simply not in results), so never claim \"nothing was found online\" when you only mean \"nothing usable was extracted\" — say the " +
+    "web search itself found only inconclusive pages, if you know that from context. Never conflate any of these four with each other. " +
+    "Each result's authenticityStatus is 'verified' only when a provider's own institutional program covers the item (currently only eBay's Authenticity Guarantee — Etsy and web results have " +
+    "no such program, so they are never 'verified'; a 'web' result is 'claimed' only when the page itself states an authenticity claim, and this is still only ever the page's own claim); " +
+    "otherwise 'unverified' (no usable content), or 'unknown'. Never upgrade this yourself. " +
     "Each result's normalizedPriceEur (when present) is a real currency conversion, not the authoritative price — always prefer the original price/currency; " +
     'normalizedPriceEur is absent whenever no reliable exchange rate was available, never a guessed value. Combined multi-provider results are sorted by ' +
     'normalizedPriceEur ascending (results with no available rate are listed last), so this doubles as the price comparison the query implies. ' +
@@ -118,7 +130,7 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       providers: {
         type: 'array',
         items: { type: 'string', enum: SUPPORTED_PROVIDER_NAMES as unknown as string[] },
-        description: 'Restrict the search to these sourcing providers only, e.g. ["ebay"]. Omit to search every configured provider (default).',
+        description: 'Restrict the search to these sourcing providers only, e.g. ["ebay"] or ["web"] for a general web search (Vinted/Depop/Grailed/Vestiaire Collective/etc. pages an engine has indexed, not an official API). Omit to search every configured provider (default).',
       },
       sort: {
         type: 'string',

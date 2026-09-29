@@ -7,6 +7,7 @@ import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState } from '@/components/dashboard/DashboardStates';
 import { formatCurrency } from '@/lib/utils';
+import { isEnterprisePlan } from '@/lib/subscription/planHelpers';
 import { Check } from 'lucide-react';
 
 interface Plan {
@@ -56,6 +57,7 @@ export default function SubscriptionPage() {
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [billingPeriod, setBillingPeriod] = useState<'monthly' | 'annual'>('monthly');
 
   const startCheckout = async (planId: string) => {
     if (!workspaceId) return;
@@ -67,7 +69,7 @@ export default function SubscriptionPage() {
       const response = await fetch(`/api/stripe/checkout?workspaceId=${workspaceId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planId }),
+        body: JSON.stringify({ planId, billingPeriod }),
       });
 
       const data = await response.json();
@@ -161,12 +163,38 @@ export default function SubscriptionPage() {
 
       {/* Available Plans */}
       <div>
-        <h2 className="text-lg font-bold text-white mb-6" style={{ fontFamily: 'var(--font-display)' }}>
-          Available Plans
-        </h2>
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-lg font-bold text-white" style={{ fontFamily: 'var(--font-display)' }}>
+            Available Plans
+          </h2>
+          <div className="inline-flex items-center bg-white/[0.04] border border-white/10 rounded-lg p-1 text-sm">
+            <button
+              type="button"
+              onClick={() => setBillingPeriod('monthly')}
+              className={`px-3 py-1.5 rounded-md transition-colors ${
+                billingPeriod === 'monthly' ? 'bg-[#FF5A1F] text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Monthly
+            </button>
+            <button
+              type="button"
+              onClick={() => setBillingPeriod('annual')}
+              className={`px-3 py-1.5 rounded-md transition-colors ${
+                billingPeriod === 'annual' ? 'bg-[#FF5A1F] text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Annual
+            </button>
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           {plans.map((plan) => {
             const isCurrent = subscription?.plan?.id === plan.id;
+            // D-4: Enterprise has no Stripe Price ID — it is sold via
+            // "Contact us", never through Checkout. Same contact address
+            // already used by the public /pricing page's Enterprise CTA.
+            const isEnterprise = isEnterprisePlan(plan);
             return (
               <DashboardCard key={plan.id} className={`relative p-6 ${isCurrent ? 'ring-1 ring-[#FF5A1F]/50' : ''}`}>
                 {isCurrent && (
@@ -176,8 +204,19 @@ export default function SubscriptionPage() {
                 )}
 
                 <p className="text-sm font-medium text-gray-400 capitalize">{plan.name}</p>
-                <p className="text-2xl font-bold text-white mt-2">{formatCurrency(plan.price)}</p>
-                <p className="text-gray-500 text-sm mb-5">/month</p>
+                {isEnterprise ? (
+                  <>
+                    <p className="text-2xl font-bold text-white mt-2">Custom</p>
+                    <p className="text-gray-500 text-sm mb-5">Contact us for pricing</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-2xl font-bold text-white mt-2">{formatCurrency(plan.price)}</p>
+                    <p className="text-gray-500 text-sm mb-5">
+                      /month{billingPeriod === 'annual' && plan.price > 0 ? ' (billed annually)' : ''}
+                    </p>
+                  </>
+                )}
 
                 <div className="space-y-2.5 mb-6">
                   <div className="flex items-center gap-2">
@@ -212,7 +251,16 @@ export default function SubscriptionPage() {
                   )}
                 </div>
 
-                {!isCurrent && (
+                {!isCurrent && isEnterprise && (
+                  <a
+                    href="mailto:sales@resellhub.io"
+                    className="w-full font-medium rounded-lg transition-colors inline-flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60 bg-[#FF5A1F] text-white hover:bg-[#e64f18] px-4 py-2 text-sm"
+                  >
+                    Contact us
+                  </a>
+                )}
+
+                {!isCurrent && !isEnterprise && (
                   <DashboardButton
                     variant="primary"
                     className="w-full"

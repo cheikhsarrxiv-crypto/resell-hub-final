@@ -1,4 +1,4 @@
-import { ExternalLink, PackagePlus } from 'lucide-react';
+import { ExternalLink, PackagePlus, Sparkles } from 'lucide-react';
 import type { NormalizedSourcingResult } from '@/services/sourcing/types';
 import { formatMarketplaceLabel, formatSourcingPrice, formatUnknownCostFactor } from '@/lib/ai/sourcingResults';
 
@@ -16,6 +16,15 @@ interface SourcingResultCardProps {
    * caller has no way to send a message, like a read-only render).
    */
   onCreateProduct?: (result: NormalizedSourcingResult) => void;
+  /**
+   * AI-first listing workflow — the primary "select this product" action.
+   * Sends a plain selection message (never a command like "generate the
+   * listing") through the exact same chat pipeline as onCreateProduct —
+   * the Agent itself decides to proactively propose preparing the full
+   * listing (see propose_listing_generation and AiAgentService's own
+   * system prompt), it is never called directly from here.
+   */
+  onSelect?: (result: NormalizedSourcingResult) => void;
 }
 
 /**
@@ -46,7 +55,7 @@ const AUTHENTICITY_CLASSES: Record<NormalizedSourcingResult['authenticityStatus'
   unknown: 'bg-white/[0.06] text-gray-400 border-white/10',
 };
 
-export function SourcingResultCard({ result, onCreateProduct }: SourcingResultCardProps) {
+export function SourcingResultCard({ result, onCreateProduct, onSelect }: SourcingResultCardProps) {
   const image = result.images[0];
   const showNormalizedPrice = result.normalizedPriceEur !== undefined && result.currency.toUpperCase() !== 'EUR';
   const hasKnownCost = result.estimatedKnownCostEur !== undefined;
@@ -201,6 +210,18 @@ export function SourcingResultCard({ result, onCreateProduct }: SourcingResultCa
             Voir l&apos;annonce
             <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
           </a>
+
+          {onSelect && (
+            <button
+              type="button"
+              onClick={() => onSelect(result)}
+              aria-label={`Sélectionner ce produit : ${result.title}`}
+              className="inline-flex items-center gap-1 text-sm font-medium text-[#FF5A1F] hover:text-[#ff7a45] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60 rounded"
+            >
+              <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+              Sélectionner ce produit
+            </button>
+          )}
 
           {onCreateProduct && (
             <button

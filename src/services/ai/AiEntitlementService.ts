@@ -97,6 +97,11 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, AiCapability | null>> = 
   publish_etsy_listing: 'marketplace_publish',
   send_to_fulfillment: 'fulfillment',
   simulate_engage_action: null,
+  // Same capability as search_products — a pure revalidation of an
+  // already-returned sourcing result, no new capability surface.
+  propose_listing_generation: 'sourcing',
+  // Same capability as generate_listing_draft — another way to prepare the same draft.
+  generate_listing_draft_image: 'listing_generation',
 };
 
 /** A tool not in TOOL_CAPABILITIES at all (e.g. a future tool added without updating this map) also gets `null` — no capability gate, same as simulate_engage_action — never a silent crash. */
@@ -132,26 +137,33 @@ function allFalseCapabilities(): Record<AiCapability, boolean> {
  *
  * Grounded strictly in the two real Plan flags that already exist —
  * `aiAssistant` (whether the AI Agent is enabled for this plan at all —
- * true only for business/enterprise today, see prisma/seed.js) and
+ * true for every real plan today, Free included, see prisma/seed.js) and
  * `fulfillmentEnabled` (the separate, pre-existing fulfillment feature
- * gate, true for pro/business/enterprise). No new Prisma column, no
- * Stripe change, no usage/quota tracking — see this task's own scope.
+ * gate, true for pro/business/enterprise only). No new Prisma column, no
+ * Stripe change — usage/quota tracking is AiUsageService's job, a
+ * separate layer this service never duplicates (see this task's own
+ * scope).
  *
- * A per-capability matrix that differentiated Starter/Pro (e.g. "Starter
- * gets ai_chat only", "Pro gets everything except publish/fulfillment")
- * was proposed as a starting point for this task, but is deliberately NOT
- * implemented here: no real plan/pricing data in this repository backs
- * that distinction today (Starter and Pro both have aiAssistant unset,
- * i.e. false — the existing /api/ai/agent route already refuses them
- * entirely before AiAgentService ever runs), and inventing a partial
- * capability set for them would be exactly the kind of fabricated
- * business rule this project must never introduce. Today's real signal
- * is binary: a plan either has the full AI Agent (aiAssistant: true) or
- * it has none of it. Once product/pricing actually defines graduated AI
- * tiers for Starter/Pro (a real Plan-level decision, not one this service
- * can invent), only CAPABILITY updates below need to change — the
- * plumbing (getPlanEntitlements/canUseCapability/getCapabilityStatus,
- * and their callers) already supports a non-binary matrix as-is.
+ * Commercial rule (corrected — previously Free/Starter/Pro had
+ * aiAssistant=false, refusing the Agent entirely for them at the route
+ * level): the AI Agent itself is available on every plan. The real
+ * per-plan differentiation is the AI Units quota (aiUsageConfig.ts's
+ * PLAN_MONTHLY_AI_UNITS — Free gets the smallest monthly budget, Business/
+ * Enterprise the largest), never a full capability lockout. A per-capability
+ * matrix that differentiated Starter/Pro (e.g. "Starter gets ai_chat only")
+ * is deliberately NOT implemented here: no real plan/pricing data in this
+ * repository backs that distinction, and inventing a partial capability
+ * set for them would be exactly the kind of fabricated business rule this
+ * project must never introduce. Today's real signal is binary per plan
+ * (aiAssistant true/false, now true everywhere) — `fulfillment` remains
+ * the one capability with a genuine additional tier gate, since
+ * `fulfillmentEnabled` is a real, pre-existing, unrelated feature flag
+ * (Pro and above only). Once product/pricing ever defines a graduated
+ * capability matrix for real (a Plan-level business decision, not one
+ * this service can invent), only the CAPABILITY logic below needs to
+ * change — the plumbing (getPlanEntitlements/canUseCapability/
+ * getCapabilityStatus, and their callers) already supports a non-binary
+ * matrix as-is.
  *
  * 'fulfillment' is additionally ANDed with the plan's own
  * `fulfillmentEnabled` flag, never just `aiAssistant` alone — so
@@ -179,8 +191,18 @@ export class AiEntitlementService {
         | null
         | undefined;
 
-      const aiEnabled = Boolean(plan?.aiAssistant);
-      const fulfillmentEnabled = Boolean(plan?.fulfillmentEnabled);
+      // A real paid subscription that fell back to the Free plan because
+      // its Stripe status is no longer access-granting (canceled/unpaid/
+      // incomplete_expired/paused/...) must never inherit Free's own
+      // aiAssistant/fulfillmentEnabled just because `plan` was swapped to
+      // it — see SubscriptionService.hasFeature's own comment on this
+      // exact distinction. A genuine Free workspace (no subscription at
+      // all) fabricates status: 'active' in getSubscription, which IS
+      // access-granting, so it is unaffected by this check.
+      const statusGrantsAccess = Boolean(subscription) && SubscriptionService.isAccessGrantingStatus(subscription.status);
+
+      const aiEnabled = statusGrantsAccess && Boolean(plan?.aiAssistant);
+      const fulfillmentEnabled = statusGrantsAccess && Boolean(plan?.fulfillmentEnabled);
 
       const capabilities = ALL_CAPABILITIES.reduce((acc, capability) => {
         acc[capability] = capability === 'fulfillment' ? aiEnabled && fulfillmentEnabled : aiEnabled;

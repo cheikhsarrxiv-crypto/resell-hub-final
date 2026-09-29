@@ -3,18 +3,20 @@
 import { useEffect } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useAgentConversation } from '@/hooks/useAgentConversation';
+import { useAgentUsage } from '@/hooks/useAgentUsage';
 import { AgentMessageList } from '@/components/ai/AgentMessageList';
 import { AgentComposer } from '@/components/ai/AgentComposer';
 import { AgentErrorBanner } from '@/components/ai/AgentErrorBanner';
+import { AgentUsageBanner } from '@/components/ai/AgentUsageBanner';
 
 /**
  * Phase 11A — text-only Agent conversation page. Phase 11D — restores a
  * persisted conversation from ?conversationId=... in the URL, and keeps
  * the URL in sync once a brand new conversation gets its id (so a
  * refresh right after the very first message still restores it). Talks
- * to the existing /api/ai/agent (auth/workspace/Business gate/rate limit
- * all enforced server-side, unchanged; GET added in Phase 11D follows
- * the exact same auth/workspace/gate order). `toolCalls` on each
+ * to the existing /api/ai/agent (auth/workspace/aiAssistant gate/rate
+ * limit all enforced server-side, unchanged; GET added in Phase 11D
+ * follows the exact same auth/workspace/gate order). `toolCalls` on each
  * assistant message — whether it came from a live POST or a restored
  * GET — are rendered by AgentMessageList via SourcingResultsGrid/
  * MarginSummaryList (Phase 11B/11C), unchanged here.
@@ -37,6 +39,8 @@ export default function AgentPage() {
     confirmAction,
     cancelAction,
   } = useAgentConversation(initialConversationId);
+
+  const { usage } = useAgentUsage();
 
   // Once a brand new conversation gets its real id (first message ever
   // sent on this page load, so the URL had none yet), reflect it in the
@@ -82,6 +86,8 @@ export default function AgentPage() {
           </button>
         )}
       </div>
+
+      {usage && <AgentUsageBanner usage={usage} />}
 
       {showHistoryLoading ? (
         <div className="flex-1 flex items-center justify-center" role="status">

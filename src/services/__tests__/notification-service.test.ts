@@ -104,6 +104,32 @@ describe.skipIf(!dbAvailable)('NotificationService.createNotification — real P
     expect(rows).toHaveLength(0);
   });
 
+  it('AI-first listing workflow: persists the real link column when given, for deep-linking back to a draft/conversation', async () => {
+    const { user, workspace } = await createWorkspace();
+
+    await NotificationService.createNotification(
+      workspace.id,
+      'listing_draft_ready',
+      'Annonce prête à vérifier',
+      'Ton annonce "Prada Cut" est prête à être vérifiée.',
+      undefined,
+      '/dashboard/agent?conversationId=conv-123'
+    );
+
+    const rows = await testPrisma.notification.findMany({ where: { userId: user.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].link).toBe('/dashboard/agent?conversationId=conv-123');
+  });
+
+  it('link stays null when omitted, exactly like every notification type that predates this field', async () => {
+    const { user, workspace } = await createWorkspace();
+
+    await NotificationService.createNotification(workspace.id, 'new_order', 'Title', 'Message');
+
+    const rows = await testPrisma.notification.findMany({ where: { userId: user.id } });
+    expect(rows[0].link).toBeNull();
+  });
+
   it('does not throw when the database write itself fails', async () => {
     const { workspace } = await createWorkspace();
     vi.spyOn(prisma.notification, 'create').mockRejectedValueOnce(new Error('db unavailable'));

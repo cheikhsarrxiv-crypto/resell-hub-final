@@ -9,6 +9,7 @@ import {
 } from '@/lib/listing/listingDraft';
 import { ListingGenerationService } from '@/services/listing/ListingGenerationService';
 import { isValidEtsyWhenMade } from '@/services/marketplace/EtsyListingMapper';
+import { NotificationService } from '@/services/NotificationService';
 import { AgentToolDefinition } from './types';
 import { findToolResultsByName } from './conversationToolResults';
 
@@ -49,7 +50,11 @@ async function findSourcedResult(conversationId: string, sourceUrl: string, work
  * it any other way.
  */
 export async function findLatestDraft(conversationId: string, sourceItemId: string, workspaceId: string): Promise<ListingDraft | null> {
-  const entries = await findToolResultsByName(conversationId, ['generate_listing_draft', 'edit_listing_draft'], workspaceId);
+  const entries = await findToolResultsByName(
+    conversationId,
+    ['generate_listing_draft', 'edit_listing_draft', 'generate_listing_draft_image'],
+    workspaceId
+  );
   let latest: ListingDraft | null = null;
   for (const entry of entries) {
     const payload = entry.result as { draft?: unknown } | null;
@@ -60,7 +65,7 @@ export async function findLatestDraft(conversationId: string, sourceItemId: stri
   return latest;
 }
 
-function buildValidationResult(draft: ListingDraft) {
+export function buildValidationResult(draft: ListingDraft) {
   return { draft, marketplaceValidation: { ebay: validateEbayDraft(draft), etsy: validateEtsyDraft(draft) } };
 }
 
@@ -68,6 +73,13 @@ const generateListingDraftInputSchema = z.object({
   sourceUrl: z.string().url(),
   proposedPrice: z.number().min(0).optional(),
   proposedCurrency: z.string().length(3).optional(),
+  // AI-first listing workflow — an alternative to proposedPrice: when the
+  // reseller states a target margin instead of a target price (e.g. "avec
+  // une marge de 30%"), this computes proposedPrice by pure algebra from
+  // the source's own real price (see ListingGenerationService's own
+  // computePriceForTargetMargin) — never a default/invented margin.
+  // Ignored if proposedPrice is also given (proposedPrice always wins).
+  targetMarginPercent: z.number().min(0).max(99).optional(),
 });
 
 export const generateListingDraftTool: AgentToolDefinition<z.infer<typeof generateListingDraftInputSchema>> = {
@@ -76,8 +88,12 @@ export const generateListingDraftTool: AgentToolDefinition<z.infer<typeof genera
     "Prepares a listing draft (never a real publication) for a product the reseller selected from a previous search_products result in THIS conversation. " +
     'sourceUrl must be the exact sourceUrl of one of those real results — a fabricated or foreign one is rejected, never accepted on trust. ' +
     'proposedPrice, if given, is the reseller\'s PROPOSED selling price (distinct from the source\'s own cost) — never invented by this tool if omitted. ' +
-    'Title/description are generated deterministically from real source fields only — never invents brand/size/color/material/condition that are not already present. ' +
-    'Returns marketplace-readiness validation for eBay and Etsy (never publishes).',
+    'targetMarginPercent is an alternative way to set the same proposed price: give it INSTEAD of proposedPrice only when the reseller stated a target ' +
+    'margin rather than a target price — this computes the price by exact algebra from the source\'s own real purchase price, never a default/assumed margin. ' +
+    'If neither is given, the draft\'s proposed price stays unset (never defaulted to the source\'s own cost) — ask the reseller for one before publishing. ' +
+    'Title/description are generated deterministically from real source fields only — never invents brand/size/color/material/condition that are not already present ' +
+    '(size/color/material have no source equivalent and can only ever be added later via edit_listing_draft, from the reseller\'s own explicit input). ' +
+    'Returns marketplace-readiness validation for eBay and Etsy (never publishes). Triggers an in-app notification the reseller can use to come back to this draft.',
   category: 'write',
   inputSchema: generateListingDraftInputSchema,
   jsonSchema: {
@@ -86,6 +102,11 @@ export const generateListingDraftTool: AgentToolDefinition<z.infer<typeof genera
       sourceUrl: { type: 'string', description: 'The exact sourceUrl of a result already returned by search_products in this conversation.' },
       proposedPrice: { type: 'number', description: "The reseller's proposed selling price, if they gave one. Never invented." },
       proposedCurrency: { type: 'string', description: 'ISO 4217 code for proposedPrice. Defaults to the source item\'s own currency if omitted.' },
+      targetMarginPercent: {
+        type: 'number',
+        description:
+          'Alternative to proposedPrice: a target margin percentage (0-99) the reseller explicitly stated, e.g. 30 for "30%". The proposed price is then computed by exact algebra from the source\'s own real price — never a default/assumed margin. Ignored if proposedPrice is also given.',
+      },
     },
     required: ['sourceUrl'],
   },
@@ -100,7 +121,22 @@ export const generateListingDraftTool: AgentToolDefinition<z.infer<typeof genera
     const draft = ListingGenerationService.buildDraftFromSourcingResult(sourced, {
       proposedPrice: input.proposedPrice,
       proposedCurrency: input.proposedCurrency,
+      targetMarginPercent: input.targetMarginPercent,
     });
+
+    // AI-first listing workflow — notify the reseller the draft is ready
+    // to review, with a real deep link back to this exact conversation.
+    // Never throws (NotificationService.createNotification's own
+    // guarantee) — a notification failure must never break draft
+    // generation itself.
+    await NotificationService.createNotification(
+      workspaceId,
+      'listing_draft_ready',
+      'Annonce prête à vérifier',
+      `Ton annonce "${draft.fields.title}" est prête à être vérifiée.`,
+      undefined,
+      `/dashboard/agent?conversationId=${context.conversationId}`
+    );
 
     return buildValidationResult(draft);
   },
@@ -116,6 +152,8 @@ const editableFieldsPatchSchema = z
     sku: z.string().max(100),
     condition: z.string().max(100),
     size: z.string().max(50),
+    color: z.string().max(50),
+    material: z.string().max(100),
     etsyTaxonomyId: z.number().int().positive(),
     // Audit finding (publish_listing hardening pass): previously any
     // string up to 50 chars was accepted here, so a typo'd/invented
@@ -164,6 +202,8 @@ export const editListingDraftTool: AgentToolDefinition<z.infer<typeof editListin
           sku: { type: 'string' },
           condition: { type: 'string' },
           size: { type: 'string' },
+          color: { type: 'string', description: 'Color — has no source equivalent, only ever set from an explicit reseller instruction, never guessed.' },
+          material: { type: 'string', description: 'Material — has no source equivalent, only ever set from an explicit reseller instruction, never guessed.' },
           etsyTaxonomyId: { type: 'number', description: 'Etsy category id — only ever set from an explicit reseller instruction, never guessed.' },
           etsyWhenMade: { type: 'string' },
           etsyWhoMade: { type: 'string', description: 'Etsy who_made value (e.g. "i_did", "someone_else", "collective") — only ever set from an explicit reseller instruction, never guessed.' },

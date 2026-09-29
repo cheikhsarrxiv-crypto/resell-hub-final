@@ -3,6 +3,7 @@ import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import { getAuthSession } from '@/lib/api-auth';
 import { StripeService } from '@/services/StripeService';
 import { rateLimiter } from '@/lib/ratelimit';
+import { stripeCheckoutSchema } from '@/lib/validations';
 
 /**
  * POST /api/stripe/checkout
@@ -44,20 +45,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { planId } = await request.json();
+    const body = await request.json().catch(() => null);
+    const parsed = stripeCheckoutSchema.safeParse(body);
 
-    if (!planId) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: 'Plan ID is required' },
+        { error: 'Invalid request', details: parsed.error.errors },
         { status: 400 }
       );
     }
+
+    const { planId, billingPeriod } = parsed.data;
 
     // Get origin for URLs
     const origin = request.headers.get('origin') || 'http://localhost:3000';
 
     const checkoutSession = await StripeService.createCheckoutSession({
       planId,
+      billingPeriod,
       workspaceId,
       email: session.user.email, // SECURITY: From auth session, not placeholder
       successUrl: `${origin}/subscription?session_id={CHECKOUT_SESSION_ID}`,

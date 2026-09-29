@@ -277,6 +277,28 @@ model ProductImage {
   order   Int     @default(0)
   isMain  Boolean @default(false)
 
+  // AI-first listing workflow — provenance, so a viewer/marketplace
+  // listing never mistakes an AI-generated image for a real product
+  // photo. 'REAL' = copied from a real sourcing result's own image URL
+  // (see WebSourcingProvider/EbayBrowseSourcingProvider — never
+  // fabricated); 'GENERATED' = produced by an ImageGenerationProvider
+  // (see src/services/imagegen — none configured yet, see that module's
+  // own comment). Nullable: every image uploaded through the existing
+  // manual dashboard flow (StorageService.uploadImage) has neither this
+  // nor sourceUrl/generationMetadata set — a real, ordinary, unchanged
+  // state, never backfilled or inferred for pre-existing rows.
+  sourceType String? // 'REAL' | 'GENERATED'
+  // For sourceType='REAL': the exact source image URL this was copied
+  // from (may equal `url` when hotlinked, never re-hosted — see
+  // actionTools.ts's create_product). For sourceType='GENERATED': not
+  // used (generation provenance lives in generationMetadata instead).
+  sourceUrl String?
+  // For sourceType='GENERATED' only: JSON-stringified real generation
+  // metadata (provider name, prompt actually sent, model, generatedAt) —
+  // never fabricated, always exactly what the provider call itself
+  // returned/received. Null for a REAL or manually-uploaded image.
+  generationMetadata String? @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -650,6 +672,15 @@ model Notification {
   message   String   @db.Text
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  // AI-first listing workflow — an in-app relative path (e.g.
+  // "/dashboard/agent?conversationId=...") the notification UI can
+  // navigate to directly, e.g. so "Ton annonce Prada Cut est prête à
+  // être vérifiée" opens the exact conversation/draft it's about.
+  // Nullable: every notification type that existed before this field
+  // (new_order, subscription_created, ...) has none, and that stays a
+  // perfectly valid, ordinary state — never backfilled or inferred.
+  link String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

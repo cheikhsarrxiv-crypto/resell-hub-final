@@ -1,0 +1,41 @@
+-- Data-only migration: flips Plan.aiAssistant to true for the Free,
+-- Starter and Pro plans too — completing the change already made for
+-- Business/Enterprise by migration 20260923150000.
+--
+-- Commercial correction: the AI Agent must be available on every plan
+-- (Free, Starter, Pro, Business, Enterprise) — usage is differentiated
+-- by the AI Units quota (see aiUsageConfig.ts's PLAN_MONTHLY_AI_UNITS),
+-- never by a full plan-level lockout. Free/Starter/Pro previously had
+-- aiAssistant=false (the schema default, never explicitly set for them
+-- before this commit), which made SubscriptionService.hasFeature(
+-- workspaceId, 'aiAssistant') — the gate every /api/ai/agent* route
+-- checks — refuse the Agent entirely for those three plans. This
+-- migration corrects that; the gate itself is left in place as an on/off
+-- kill switch, now true for every real plan.
+--
+-- Scope, exactly one column/three rows touched, nothing else:
+--   - Only the `aiAssistant` column. Every other column on Plan (price,
+--     currency, billingPeriod, stripePriceIdMonthly/Annual, maxProducts/
+--     Listings/Orders/Marketplaces/Users, fulfillmentEnabled,
+--     advancedAnalytics, apiAccess, autoDelistEnabled, createdAt) is
+--     left exactly as it was.
+--   - Only rows where name IN ('free', 'starter', 'pro') — Business and
+--     Enterprise are already true (migration 20260923150000) and are
+--     left untouched here too.
+--   - No other table: no User, Workspace, Subscription, or any other
+--     model is read or written by this migration.
+--
+-- Idempotent: the `AND "aiAssistant" = false` guard means every run
+-- after the first matches zero rows (UPDATE 0). Safe to have in the
+-- migration history permanently and safe if `prisma migrate resolve`
+-- or a re-run ever applies it more than once on the same database.
+--
+-- If a given environment has no 'free'/'starter'/'pro' Plan row at all
+-- (e.g. a brand new database, seeded fresh via prisma/seed.js or
+-- prisma/seed-plans-production.js, both of which already set
+-- aiAssistant=true at creation time as of this commit), this UPDATE
+-- simply matches zero rows and does nothing — no row is fabricated here.
+UPDATE "Plan"
+SET "aiAssistant" = true
+WHERE "name" IN ('free', 'starter', 'pro')
+  AND "aiAssistant" = false;

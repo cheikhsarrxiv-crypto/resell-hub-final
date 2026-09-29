@@ -85,6 +85,17 @@ describe('applyDraftEdit', () => {
     expect(draft.fields.price).toBe(449);
     expect(draft.editedFieldKeys).toEqual([]);
   });
+
+  it('color/material (AI-first listing workflow) have no source equivalent — absent until an explicit edit sets them', () => {
+    const draft = baseDraft();
+    expect(draft.fields.color).toBeUndefined();
+    expect(draft.fields.material).toBeUndefined();
+
+    const edited = applyDraftEdit(draft, { color: 'Noir', material: 'Coton' });
+    expect(edited.fields.color).toBe('Noir');
+    expect(edited.fields.material).toBe('Coton');
+    expect(edited.editedFieldKeys).toEqual(expect.arrayContaining(['color', 'material']));
+  });
 });
 
 describe('validateEbayDraft', () => {
@@ -195,6 +206,14 @@ describe('mapDraftToEbayInput (Phase 12C-Prep — preview must match reality)', 
     expect(input.condition).toBe(draft.fields.condition);
     expect(input.images).toEqual(draft.source.images);
     expect(input.ebay).toEqual({ categoryId: draft.fields.ebayCategoryId, marketplaceId: draft.fields.ebayMarketplaceId });
+  });
+
+  it('AI-first listing workflow: appends AI-generated images after real source images, never before/instead', () => {
+    const generatedImage = { url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'x', generatedAt: '2026-01-01T00:00:00.000Z' };
+    const draft = { ...baseDraft(), generatedImages: [generatedImage] };
+    const input = mapDraftToEbayInput(draft) as any;
+
+    expect(input.images).toEqual([...draft.source.images, generatedImage.url]);
   });
 });
 
