@@ -125,3 +125,33 @@ describe('ListingGenerationService — price is a proposal, never invented', () 
     expect(draft.fields.quantity).toBe(1);
   });
 });
+
+describe('ListingGenerationService — targetMarginPercent (AI-first listing workflow)', () => {
+  it('computes the proposed price by exact algebra from the source price when a target margin is explicitly given', () => {
+    const draft = ListingGenerationService.buildDraftFromSourcingResult(baseResult({ price: 280, currency: 'EUR' }), {
+      targetMarginPercent: 30,
+    });
+    // margin = (price - cost) / price = 30% -> price = 280 / 0.7 = 400
+    expect(draft.fields.price).toBeCloseTo(400, 2);
+    expect(draft.fields.currency).toBe('EUR');
+    expect(draft.generatedFieldKeys).toContain('price');
+  });
+
+  it('proposedPrice always wins over targetMarginPercent when both are given', () => {
+    const draft = ListingGenerationService.buildDraftFromSourcingResult(baseResult({ price: 280 }), {
+      proposedPrice: 350,
+      targetMarginPercent: 30,
+    });
+    expect(draft.fields.price).toBe(350);
+  });
+
+  it('no targetMarginPercent and no proposedPrice -> price stays undefined, never a silently assumed margin', () => {
+    const draft = ListingGenerationService.buildDraftFromSourcingResult(baseResult({ price: 280 }));
+    expect(draft.fields.price).toBeUndefined();
+  });
+
+  it('a degenerate target margin (>=100%) never produces an invented/Infinity price', () => {
+    const draft = ListingGenerationService.buildDraftFromSourcingResult(baseResult({ price: 280 }), { targetMarginPercent: 100 });
+    expect(draft.fields.price).toBeUndefined();
+  });
+});

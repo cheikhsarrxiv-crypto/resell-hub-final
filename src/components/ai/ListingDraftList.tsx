@@ -3,6 +3,8 @@ import { ListingDraftEditor } from './ListingDraftEditor';
 
 interface ListingDraftListProps {
   toolCalls: unknown[] | undefined;
+  /** AI-first listing workflow — forwarded to ListingDraftEditor's own action buttons (Valider/Annuler). Omit to render read-only (no buttons). */
+  onSend?: (message: string) => void;
 }
 
 /**
@@ -11,7 +13,7 @@ interface ListingDraftListProps {
  * message, an honest message (never a fabricated draft) for an error
  * outcome, and nothing at all when the turn had neither.
  */
-export function ListingDraftList({ toolCalls }: ListingDraftListProps) {
+export function ListingDraftList({ toolCalls, onSend }: ListingDraftListProps) {
   const outcomes = extractListingDraftOutcomes(toolCalls);
   if (outcomes.length === 0) return null;
 
@@ -19,7 +21,7 @@ export function ListingDraftList({ toolCalls }: ListingDraftListProps) {
     <div className="space-y-2">
       {outcomes.map((outcome) =>
         outcome.status === 'ok' && outcome.draft && outcome.marketplaceValidation ? (
-          <ListingDraftEditor key={outcome.toolCallIndex} draft={outcome.draft} />
+          <ListingDraftEditor key={outcome.toolCallIndex} draft={outcome.draft} onSend={onSend} />
         ) : (
           <p key={outcome.toolCallIndex} className="mr-auto max-w-[85%] text-sm text-gray-500">
             {outcome.error ?? "Ce brouillon d'annonce n'a pas pu être préparé."}

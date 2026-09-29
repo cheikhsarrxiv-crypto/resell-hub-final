@@ -8,6 +8,7 @@ import { SourcingResultsGrid } from './SourcingResultsGrid';
 import { MarginSummaryList } from './MarginSummaryList';
 import { ListingDraftList } from './ListingDraftList';
 import { AgentConfirmation } from './AgentConfirmation';
+import { SelectionProposalCard } from './SelectionProposalCard';
 
 interface AgentMessageListProps {
   messages: AgentUiMessage[];
@@ -107,7 +108,8 @@ export function AgentMessageList({ messages, sending, onConfirmAction, onCancelA
                   overlapping agent requests from one page. */}
               <SourcingResultsGrid toolCalls={m.toolCalls} onSend={sending ? undefined : onSend} />
               <MarginSummaryList toolCalls={m.toolCalls} />
-              <ListingDraftList toolCalls={m.toolCalls} />
+              <SelectionProposalCard toolCalls={m.toolCalls} onSend={sending ? undefined : onSend} />
+              <ListingDraftList toolCalls={m.toolCalls} onSend={sending ? undefined : onSend} />
               {m.pendingAction && (
                 <AgentConfirmation
                   pendingAction={m.pendingAction}

@@ -70,6 +70,10 @@ export interface ListingDraftFields {
   sku?: string;
   condition?: string;
   size?: string;
+  /** No source equivalent, exactly like `size` — see that field's own comment. Only ever set by an explicit user edit, never generated. */
+  color?: string;
+  /** Same rule as `color`/`size`: no NormalizedSourcingResult field to copy from, so this can ONLY ever come from an explicit user edit. */
+  material?: string;
   /** Etsy-only, optional — see validateEtsyDraft. Never inferred/guessed; only ever set by an explicit user edit. */
   etsyTaxonomyId?: number;
   etsyWhenMade?: string;

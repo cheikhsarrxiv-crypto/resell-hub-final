@@ -85,6 +85,17 @@ describe('applyDraftEdit', () => {
     expect(draft.fields.price).toBe(449);
     expect(draft.editedFieldKeys).toEqual([]);
   });
+
+  it('color/material (AI-first listing workflow) have no source equivalent — absent until an explicit edit sets them', () => {
+    const draft = baseDraft();
+    expect(draft.fields.color).toBeUndefined();
+    expect(draft.fields.material).toBeUndefined();
+
+    const edited = applyDraftEdit(draft, { color: 'Noir', material: 'Coton' });
+    expect(edited.fields.color).toBe('Noir');
+    expect(edited.fields.material).toBe('Coton');
+    expect(edited.editedFieldKeys).toEqual(expect.arrayContaining(['color', 'material']));
+  });
 });
 
 describe('validateEbayDraft', () => {

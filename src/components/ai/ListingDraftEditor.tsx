@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Check, X } from 'lucide-react';
 import { applyDraftEdit, validateEbayDraft, validateEtsyDraft, type ListingDraft } from '@/lib/listing/listingDraft';
 import { ListingDraftPreview } from './ListingDraftPreview';
 
@@ -9,6 +10,8 @@ const INPUT_CLASSES =
 
 interface ListingDraftEditorProps {
   draft: ListingDraft;
+  /** AI-first listing workflow — powers "Valider ce brouillon"/"Annuler". Omit to render without action buttons (read-only). */
+  onSend?: (message: string) => void;
 }
 
 /**
@@ -26,7 +29,7 @@ interface ListingDraftEditorProps {
  * edit_listing_draft for real (validated against this exact conversation's
  * own history — see that tool's own comment).
  */
-export function ListingDraftEditor({ draft: initialDraft }: ListingDraftEditorProps) {
+export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraftEditorProps) {
   const [draft, setDraft] = useState(initialDraft);
 
   const ebay = validateEbayDraft(draft);
@@ -107,6 +110,31 @@ export function ListingDraftEditor({ draft: initialDraft }: ListingDraftEditorPr
 
         <div className="grid grid-cols-2 gap-2">
           <div>
+            <label htmlFor="draft-color" className="mb-1 block text-xs text-gray-500">
+              Couleur
+            </label>
+            <input
+              id="draft-color"
+              value={draft.fields.color ?? ''}
+              onChange={(e) => handleChange({ color: e.target.value || undefined })}
+              className={INPUT_CLASSES}
+            />
+          </div>
+          <div>
+            <label htmlFor="draft-material" className="mb-1 block text-xs text-gray-500">
+              Matière
+            </label>
+            <input
+              id="draft-material"
+              value={draft.fields.material ?? ''}
+              onChange={(e) => handleChange({ material: e.target.value || undefined })}
+              className={INPUT_CLASSES}
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <div>
             <label htmlFor="draft-ebay-category" className="mb-1 block text-xs text-gray-500">
               Catégorie eBay (id)
             </label>
@@ -140,6 +168,31 @@ export function ListingDraftEditor({ draft: initialDraft }: ListingDraftEditorPr
       </div>
 
       <ListingDraftPreview draft={draft} marketplaceValidation={{ ebay, etsy }} />
+
+      {onSend && (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() =>
+              onSend(
+                `Confirme la création du produit à partir de ce brouillon (${draft.source.sourceUrl}) et propose la publication sur les marketplaces disponibles.`
+              )
+            }
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[#FF5A1F] px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-[#e64f18] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
+          >
+            <Check className="w-4 h-4" aria-hidden="true" />
+            Valider ce brouillon
+          </button>
+          <button
+            type="button"
+            onClick={() => onSend(`Annule, je ne veux pas continuer avec ce produit pour le moment (${draft.source.sourceUrl}).`)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] px-3.5 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
+          >
+            <X className="w-4 h-4" aria-hidden="true" />
+            Annuler
+          </button>
+        </div>
+      )}
     </div>
   );
 }

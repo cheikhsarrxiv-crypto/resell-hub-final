@@ -9,6 +9,11 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
+const { createNotificationMock } = vi.hoisted(() => ({ createNotificationMock: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/services/NotificationService', () => ({
+  NotificationService: { createNotification: createNotificationMock },
+}));
+
 interface FakeRow {
   id: string;
   conversationId: string;
@@ -96,6 +101,7 @@ describe('generate_listing_draft', () => {
     rows = [];
     rowIdCounter = 0;
     clock = 0;
+    createNotificationMock.mockClear();
   });
 
   it('is registered as a "write" tool (auto-executed, never confirmation-gated)', async () => {
@@ -169,6 +175,43 @@ describe('generate_listing_draft', () => {
     expect(result.draft.fields.price).toBe(449);
     expect(result.draft.source.price).toBe(380); // untouched source cost
   });
+
+  it('AI-first listing workflow: computes the proposed price from an explicit targetMarginPercent, by exact algebra on the real source price', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+
+    const result: any = await generateListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, targetMarginPercent: 30 },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    // source price 380, 30% margin -> 380 / 0.7 ≈ 542.86
+    expect(result.draft.fields.price).toBeCloseTo(542.86, 1);
+  });
+
+  it('AI-first listing workflow: triggers an in-app notification with a real deep link back to this conversation', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+
+    await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(createNotificationMock).toHaveBeenCalledTimes(1);
+    const [workspaceId, type, , , , link] = createNotificationMock.mock.calls[0];
+    expect(workspaceId).toBe('ws-1');
+    expect(type).toBe('listing_draft_ready');
+    expect(link).toBe('/dashboard/agent?conversationId=conv-1');
+  });
+
+  it('never notifies when the source revalidation fails (no draft was actually generated)', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+
+    await generateListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: 'https://www.ebay.co.uk/itm/999-never-searched' },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(createNotificationMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('edit_listing_draft', () => {
@@ -218,6 +261,24 @@ describe('edit_listing_draft', () => {
 
     expect(secondEdit.draft.fields.price).toBe(449); // carried over from the first edit
     expect(secondEdit.draft.fields.title).toBe('Updated title');
+  });
+
+  it('AI-first listing workflow: color/material can only ever be set via an explicit edit, never generated', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+    expect(generated.draft.fields.color).toBeUndefined();
+    expect(generated.draft.fields.material).toBeUndefined();
+    pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+    const edited: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: { color: 'Noir', material: 'Cuir' } },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(edited.draft.fields.color).toBe('Noir');
+    expect(edited.draft.fields.material).toBe('Cuir');
+    expect(edited.draft.editedFieldKeys).toEqual(expect.arrayContaining(['color', 'material']));
   });
 
   it('rejects editing a sourceUrl with no prior draft in this conversation — never fabricates one', async () => {

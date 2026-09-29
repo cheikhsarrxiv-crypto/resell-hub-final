@@ -52,10 +52,37 @@ function buildGeneratedDescription(result: NormalizedSourcingResult): string {
  * NormalizedSourcingResult carries none of them; they stay absent until a
  * user edits them in.
  */
+/**
+ * Pure algebra, never a guess: given a real purchase price and a real,
+ * explicitly-supplied target margin percentage, returns the selling price
+ * that yields exactly that margin (margin defined as (price - cost) /
+ * price, the same definition PricingService.calculateMargin itself uses).
+ * Returns null for a degenerate input (>=100% margin, which has no finite
+ * price) rather than an invented/Infinity value.
+ */
+function computePriceForTargetMargin(purchasePrice: number, targetMarginPercent: number): number | null {
+  if (targetMarginPercent >= 100 || targetMarginPercent < 0) return null;
+  const price = purchasePrice / (1 - targetMarginPercent / 100);
+  return Math.round(price * 100) / 100;
+}
+
 export class ListingGenerationService {
   static buildDraftFromSourcingResult(
     result: NormalizedSourcingResult,
-    options: { proposedPrice?: number; proposedCurrency?: string } = {}
+    options: {
+      proposedPrice?: number;
+      proposedCurrency?: string;
+      /**
+       * Deliberately NOT a default/fallback business rule — only ever
+       * applied when the caller (the Agent, echoing a target margin the
+       * reseller explicitly stated) supplies one AND proposedPrice was
+       * NOT already given directly. No default target margin exists or
+       * is invented anywhere in this codebase (see the AI-first listing
+       * workflow audit) — omit both and `price` stays undefined, exactly
+       * as before this option existed.
+       */
+      targetMarginPercent?: number;
+    } = {}
   ): ListingDraft {
     const source: ListingDraft['source'] = {
       sourceItemId: result.sourceUrl,
@@ -75,9 +102,20 @@ export class ListingGenerationService {
       sellerName: result.seller?.name,
     };
 
+    // Computed ONLY when the caller gave a target margin AND no direct
+    // proposedPrice — pure algebra on the source's own real price, in the
+    // source's own currency (converting to proposedCurrency here would
+    // need a real FX rate this function has no access to and never
+    // guesses at — see computePriceForTargetMargin's own comment).
+    const marginBasedPrice =
+      options.proposedPrice === undefined && options.targetMarginPercent !== undefined
+        ? computePriceForTargetMargin(result.price, options.targetMarginPercent) ?? undefined
+        : undefined;
+    const proposedPrice = options.proposedPrice ?? marginBasedPrice;
+
     const generatedFieldKeys: ListingDraftFieldKey[] = ['title', 'description', 'currency', 'quantity'];
     if (result.condition) generatedFieldKeys.push('condition');
-    if (options.proposedPrice !== undefined) generatedFieldKeys.push('price');
+    if (proposedPrice !== undefined) generatedFieldKeys.push('price');
 
     return {
       source,
@@ -85,12 +123,13 @@ export class ListingGenerationService {
         title: buildGeneratedTitle(result),
         description: buildGeneratedDescription(result),
         // A proposed SELLING price is only ever set here when the caller
-        // explicitly supplied one (e.g. the reseller said "propose 449 €")
-        // — never silently seeded from the source's own cost, which would
-        // misrepresent a cost as a revenue proposal (see ListingDraftFields'
-        // own comment).
-        price: options.proposedPrice,
-        currency: options.proposedCurrency ?? result.currency,
+        // explicitly supplied one, OR derived by pure algebra from an
+        // explicitly-supplied target margin (e.g. the reseller said
+        // "propose 449 €" or "avec une marge de 30%") — never silently
+        // seeded from the source's own cost, which would misrepresent a
+        // cost as a revenue proposal (see ListingDraftFields' own comment).
+        price: proposedPrice,
+        currency: marginBasedPrice !== undefined ? result.currency : (options.proposedCurrency ?? result.currency),
         // A sourced secondhand item is inherently a single unit — this is
         // an explicit, documented business default (§13's own carve-out),
         // never a stand-in for genuinely unknown data.

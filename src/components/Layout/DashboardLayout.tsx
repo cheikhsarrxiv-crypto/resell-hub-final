@@ -17,6 +17,7 @@ import {
 import { DashboardSidebar, type NavItem } from '@/components/dashboard/DashboardSidebar';
 import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
 import { AiChatWidget } from '@/components/dashboard/AiChatWidget';
+import { NotificationBell } from '@/components/dashboard/NotificationBell';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -65,6 +66,7 @@ export function DashboardLayout({
   return (
     <div className="flex h-screen bg-[#08080a]">
       <DashboardHeader onOpenMenu={() => setIsSidebarOpen(true)} />
+      <NotificationBell />
 
       {/* Backdrop — only rendered while the mobile drawer is open, and
           only relevant below md: (the sidebar is never off-canvas at

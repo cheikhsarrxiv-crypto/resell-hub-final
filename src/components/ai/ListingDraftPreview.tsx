@@ -74,15 +74,27 @@ export function ListingDraftPreview({ draft, marketplaceValidation }: ListingDra
         <span className="text-xs text-gray-500">Aucune publication réelle</span>
       </div>
 
-      {source.images[0] && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={source.images[0]}
-          alt=""
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          className="h-32 w-full rounded-xl object-cover"
-        />
+      {source.images.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-gray-500">Photos ({source.images.length}) — reprises de l&apos;annonce source, jamais vérifiées ni hébergées par ADKSY</p>
+          <div className="flex gap-2 overflow-x-auto">
+            {source.images.map((imageUrl, i) => (
+              <div key={imageUrl + i} className="relative shrink-0">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={imageUrl}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  className="h-24 w-24 rounded-xl object-cover"
+                />
+                <span className="absolute bottom-1 left-1 rounded-full bg-black/70 px-1.5 py-0.5 text-[9px] font-medium text-white">
+                  Réelle
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       <div>
@@ -90,16 +102,19 @@ export function ListingDraftPreview({ draft, marketplaceValidation }: ListingDra
         <p className="text-gray-200">{fields.title}</p>
       </div>
 
-      <div>
-        <p className="text-xs text-gray-500">
-          Prix proposé {draft.editedFieldKeys.includes('price') ? '(modifié)' : ''}
-        </p>
-        <p className="text-gray-200">
-          {priceIsProposal ? `${fields.price} ${fields.currency} (proposition)` : 'Non proposé — à définir'}
-        </p>
-        <p className="text-xs text-gray-500">
-          Prix constaté à la source : {source.price} {source.currency}
-        </p>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <p className="text-xs text-gray-500">Prix d&apos;achat (constaté à la source)</p>
+          <p className="text-gray-200">{source.price} {source.currency}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">
+            Prix de vente proposé {draft.editedFieldKeys.includes('price') ? '(modifié)' : ''}
+          </p>
+          <p className="text-gray-200">
+            {priceIsProposal ? `${fields.price} ${fields.currency} (proposition)` : 'Non proposé — à définir'}
+          </p>
+        </div>
       </div>
 
       <div>
@@ -110,8 +125,9 @@ export function ListingDraftPreview({ draft, marketplaceValidation }: ListingDra
       <div className="flex flex-wrap gap-2 text-xs text-gray-500">
         {source.brand && <span>Marque : {source.brand}</span>}
         {fields.condition && <span>État : {fields.condition}</span>}
-        {fields.size && <span>Taille : {fields.size}</span>}
-        {!fields.size && <span>Taille : non renseignée</span>}
+        <span>Taille : {fields.size ?? 'non renseignée'}</span>
+        <span>Couleur : {fields.color ?? 'non renseignée'}</span>
+        <span>Matière : {fields.material ?? 'non renseignée'}</span>
       </div>
 
       <span

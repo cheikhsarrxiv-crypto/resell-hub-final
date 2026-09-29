@@ -13,6 +13,7 @@ export type NotificationType =
   | 'payment_failed'
   | 'subscription_created'
   | 'subscription_canceled'
+  | 'listing_draft_ready'
   | 'email';
 
 /**
@@ -32,16 +33,22 @@ export class NotificationService {
    * (a plain column, already on every Workspace row) before writing.
    *
    * `metadata` isn't persisted: the Notification table has no column for
-   * it (id, userId, type, title, message, isRead, createdAt only) and
-   * this fix doesn't add one — kept in the signature only so existing
+   * it (id, userId, type, title, message, isRead, createdAt, link only)
+   * and this fix doesn't add one — kept in the signature only so existing
    * callers (all of which already pass it) don't need to change.
+   *
+   * `link` (AI-first listing workflow) IS persisted, in the real `link`
+   * column — a relative in-app path (e.g. "/dashboard/agent?conversationId=...")
+   * the notification UI can navigate to directly. Omitted/undefined for
+   * every notification type that predates this field.
    */
   static async createNotification(
     workspaceId: string,
     type: NotificationType,
     title: string,
     message: string,
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
+    link?: string
   ) {
     try {
       const workspace = await prisma.workspace.findUnique({
@@ -62,6 +69,7 @@ export class NotificationService {
           type,
           title,
           message,
+          link,
         },
       });
     } catch (error) {

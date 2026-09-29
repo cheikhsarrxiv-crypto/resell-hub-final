@@ -106,6 +106,35 @@ describe('ListingDraftPreview', () => {
     const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
     expect(html).toContain('non définie');
   });
+
+  it('AI-first listing workflow: labels the purchase price and proposed selling price explicitly and distinctly', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).toContain("Prix d&#x27;achat");
+    expect(html).toContain('Prix de vente proposé');
+  });
+
+  it('AI-first listing workflow: renders every source image (not just the first), each labeled as a real/source photo', () => {
+    const draft: ListingDraft = { ...baseDraft, source: { ...baseDraft.source, images: ['https://img.example/1.jpg', 'https://img.example/2.jpg'] } };
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={draft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+
+    const imgTagCount = (html.match(/<img/g) || []).length;
+    expect(imgTagCount).toBe(2);
+    expect(html).toContain('Réelle');
+    expect(html).not.toContain('Générée');
+  });
+
+  it('AI-first listing workflow: shows color/material as "non renseignée" rather than inventing a value when absent', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).toContain('Couleur : non renseignée');
+    expect(html).toContain('Matière : non renseignée');
+  });
+
+  it('AI-first listing workflow: shows the real color/material once set, never overwritten with "non renseignée"', () => {
+    const draft: ListingDraft = { ...baseDraft, fields: { ...baseDraft.fields, color: 'Noir', material: 'Cuir' } };
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={draft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).toContain('Couleur : Noir');
+    expect(html).toContain('Matière : Cuir');
+  });
 });
 
 describe('ListingDraftEditor', () => {
@@ -119,6 +148,21 @@ describe('ListingDraftEditor', () => {
   it('embeds the read-only preview below the editable fields', () => {
     const html = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
     expect(html).toContain('Brouillon d&#x27;annonce');
+  });
+
+  it('AI-first listing workflow: exposes color/material as editable local fields', () => {
+    const html = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
+    expect(html).toContain('id="draft-color"');
+    expect(html).toContain('id="draft-material"');
+  });
+
+  it('AI-first listing workflow: renders "Valider ce brouillon"/"Annuler" only when onSend is provided', () => {
+    const withSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} onSend={() => {}} />);
+    expect(withSend).toContain('Valider ce brouillon');
+    expect(withSend).toContain('Annuler');
+
+    const withoutSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
+    expect(withoutSend).not.toContain('Valider ce brouillon');
   });
 });
 

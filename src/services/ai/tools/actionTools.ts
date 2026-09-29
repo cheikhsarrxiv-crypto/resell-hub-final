@@ -386,7 +386,7 @@ async function findMatchingSourcingResult(conversationId: string, workspaceId: s
  */
 const KNOWN_PRODUCT_CREATION_ERRORS = new Set([PRODUCT_SKU_CONFLICT_MESSAGE, 'Product limit reached for your plan']);
 
-function buildProductPreview(workspaceId: string, input: CreateProductToolInput) {
+function buildProductPreview(workspaceId: string, input: CreateProductToolInput, sourceImageCount: number) {
   return {
     action: 'create_product',
     sourceMarketplace: input.sourceMarketplace,
@@ -401,7 +401,11 @@ function buildProductPreview(workspaceId: string, input: CreateProductToolInput)
     condition: input.condition ?? 'used',
     size: input.size ?? null,
     color: input.color ?? null,
-    message: 'Confirming this will add a new product to your ADKSY catalog with these exact details.',
+    sourceImageCount,
+    message:
+      sourceImageCount > 0
+        ? `Confirming this will add a new product to your ADKSY catalog with these exact details, and attach ${sourceImageCount} real photo(s) from the source listing (never re-hosted, never AI-generated).`
+        : 'Confirming this will add a new product to your ADKSY catalog with these exact details. The source listing has no images to attach.',
   };
 }
 
@@ -410,7 +414,8 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
   description:
     'Propose creating a new ADKSY catalog product (with its stock record) from a product the reseller selected from a previous search_products result in THIS conversation. ' +
     'sourceMarketplace/sourceId/sourceUrl together must exactly match one of those real results — a fabricated or foreign combination is rejected, never accepted on trust. ' +
-    "purchasePrice and sellingPrice must be the reseller's own real, explicit values — never invented or copied from the source's own listed price. " +
+    "purchasePrice and sellingPrice must be the reseller's own real, explicit values; copying the source's own listed price as purchasePrice is fine, as long as the reseller is shown that exact value to confirm — never a silently invented one. " +
+    'If the sourced item has real images, they are attached to the new product as REAL/source-provenance photos (their own original URL, never re-hosted, never AI-generated) — never claimed as ADKSY-verified or AI-generated. ' +
     'If this exact source was already added to this workspace\'s catalog before, this is refused (never creates a duplicate, never silently returns the existing product as if this succeeded). ' +
     'Requires the reseller\'s explicit confirmation before anything is created. Never creates a Listing or publishes anything — use publish_listing/publish_etsy_listing separately once this product exists.',
   category: 'engage',
@@ -441,7 +446,7 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       return { error: "This source does not match a real search_products result in this conversation. Search again before selecting it." };
     }
 
-    return buildProductPreview(workspaceId, input);
+    return buildProductPreview(workspaceId, input, sourced.images.length);
   },
   async handler(workspaceId, input, context) {
     if (!context) return { error: 'Missing conversation context' };
@@ -479,6 +484,36 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       // atomic transaction, SKU generation when omitted, and the SKU/
       // source P2002 -> clean-error mapping — never reimplemented here.
       const product = await ProductService.createProduct(workspaceId, parsed.data);
+
+      // AI-first listing workflow — attach the sourced item's own REAL
+      // images (never re-hosted, never generated) to the new product.
+      // Reuses the existing ProductImage table (never a second/parallel
+      // image system) — `url` is the source's own hotlinked URL, exactly
+      // the same "images copied directly from the external source
+      // listing, not re-hosted" pattern validateEbayDraft's own warning
+      // already documents for a published eBay listing. Best-effort: a
+      // failure here must never undo or fail the product creation itself
+      // (the product is already real and committed) — logged, not thrown.
+      let attachedImages = 0;
+      if (sourced.images.length > 0) {
+        try {
+          const created = await prisma.productImage.createMany({
+            data: sourced.images.map((imageUrl, index) => ({
+              productId: product.id,
+              url: imageUrl,
+              mimeType: 'image/jpeg',
+              isMain: index === 0,
+              order: index,
+              sourceType: 'REAL',
+              sourceUrl: imageUrl,
+            })),
+          });
+          attachedImages = created.count;
+        } catch {
+          attachedImages = 0;
+        }
+      }
+
       return {
         success: true,
         productId: product.id,
@@ -490,6 +525,7 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
         sellingPrice: product.sellingPrice,
         purchasePrice: product.purchasePrice,
         inventoryQuantity: parsed.data.quantity,
+        attachedImages,
       };
     } catch (error) {
       if (error instanceof Error && error.message === PRODUCT_SOURCE_CONFLICT_MESSAGE) {

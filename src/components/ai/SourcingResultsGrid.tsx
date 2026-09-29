@@ -17,6 +17,16 @@ function buildCreateProductPrompt(result: NormalizedSourcingResult): string {
   return `Crée un produit à partir de cette annonce : "${result.title}" (${result.sourceUrl}).`;
 }
 
+/**
+ * AI-first listing workflow — a plain selection signal, deliberately NOT
+ * a command ("génère l'annonce") — the Agent itself decides to
+ * proactively propose the next step (see propose_listing_generation and
+ * AiAgentService's own system prompt).
+ */
+function buildSelectionPrompt(result: NormalizedSourcingResult): string {
+  return `J'ai sélectionné ce produit : "${result.title}" (${result.sourceUrl}).`;
+}
+
 function formatProviderList(names: string[]): string {
   return names.map(formatProviderName).join(', ');
 }
@@ -105,6 +115,7 @@ export function SourcingResultsGrid({ toolCalls, onSend }: SourcingResultsGridPr
                 <SourcingResultCard
                   key={result.sourceId ?? `${outcome.toolCallIndex}-${i}`}
                   result={result}
+                  onSelect={onSend ? (r) => onSend(buildSelectionPrompt(r)) : undefined}
                   onCreateProduct={onSend ? (r) => onSend(buildCreateProductPrompt(r)) : undefined}
                 />
               ))}
