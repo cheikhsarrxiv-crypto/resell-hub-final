@@ -7,12 +7,15 @@
  * excluded, never fabricated into something that looks valid.
  */
 import type { ListingDraft, MarketplaceListingValidation } from '@/lib/listing/listingDraft';
+import type { MarginCalculationResult } from '@/services/pricing/types';
 
 export interface ListingDraftOutcome {
   toolCallIndex: number;
   status: 'ok' | 'error';
   draft?: ListingDraft;
   marketplaceValidation?: { ebay: MarketplaceListingValidation; etsy: MarketplaceListingValidation };
+  /** AI-first listing workflow — present only when the draft has a proposed price (see listingDraftTools.ts's computeMarginPreview). null/absent is the honest "not computable yet" state, never a fabricated number. */
+  marginPreview?: MarginCalculationResult | null;
   error?: string;
 }
 
@@ -50,6 +53,11 @@ function isMarketplaceValidationShape(value: unknown): value is MarketplaceListi
   );
 }
 
+function isMarginPreviewShape(value: unknown): value is MarginCalculationResult {
+  if (!isRecord(value)) return false;
+  return typeof value.currency === 'string' && Array.isArray(value.warnings) && Array.isArray(value.missingData) && Array.isArray(value.costBreakdown);
+}
+
 const DRAFT_TOOL_NAMES = new Set(['generate_listing_draft', 'edit_listing_draft']);
 
 export function extractListingDraftOutcomes(toolCalls: unknown[] | undefined): ListingDraftOutcome[] {
@@ -80,6 +88,7 @@ export function extractListingDraftOutcomes(toolCalls: unknown[] | undefined): L
       status: 'ok',
       draft: result.draft,
       marketplaceValidation: { ebay: rawValidation.ebay, etsy: rawValidation.etsy },
+      marginPreview: isMarginPreviewShape(result.marginPreview) ? result.marginPreview : null,
     });
   });
 

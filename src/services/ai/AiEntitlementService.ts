@@ -102,6 +102,8 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, AiCapability | null>> = 
   propose_listing_generation: 'sourcing',
   // Same capability as generate_listing_draft — another way to prepare the same draft.
   generate_listing_draft_image: 'listing_generation',
+  // Same capability as get_listing/get_order — a read-only, no-side-effect lookup.
+  get_marketplace_connections: 'ai_chat',
 };
 
 /** A tool not in TOOL_CAPABILITIES at all (e.g. a future tool added without updating this map) also gets `null` — no capability gate, same as simulate_engage_action — never a silent crash. */

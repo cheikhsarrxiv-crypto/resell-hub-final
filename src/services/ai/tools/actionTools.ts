@@ -15,6 +15,7 @@ import { ProductService, PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_M
 import { createProductSchema } from '@/lib/validations';
 import { findToolResultsByName } from './conversationToolResults';
 import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
+import { StorageService } from '@/services/StorageService';
 
 /**
  * Persistence-architecture audit (see the "Architecture A" report) — a
@@ -505,6 +506,30 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       let attachedImages = 0;
       const draftForImages = await findLatestDraft(context.conversationId, input.sourceUrl, workspaceId);
       const generatedImages = draftForImages?.generatedImages ?? [];
+      // AI-first listing workflow — an image-generation provider's own url
+      // (e.g. OpenAI's dall-e-3 output) is only temporary (~1h, see
+      // OpenAIImageGenerationProvider's own doc comment), so it is
+      // re-hosted into ADKSY's own Supabase Storage bucket HERE, now that a
+      // real Product row exists (StorageService.rehostImageFromUrl requires
+      // one). Best-effort per image: a single image's download/upload
+      // failure never fails product creation, and falls back to the
+      // provider's own original url rather than dropping the image
+      // entirely — sourceType stays 'GENERATED' and generationMetadata is
+      // preserved unchanged either way.
+      const rehostedGeneratedImages = await Promise.all(
+        generatedImages.map(async (image) => {
+          try {
+            const rehosted = await StorageService.rehostImageFromUrl({
+              workspaceId,
+              productId: product.id,
+              sourceUrl: image.url,
+            });
+            return { ...image, url: rehosted.url, storagePath: rehosted.storagePath as string | undefined };
+          } catch {
+            return { ...image, storagePath: undefined as string | undefined };
+          }
+        })
+      );
       const imageRows = [
         ...sourced.images.map((imageUrl) => ({
           url: imageUrl,
@@ -513,11 +538,12 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
           sourceUrl: imageUrl,
           generationMetadata: null as string | null,
         })),
-        ...generatedImages.map((image) => ({
+        ...rehostedGeneratedImages.map((image) => ({
           url: image.url,
           mimeType: 'image/jpeg',
           sourceType: 'GENERATED' as const,
           sourceUrl: null as string | null,
+          storagePath: image.storagePath,
           generationMetadata: JSON.stringify({ provider: image.provider, model: image.model, prompt: image.prompt, generatedAt: image.generatedAt }),
         })),
       ];

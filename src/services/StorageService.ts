@@ -25,6 +25,17 @@ export interface UploadImageData {
   mimeType: string;
 }
 
+export interface RehostImageData {
+  workspaceId: string;
+  productId: string;
+  sourceUrl: string;
+}
+
+export interface RehostedImage {
+  url: string;
+  storagePath: string;
+}
+
 export class StorageService {
   /**
    * Upload image to Supabase Storage
@@ -106,6 +117,66 @@ export class StorageService {
       console.error('[StorageService] Upload error:', error);
       throw error;
     }
+  }
+
+  /**
+   * Downloads an image from an external URL (e.g. an AI image-generation
+   * provider's own temporary URL — see generate_listing_draft_image /
+   * OpenAIImageGenerationProvider's own documented ~1h expiry) and
+   * re-uploads its bytes into ADKSY's own Supabase Storage bucket,
+   * returning a durable {url, storagePath} pair.
+   *
+   * Deliberately does NOT create its own ProductImage row (unlike
+   * uploadImage above) — callers that already batch-insert rows
+   * themselves (create_product's own prisma.productImage.createMany)
+   * attach the returned url/storagePath into their own row instead, so
+   * there is only ever one write path for that table, never two racing
+   * ones.
+   *
+   * Best-effort by design and never retried here: a failed download
+   * (network error, non-2xx, disallowed content-type, oversized) simply
+   * throws — the caller (create_product) already treats a single image's
+   * failure as non-fatal to the product itself, exactly like it does for
+   * the batch insert today.
+   */
+  static async rehostImageFromUrl(data: RehostImageData): Promise<RehostedImage> {
+    if (!supabase) {
+      throw new Error('Storage service not configured. Please configure Supabase.');
+    }
+
+    const response = await fetch(data.sourceUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get('content-type') || 'image/png';
+    const normalizedContentType = contentType.split(';')[0].trim();
+    if (!ALLOWED_MIME_TYPES.includes(normalizedContentType)) {
+      throw new Error(`File type not allowed: ${normalizedContentType}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > MAX_FILE_SIZE) {
+      throw new Error('File too large. Maximum size: 10MB');
+    }
+
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(7);
+    const ext = this.getFileExtension(normalizedContentType);
+    const storagePath = `${data.workspaceId}/${data.productId}/generated-${timestamp}-${random}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage.from(BUCKET_NAME).upload(storagePath, buffer, {
+      contentType: normalizedContentType,
+      upsert: false,
+    });
+
+    if (uploadError) {
+      throw new Error(`Upload failed: ${uploadError.message}`);
+    }
+
+    const { data: publicUrlData } = supabase.storage.from(BUCKET_NAME).getPublicUrl(storagePath);
+
+    return { url: publicUrlData.publicUrl, storagePath };
   }
 
   /**

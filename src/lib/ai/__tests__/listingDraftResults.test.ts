@@ -83,6 +83,44 @@ describe('extractListingDraftOutcomes', () => {
     expect(outcomes).toHaveLength(1);
   });
 
+  it('AI-first listing workflow: extracts a real marginPreview when present and shaped correctly', () => {
+    const draft = validDraft();
+    const marketplaceValidation = {
+      ebay: { marketplace: 'ebay', ready: true, errors: [], warnings: [], missingFields: [] },
+      etsy: { marketplace: 'etsy', ready: true, errors: [], warnings: [], missingFields: [] },
+    };
+    const marginPreview = {
+      currency: 'EUR',
+      costBreakdown: [],
+      totalCost: 300,
+      netProfit: 149,
+      marginAmount: 149,
+      marginPercent: 33.2,
+      roi: 49.7,
+      isEstimate: false,
+      missingData: [],
+      warnings: [],
+    };
+    const outcomes = extractListingDraftOutcomes([toolCall('generate_listing_draft', { draft, marketplaceValidation, marginPreview })]);
+
+    expect(outcomes[0].marginPreview).toEqual(marginPreview);
+  });
+
+  it('AI-first listing workflow: a missing/malformed marginPreview becomes null — never fabricated', () => {
+    const draft = validDraft();
+    const marketplaceValidation = {
+      ebay: { marketplace: 'ebay', ready: true, errors: [], warnings: [], missingFields: [] },
+      etsy: { marketplace: 'etsy', ready: true, errors: [], warnings: [], missingFields: [] },
+    };
+    const withoutMargin = extractListingDraftOutcomes([toolCall('generate_listing_draft', { draft, marketplaceValidation })]);
+    expect(withoutMargin[0].marginPreview).toBeNull();
+
+    const withMalformedMargin = extractListingDraftOutcomes([
+      toolCall('generate_listing_draft', { draft, marketplaceValidation, marginPreview: { bogus: true } }),
+    ]);
+    expect(withMalformedMargin[0].marginPreview).toBeNull();
+  });
+
   it('preserves toolCallIndex for correct ordering/association', () => {
     const draft = validDraft();
     const marketplaceValidation = {

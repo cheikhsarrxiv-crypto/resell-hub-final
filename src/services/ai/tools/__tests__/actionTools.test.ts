@@ -184,6 +184,16 @@ vi.mock('@/services/ListingService', () => ({
 // publish_listing.
 const { createProductMock } = vi.hoisted(() => ({ createProductMock: vi.fn() }));
 
+// AI-first listing workflow — GENERATED-image re-hosting (Supabase
+// Storage). Mocked here so these tests exercise create_product's OWN
+// wiring/fallback logic, never a real Supabase network call — real
+// download/upload/validation behavior is covered separately in
+// storage-rehost-image.test.ts.
+const { rehostImageFromUrlMock } = vi.hoisted(() => ({ rehostImageFromUrlMock: vi.fn() }));
+vi.mock('@/services/StorageService', () => ({
+  StorageService: { rehostImageFromUrl: rehostImageFromUrlMock },
+}));
+
 vi.mock('@/services/ProductService', async () => {
   // vi.importActual pulls in the REAL PRODUCT_SKU_CONFLICT_MESSAGE /
   // PRODUCT_SOURCE_CONFLICT_MESSAGE constants (never duplicated/hardcoded
@@ -687,6 +697,57 @@ describe('create_product tool definition', () => {
       const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
       expect(generatedRow).toMatchObject({ url: 'https://oaidalleapi.example/img1.png', productId: 'product-1', sourceUrl: null });
       expect(JSON.parse(generatedRow.generationMetadata)).toMatchObject({ provider: 'openai', model: 'dall-e-3', prompt: 'a prompt' });
+    });
+
+    it('AI-first listing workflow: re-hosts a GENERATED image into Supabase Storage and stores the durable url, never the provider\'s own temporary one', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/temporary.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+      rehostImageFromUrlMock.mockResolvedValue({
+        url: 'https://fake-project.supabase.co/storage/v1/object/public/product-images/ws-1/product-1/generated-1.png',
+        storagePath: 'ws-1/product-1/generated-1.png',
+      });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(2);
+      expect(rehostImageFromUrlMock).toHaveBeenCalledWith({ workspaceId: 'ws-1', productId: 'product-1', sourceUrl: 'https://oaidalleapi.example/temporary.png' });
+      const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
+      expect(generatedRow.url).toBe('https://fake-project.supabase.co/storage/v1/object/public/product-images/ws-1/product-1/generated-1.png');
+      expect(generatedRow.storagePath).toBe('ws-1/product-1/generated-1.png');
+      // Provenance is preserved unchanged regardless of re-hosting.
+      expect(generatedRow.sourceType).toBe('GENERATED');
+      expect(JSON.parse(generatedRow.generationMetadata)).toMatchObject({ provider: 'openai', model: 'dall-e-3' });
+    });
+
+    it('AI-first listing workflow: a re-hosting failure for one image never fails product creation, and falls back to the provider\'s own url', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/temporary.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+      rehostImageFromUrlMock.mockRejectedValue(new Error('Supabase Storage temporarily unavailable'));
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.attachedImages).toBe(2); // still attached — the DB row is created, just with the original url
+      const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
+      expect(generatedRow.url).toBe('https://oaidalleapi.example/temporary.png'); // fell back to the provider's own url
     });
 
     it('the preview also reports how many AI-generated images will be attached', async () => {

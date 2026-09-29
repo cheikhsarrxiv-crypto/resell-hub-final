@@ -21,7 +21,7 @@ export function ListingDraftList({ toolCalls, onSend }: ListingDraftListProps) {
     <div className="space-y-2">
       {outcomes.map((outcome) =>
         outcome.status === 'ok' && outcome.draft && outcome.marketplaceValidation ? (
-          <ListingDraftEditor key={outcome.toolCallIndex} draft={outcome.draft} onSend={onSend} />
+          <ListingDraftEditor key={outcome.toolCallIndex} draft={outcome.draft} marginPreview={outcome.marginPreview} onSend={onSend} />
         ) : (
           <p key={outcome.toolCallIndex} className="mr-auto max-w-[85%] text-sm text-gray-500">
             {outcome.error ?? "Ce brouillon d'annonce n'a pas pu être préparé."}
