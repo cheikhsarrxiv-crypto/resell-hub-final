@@ -361,8 +361,16 @@ export class AiAgentService {
     const toolCalls: AgentToolCallRecord[] = [];
     let pendingConfirmation: AgentTurnResult['pendingConfirmation'] = null;
 
+    // Temporary diagnostic-only instrumentation (500 investigation on
+    // /api/ai/agent, no behavior change): names which phase of this one
+    // try block was in progress when an error was thrown, so the catch
+    // below can log it. Never itself thrown/returned to the client —
+    // read only by the catch's own logger.error call.
+    let step = 'anthropic_messages_create';
+
     try {
       for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+        step = 'anthropic_messages_create';
         const response = await client.messages.create({
           model: AI_MODEL,
           max_tokens: AI_MAX_TOKENS,
@@ -372,6 +380,7 @@ export class AiAgentService {
           messages: messages as any,
         });
 
+        step = 'persisting_assistant_message';
         await this.persistMessage(resolvedConversationId, 'assistant', JSON.stringify(response.content));
         messages.push({ role: 'assistant', content: response.content as any });
 
@@ -383,6 +392,7 @@ export class AiAgentService {
           // Phase 11D: persisted once the real turn result is fully
           // known, in exactly the shape the UI already trusts from a
           // live POST response — see persistMessage's own comment.
+          step = 'persisting_final_reply';
           await this.persistMessage(resolvedConversationId, 'assistant_summary', JSON.stringify({ reply, toolCalls }));
           return {
             conversationId: resolvedConversationId,
@@ -401,6 +411,7 @@ export class AiAgentService {
 
         const toolResultBlocks: Array<Record<string, any>> = [];
 
+        step = 'processing_tool_calls';
         for (const block of toolUseBlocks) {
           const tool = AiToolRegistry.get(block.name);
           let resultPayload: unknown;
@@ -566,6 +577,7 @@ export class AiAgentService {
 
         const firstCall = toolUseBlocks[0];
         const firstToolDef = firstCall ? AiToolRegistry.get(firstCall.name) : undefined;
+        step = 'persisting_tool_result';
         await this.persistMessage(resolvedConversationId, 'tool_result', JSON.stringify(toolResultBlocks), {
           toolName: firstCall?.name,
           toolUseId: firstCall?.id,
@@ -576,6 +588,7 @@ export class AiAgentService {
 
       const timeoutReply =
         'This request needed more steps than the agent currently allows in one turn. Please narrow your request and try again.';
+      step = 'persisting_timeout_summary';
       await this.persistMessage(resolvedConversationId, 'assistant_summary', JSON.stringify({ reply: timeoutReply, toolCalls }));
       return {
         conversationId: resolvedConversationId,
@@ -584,12 +597,38 @@ export class AiAgentService {
         pendingConfirmation,
       };
     } catch (error) {
+      // Temporary diagnostic logging (AI agent 500 investigation) — the
+      // client-visible messages/behavior below are UNCHANGED; this only
+      // adds server-side fields to the existing logger.error/warn calls.
+      // Anthropic.APIError's own real fields (status/type/requestID) are
+      // never secrets — they never carry ANTHROPIC_API_KEY or any other
+      // credential, only the HTTP status and Anthropic's own error
+      // classification for THIS request. logger.ts's own
+      // filterSensitiveData/maskSensitiveStrings still redact this
+      // `context` object defensively regardless (see that file).
+      const isAnthropicError = error instanceof Anthropic.APIError;
+      const anthropicFields = isAnthropicError
+        ? {
+            provider: 'anthropic',
+            status: (error as InstanceType<typeof Anthropic.APIError>).status ?? null,
+            anthropicErrorType: (error as InstanceType<typeof Anthropic.APIError>).type ?? null,
+            anthropicRequestId: (error as InstanceType<typeof Anthropic.APIError>).requestID ?? null,
+          }
+        : {};
+      const cause = error instanceof Error && (error as { cause?: unknown }).cause ? String((error as { cause?: unknown }).cause) : undefined;
+
       if (error instanceof Anthropic.RateLimitError) {
-        logger.warn('AI provider rate limited the agent request', { workspaceId });
+        logger.warn('AI provider rate limited the agent request', { workspaceId, step, model: AI_MODEL, ...anthropicFields });
         throw new Error('The AI agent is receiving too many requests right now. Please try again shortly.');
       }
 
-      logger.error('AI agent request failed', error instanceof Error ? error : String(error), { workspaceId });
+      logger.error('AI agent request failed', error instanceof Error ? error : String(error), {
+        workspaceId,
+        step,
+        model: AI_MODEL,
+        cause,
+        ...anthropicFields,
+      });
       throw new Error('The AI agent is temporarily unavailable. Please try again shortly.');
     }
   }

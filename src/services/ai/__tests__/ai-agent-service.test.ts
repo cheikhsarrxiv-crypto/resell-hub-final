@@ -10,11 +10,30 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const createMock = vi.fn();
 
 vi.mock('@anthropic-ai/sdk', () => {
-  class RateLimitError extends Error {}
+  // Mirrors the real SDK's own hierarchy (RateLimitError extends
+  // APIError) — AiAgentService's diagnostic logging checks
+  // `error instanceof Anthropic.APIError` for ANY Anthropic failure, not
+  // just RateLimitError, so APIError must be a real class here too.
+  class APIError extends Error {
+    status?: number;
+    type?: string | null;
+    requestID?: string | null;
+    constructor(status?: number, error?: unknown, message?: string, type?: string | null) {
+      super(message);
+      this.status = status;
+      this.type = type ?? null;
+    }
+  }
+  class RateLimitError extends APIError {
+    constructor(message?: string) {
+      super(429, undefined, message, 'rate_limit_error');
+    }
+  }
   class MockAnthropic {
     messages = { create: createMock };
     constructor(_opts: { apiKey: string }) {}
   }
+  (MockAnthropic as any).APIError = APIError;
   (MockAnthropic as any).RateLimitError = RateLimitError;
   return { default: MockAnthropic };
 });
