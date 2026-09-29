@@ -50,7 +50,11 @@ async function findSourcedResult(conversationId: string, sourceUrl: string, work
  * it any other way.
  */
 export async function findLatestDraft(conversationId: string, sourceItemId: string, workspaceId: string): Promise<ListingDraft | null> {
-  const entries = await findToolResultsByName(conversationId, ['generate_listing_draft', 'edit_listing_draft'], workspaceId);
+  const entries = await findToolResultsByName(
+    conversationId,
+    ['generate_listing_draft', 'edit_listing_draft', 'generate_listing_draft_image'],
+    workspaceId
+  );
   let latest: ListingDraft | null = null;
   for (const entry of entries) {
     const payload = entry.result as { draft?: unknown } | null;
@@ -61,7 +65,7 @@ export async function findLatestDraft(conversationId: string, sourceItemId: stri
   return latest;
 }
 
-function buildValidationResult(draft: ListingDraft) {
+export function buildValidationResult(draft: ListingDraft) {
   return { draft, marketplaceValidation: { ebay: validateEbayDraft(draft), etsy: validateEtsyDraft(draft) } };
 }
 

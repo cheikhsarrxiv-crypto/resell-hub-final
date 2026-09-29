@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Check, X } from 'lucide-react';
+import { Check, X, ImagePlus } from 'lucide-react';
 import { applyDraftEdit, validateEbayDraft, validateEtsyDraft, type ListingDraft } from '@/lib/listing/listingDraft';
 import { ListingDraftPreview } from './ListingDraftPreview';
 
@@ -182,6 +182,14 @@ export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraft
           >
             <Check className="w-4 h-4" aria-hidden="true" />
             Valider ce brouillon
+          </button>
+          <button
+            type="button"
+            onClick={() => onSend(`Génère une image IA pour ce produit (${draft.source.sourceUrl}).`)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] px-3.5 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
+          >
+            <ImagePlus className="w-4 h-4" aria-hidden="true" />
+            Générer une image IA
           </button>
           <button
             type="button"

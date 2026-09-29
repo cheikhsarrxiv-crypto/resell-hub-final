@@ -100,6 +100,8 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, AiCapability | null>> = 
   // Same capability as search_products — a pure revalidation of an
   // already-returned sourcing result, no new capability surface.
   propose_listing_generation: 'sourcing',
+  // Same capability as generate_listing_draft — another way to prepare the same draft.
+  generate_listing_draft_image: 'listing_generation',
 };
 
 /** A tool not in TOOL_CAPABILITIES at all (e.g. a future tool added without updating this map) also gets `null` — no capability gate, same as simulate_engage_action — never a silent crash. */

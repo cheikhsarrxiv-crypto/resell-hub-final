@@ -135,6 +135,25 @@ describe('ListingDraftPreview', () => {
     expect(html).toContain('Couleur : Noir');
     expect(html).toContain('Matière : Cuir');
   });
+
+  it('AI-first listing workflow: renders no generated-images section when none exist', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).not.toContain('Générée');
+    expect(html).not.toContain('générées par IA');
+  });
+
+  it('AI-first listing workflow: renders a generated image with its own "Générée" badge, distinct from real source photos', () => {
+    const draft: ListingDraft = {
+      ...baseDraft,
+      generatedImages: [{ url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'a black leather jacket', generatedAt: '2026-01-01T00:00:00.000Z' }],
+    };
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={draft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+
+    expect(html).toContain('Générée');
+    expect(html).toContain('Réelle'); // the real source photo is still shown, never replaced
+    const imgTagCount = (html.match(/<img/g) || []).length;
+    expect(imgTagCount).toBe(2); // 1 real + 1 generated
+  });
 });
 
 describe('ListingDraftEditor', () => {
@@ -156,13 +175,15 @@ describe('ListingDraftEditor', () => {
     expect(html).toContain('id="draft-material"');
   });
 
-  it('AI-first listing workflow: renders "Valider ce brouillon"/"Annuler" only when onSend is provided', () => {
+  it('AI-first listing workflow: renders "Valider ce brouillon"/"Générer une image IA"/"Annuler" only when onSend is provided', () => {
     const withSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} onSend={() => {}} />);
     expect(withSend).toContain('Valider ce brouillon');
+    expect(withSend).toContain('Générer une image IA');
     expect(withSend).toContain('Annuler');
 
     const withoutSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
     expect(withoutSend).not.toContain('Valider ce brouillon');
+    expect(withoutSend).not.toContain('Générer une image IA');
   });
 });
 

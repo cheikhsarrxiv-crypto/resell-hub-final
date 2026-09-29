@@ -667,6 +667,46 @@ describe('create_product tool definition', () => {
       expect(productImageRows).toHaveLength(0);
     });
 
+    it('AI-first listing workflow: also attaches any AI-GENERATED images already produced for this draft, each with real generation metadata', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(2); // 1 real + 1 generated
+      expect(productImageRows).toHaveLength(2);
+      const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
+      expect(generatedRow).toMatchObject({ url: 'https://oaidalleapi.example/img1.png', productId: 'product-1', sourceUrl: null });
+      expect(JSON.parse(generatedRow.generationMetadata)).toMatchObject({ provider: 'openai', model: 'dall-e-3', prompt: 'a prompt' });
+    });
+
+    it('the preview also reports how many AI-generated images will be attached', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      const draft = {
+        source: { sourceItemId: sourcedItem.sourceUrl, sourceMarketplace: 'ebay', sourceUrl: sourcedItem.sourceUrl, title: sourcedItem.title, images: sourcedItem.images, price: 380, currency: 'GBP', authenticityStatus: 'claimed' },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: [{ url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'a prompt', generatedAt: '2026-01-01T00:00:00.000Z' }],
+      };
+      pushToolCall('conv-1', 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, { draft, marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } } });
+
+      const preview: any = await createProductTool.preview!('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(preview.generatedImageCount).toBe(1);
+      expect(preview.message).toMatch(/AI-generated photo/i);
+    });
+
     it('a failure while attaching images never undoes or fails the already-created product', async () => {
       pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
       createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });

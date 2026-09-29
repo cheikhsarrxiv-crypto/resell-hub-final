@@ -386,7 +386,11 @@ async function findMatchingSourcingResult(conversationId: string, workspaceId: s
  */
 const KNOWN_PRODUCT_CREATION_ERRORS = new Set([PRODUCT_SKU_CONFLICT_MESSAGE, 'Product limit reached for your plan']);
 
-function buildProductPreview(workspaceId: string, input: CreateProductToolInput, sourceImageCount: number) {
+function buildProductPreview(workspaceId: string, input: CreateProductToolInput, sourceImageCount: number, generatedImageCount: number) {
+  const imageParts: string[] = [];
+  if (sourceImageCount > 0) imageParts.push(`${sourceImageCount} real photo(s) from the source listing`);
+  if (generatedImageCount > 0) imageParts.push(`${generatedImageCount} AI-generated photo(s)`);
+
   return {
     action: 'create_product',
     sourceMarketplace: input.sourceMarketplace,
@@ -402,10 +406,11 @@ function buildProductPreview(workspaceId: string, input: CreateProductToolInput,
     size: input.size ?? null,
     color: input.color ?? null,
     sourceImageCount,
+    generatedImageCount,
     message:
-      sourceImageCount > 0
-        ? `Confirming this will add a new product to your ADKSY catalog with these exact details, and attach ${sourceImageCount} real photo(s) from the source listing (never re-hosted, never AI-generated).`
-        : 'Confirming this will add a new product to your ADKSY catalog with these exact details. The source listing has no images to attach.',
+      imageParts.length > 0
+        ? `Confirming this will add a new product to your ADKSY catalog with these exact details, and attach ${imageParts.join(' and ')} (never re-hosted, provenance preserved).`
+        : 'Confirming this will add a new product to your ADKSY catalog with these exact details. No images to attach yet.',
   };
 }
 
@@ -446,7 +451,8 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       return { error: "This source does not match a real search_products result in this conversation. Search again before selecting it." };
     }
 
-    return buildProductPreview(workspaceId, input, sourced.images.length);
+    const draftForPreview = await findLatestDraft(context.conversationId, input.sourceUrl, workspaceId);
+    return buildProductPreview(workspaceId, input, sourced.images.length, draftForPreview?.generatedImages?.length ?? 0);
   },
   async handler(workspaceId, input, context) {
     if (!context) return { error: 'Missing conversation context' };
@@ -486,26 +492,43 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       const product = await ProductService.createProduct(workspaceId, parsed.data);
 
       // AI-first listing workflow — attach the sourced item's own REAL
-      // images (never re-hosted, never generated) to the new product.
-      // Reuses the existing ProductImage table (never a second/parallel
-      // image system) — `url` is the source's own hotlinked URL, exactly
-      // the same "images copied directly from the external source
-      // listing, not re-hosted" pattern validateEbayDraft's own warning
-      // already documents for a published eBay listing. Best-effort: a
-      // failure here must never undo or fail the product creation itself
-      // (the product is already real and committed) — logged, not thrown.
+      // images (never re-hosted) AND any real AI-GENERATED images already
+      // produced for this draft (see generate_listing_draft_image),
+      // each with its own honest provenance. Reuses the existing
+      // ProductImage table (never a second/parallel image system) —
+      // REAL `url` is the source's own hotlinked URL, exactly the same
+      // "images copied directly from the external source listing, not
+      // re-hosted" pattern validateEbayDraft's own warning already
+      // documents for a published eBay listing. Best-effort: a failure
+      // here must never undo or fail the product creation itself (the
+      // product is already real and committed) — logged, not thrown.
       let attachedImages = 0;
-      if (sourced.images.length > 0) {
+      const draftForImages = await findLatestDraft(context.conversationId, input.sourceUrl, workspaceId);
+      const generatedImages = draftForImages?.generatedImages ?? [];
+      const imageRows = [
+        ...sourced.images.map((imageUrl) => ({
+          url: imageUrl,
+          mimeType: 'image/jpeg',
+          sourceType: 'REAL' as const,
+          sourceUrl: imageUrl,
+          generationMetadata: null as string | null,
+        })),
+        ...generatedImages.map((image) => ({
+          url: image.url,
+          mimeType: 'image/jpeg',
+          sourceType: 'GENERATED' as const,
+          sourceUrl: null as string | null,
+          generationMetadata: JSON.stringify({ provider: image.provider, model: image.model, prompt: image.prompt, generatedAt: image.generatedAt }),
+        })),
+      ];
+      if (imageRows.length > 0) {
         try {
           const created = await prisma.productImage.createMany({
-            data: sourced.images.map((imageUrl, index) => ({
+            data: imageRows.map((row, index) => ({
               productId: product.id,
-              url: imageUrl,
-              mimeType: 'image/jpeg',
+              ...row,
               isMain: index === 0,
               order: index,
-              sourceType: 'REAL',
-              sourceUrl: imageUrl,
             })),
           });
           attachedImages = created.count;

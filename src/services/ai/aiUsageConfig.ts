@@ -59,6 +59,12 @@ export const TOOL_USAGE_UNITS: Readonly<Record<string, number | null>> = {
   // simulate_engage_action: no external call, no persistence, nothing to
   // meter.
   propose_listing_generation: null,
+  // AI-first listing workflow — a real external, paid API call to an
+  // image-generation provider (see src/services/imagegen), same
+  // "external call" tier as search_products (3), never free like
+  // generate_listing_draft/edit_listing_draft (those are deterministic,
+  // no external call at all).
+  generate_listing_draft_image: 3,
 };
 
 /**

@@ -1,24 +1,21 @@
 import { ImageGenerationProvider } from './types';
+import { OpenAIImageGenerationProvider } from './providers/OpenAIImageGenerationProvider';
 
 /**
- * AI-first listing workflow — deliberately returns an EMPTY list today.
- * This project's own audit found no image-generation API configured and
- * no provider decided (OpenAI Images, Stability, etc.) — rather than
- * invent one, this registry exists purely as the interchangeable slot a
- * real provider will be added to later (one entry here, nothing else in
- * the app changes — the exact same pattern as
- * SourcingProviderRegistry/WebSearchProviderRegistry).
+ * AI-first listing workflow — real, interchangeable provider registry,
+ * same pattern as SourcingProviderRegistry/WebSearchProviderRegistry.
  *
- * No Agent tool is registered against this yet either (see
- * AiToolRegistry's own header comment: "only tools with a real backend
- * handler are registered... never registered with a fake handler that
- * pretends to work") — a tool that always returns "not configured" would
- * still reserve/bill AI Units for a call that can never provide value,
- * which this project's own AI Units audit ruled out.
+ * OpenAI Images (dall-e-3) is the one real provider wired in (see
+ * OpenAIImageGenerationProvider's own header for exactly why it was
+ * chosen and how it was verified) — but OPENAI_API_KEY is NOT set
+ * anywhere in this codebase or by any test, so isConfigured() reports
+ * false until an operator sets it, exactly like TAVILY_API_KEY for web
+ * sourcing. Adding a second provider later means adding one entry here,
+ * nothing else in the app changes.
  */
 export class ImageGenerationProviderRegistry {
   static getAllProviders(): ImageGenerationProvider[] {
-    return [];
+    return [new OpenAIImageGenerationProvider()];
   }
 
   static getConfiguredProviders(): ImageGenerationProvider[] {

@@ -97,6 +97,31 @@ export function ListingDraftPreview({ draft, marketplaceValidation }: ListingDra
         </div>
       )}
 
+      {(draft.generatedImages?.length ?? 0) > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-gray-500">
+            Photos générées par IA ({draft.generatedImages!.length}) — ne représentent pas nécessairement l&apos;objet réel
+          </p>
+          <div className="flex gap-2 overflow-x-auto">
+            {draft.generatedImages!.map((image, i) => (
+              <div key={image.url + i} className="relative shrink-0" title={image.prompt}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={image.url}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  className="h-24 w-24 rounded-xl object-cover"
+                />
+                <span className="absolute bottom-1 left-1 rounded-full bg-amber-500/90 px-1.5 py-0.5 text-[9px] font-medium text-black">
+                  Générée
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div>
         <p className="text-xs text-gray-500">Titre {draft.editedFieldKeys.includes('title') ? '(modifié)' : draft.generatedFieldKeys.includes('title') ? '(généré)' : ''}</p>
         <p className="text-gray-200">{fields.title}</p>

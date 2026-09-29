@@ -12,6 +12,7 @@ import { calculateMarginTool } from './tools/pricingTools';
 import { simulateEngageActionTool, createProductTool, publishListingTool, publishEtsyListingTool, updateListingTool, sendToFulfillmentTool } from './tools/actionTools';
 import { generateListingDraftTool, editListingDraftTool } from './tools/listingDraftTools';
 import { proposeListingGenerationTool } from './tools/selectionTools';
+import { generateListingDraftImageTool } from './tools/imageGenerationTools';
 
 /**
  * Every tool the agent can currently call. Adding a tool means adding one
@@ -51,6 +52,7 @@ const TOOLS: AgentToolDefinition[] = [
   generateListingDraftTool,
   editListingDraftTool,
   proposeListingGenerationTool,
+  generateListingDraftImageTool,
 ];
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));

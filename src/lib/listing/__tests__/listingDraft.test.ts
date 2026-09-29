@@ -207,6 +207,14 @@ describe('mapDraftToEbayInput (Phase 12C-Prep — preview must match reality)', 
     expect(input.images).toEqual(draft.source.images);
     expect(input.ebay).toEqual({ categoryId: draft.fields.ebayCategoryId, marketplaceId: draft.fields.ebayMarketplaceId });
   });
+
+  it('AI-first listing workflow: appends AI-generated images after real source images, never before/instead', () => {
+    const generatedImage = { url: 'https://oaidalleapi.example/img1.png', provider: 'openai', model: 'dall-e-3', prompt: 'x', generatedAt: '2026-01-01T00:00:00.000Z' };
+    const draft = { ...baseDraft(), generatedImages: [generatedImage] };
+    const input = mapDraftToEbayInput(draft) as any;
+
+    expect(input.images).toEqual([...draft.source.images, generatedImage.url]);
+  });
 });
 
 describe('validateEtsyDraft', () => {
