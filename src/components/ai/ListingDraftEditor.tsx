@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { Check, X, ImagePlus } from 'lucide-react';
-import { applyDraftEdit, validateEbayDraft, validateEtsyDraft, type ListingDraft } from '@/lib/listing/listingDraft';
+import { applyDraftEdit, setImageExcluded, validateEbayDraft, validateEtsyDraft, type ListingDraft } from '@/lib/listing/listingDraft';
+import type { MarginCalculationResult } from '@/services/pricing/types';
 import { ListingDraftPreview } from './ListingDraftPreview';
 
 const INPUT_CLASSES =
@@ -12,6 +13,8 @@ interface ListingDraftEditorProps {
   draft: ListingDraft;
   /** AI-first listing workflow — powers "Valider ce brouillon"/"Annuler". Omit to render without action buttons (read-only). */
   onSend?: (message: string) => void;
+  /** AI-first listing workflow — displayed as-is, never recomputed client-side (see listingDraftTools.ts's computeMarginPreview). */
+  marginPreview?: MarginCalculationResult | null;
 }
 
 /**
@@ -29,7 +32,7 @@ interface ListingDraftEditorProps {
  * edit_listing_draft for real (validated against this exact conversation's
  * own history — see that tool's own comment).
  */
-export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraftEditorProps) {
+export function ListingDraftEditor({ draft: initialDraft, onSend, marginPreview }: ListingDraftEditorProps) {
   const [draft, setDraft] = useState(initialDraft);
 
   const ebay = validateEbayDraft(draft);
@@ -37,6 +40,21 @@ export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraft
 
   const handleChange = (patch: Partial<ListingDraft['fields']>) => {
     setDraft((current) => applyDraftEdit(current, patch));
+  };
+
+  // AI-first listing workflow — a discrete, structural action (like the
+  // buttons below), not a free-text field: updates the local preview
+  // instantly AND sends a real message naming the exact image url, so the
+  // model calls edit_listing_draft's excludeImageUrls/includeImageUrls for
+  // real — never just a client-only toggle that would silently disagree
+  // with what actually gets published. Never deletes the image itself.
+  const handleToggleImageExclusion = (imageUrl: string, excluded: boolean) => {
+    setDraft((current) => setImageExcluded(current, imageUrl, excluded));
+    onSend?.(
+      excluded
+        ? `Retire cette photo (${imageUrl}) du brouillon pour ce produit (${draft.source.sourceUrl}) — ne l'utilise pas pour cette annonce.`
+        : `Remets cette photo (${imageUrl}) dans le brouillon pour ce produit (${draft.source.sourceUrl}).`
+    );
   };
 
   return (
@@ -133,6 +151,18 @@ export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraft
           </div>
         </div>
 
+        <div>
+          <label htmlFor="draft-model" className="mb-1 block text-xs text-gray-500">
+            Modèle
+          </label>
+          <input
+            id="draft-model"
+            value={draft.fields.model ?? ''}
+            onChange={(e) => handleChange({ model: e.target.value || undefined })}
+            className={INPUT_CLASSES}
+          />
+        </div>
+
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label htmlFor="draft-ebay-category" className="mb-1 block text-xs text-gray-500">
@@ -167,7 +197,12 @@ export function ListingDraftEditor({ draft: initialDraft, onSend }: ListingDraft
         </p>
       </div>
 
-      <ListingDraftPreview draft={draft} marketplaceValidation={{ ebay, etsy }} />
+      <ListingDraftPreview
+        draft={draft}
+        marketplaceValidation={{ ebay, etsy }}
+        marginPreview={marginPreview}
+        onToggleImageExclusion={onSend ? handleToggleImageExclusion : undefined}
+      />
 
       {onSend && (
         <div className="flex flex-wrap gap-2">

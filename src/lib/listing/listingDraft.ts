@@ -74,6 +74,8 @@ export interface ListingDraftFields {
   color?: string;
   /** Same rule as `color`/`size`: no NormalizedSourcingResult field to copy from, so this can ONLY ever come from an explicit user edit. */
   material?: string;
+  /** Same rule as `color`/`size`/`material`: no NormalizedSourcingResult field to copy from, so this can ONLY ever come from an explicit user edit. */
+  model?: string;
   /** Etsy-only, optional — see validateEtsyDraft. Never inferred/guessed; only ever set by an explicit user edit. */
   etsyTaxonomyId?: number;
   etsyWhenMade?: string;
@@ -137,6 +139,38 @@ export interface ListingDraft {
    * succeeded — never defaulted to a placeholder.
    */
   generatedImages?: GeneratedListingImage[];
+  /**
+   * AI-first listing workflow — image URLs (from source.images and/or
+   * generatedImages) the reseller has chosen NOT to use for this listing.
+   * Deliberately an exclusion list, never a deletion: source.images and
+   * generatedImages themselves are never mutated/shortened by this, so a
+   * real photo is never lost and can always be re-included later. Absent/
+   * empty means every image is in use, the normal default.
+   */
+  excludedImageUrls?: string[];
+}
+
+/**
+ * Toggles one image url in/out of excludedImageUrls. Pure — returns a new
+ * draft, never mutates the one passed in, and never touches source.images
+ * or generatedImages themselves — this only ever changes which of the
+ * already-real images are used for this listing, never deletes or
+ * overwrites a real photo.
+ */
+export function setImageExcluded(draft: ListingDraft, imageUrl: string, excluded: boolean): ListingDraft {
+  const current = new Set(draft.excludedImageUrls ?? []);
+  if (excluded) {
+    current.add(imageUrl);
+  } else {
+    current.delete(imageUrl);
+  }
+  return { ...draft, excludedImageUrls: Array.from(current) };
+}
+
+/** The images actually usable for this listing right now — source + generated, minus anything excluded. Never mutates source.images/generatedImages. */
+export function usableDraftImages(draft: ListingDraft): string[] {
+  const excluded = new Set(draft.excludedImageUrls ?? []);
+  return [...draft.source.images, ...(draft.generatedImages ?? []).map((img) => img.url)].filter((url) => !excluded.has(url));
 }
 
 /**
@@ -256,6 +290,8 @@ export function validateEbayDraft(draft: ListingDraft): MarketplaceListingValida
   }
   if (draft.source.images.length === 0) {
     warnings.push('No source images available.');
+  } else if (usableDraftImages(draft).length === 0) {
+    warnings.push('All available images have been excluded for this listing — add at least one back before publishing.');
   } else {
     // Phase 7 — mapDraftToEbayInput forwards these URLs verbatim as
     // imageUrls on a real publish (see EbayAdapter.createListing): they are
@@ -301,7 +337,10 @@ export function mapDraftToEbayInput(draft: ListingDraft): Record<string, unknown
     // both exist). Generated image URLs are provider-hosted and
     // time-limited (see OpenAIImageGenerationProvider's own comment on
     // dall-e-3 URL expiry) — a real, documented limitation, not hidden.
-    images: [...draft.source.images, ...(draft.generatedImages ?? []).map((img) => img.url)],
+    // Anything in excludedImageUrls is left out here — the reseller's own
+    // choice not to use it — but source.images/generatedImages themselves
+    // are never touched.
+    images: usableDraftImages(draft),
     ebay: {
       categoryId: draft.fields.ebayCategoryId,
       marketplaceId: draft.fields.ebayMarketplaceId,

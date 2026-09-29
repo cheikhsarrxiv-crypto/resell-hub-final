@@ -212,6 +212,31 @@ describe('generate_listing_draft', () => {
 
     expect(createNotificationMock).not.toHaveBeenCalled();
   });
+
+  it('AI-first listing workflow: no marginPreview (null, never fabricated) when the draft has no proposed price yet', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+
+    const result: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.draft.fields.price).toBeUndefined();
+    expect(result.marginPreview).toBeNull();
+  });
+
+  it('AI-first listing workflow: computes marginPreview via the same PricingService engine calculate_margin uses, once a proposed price exists', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+
+    const result: any = await generateListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, proposedPrice: 449 },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.marginPreview).toBeDefined();
+    expect(result.marginPreview).not.toBeNull();
+    expect(result.marginPreview.currency).toBe(result.draft.fields.currency);
+    expect(Array.isArray(result.marginPreview.missingData)).toBe(true);
+    expect(Array.isArray(result.marginPreview.warnings)).toBe(true);
+  });
 });
 
 describe('edit_listing_draft', () => {
@@ -279,6 +304,76 @@ describe('edit_listing_draft', () => {
     expect(edited.draft.fields.color).toBe('Noir');
     expect(edited.draft.fields.material).toBe('Cuir');
     expect(edited.draft.editedFieldKeys).toEqual(expect.arrayContaining(['color', 'material']));
+  });
+
+  it('AI-first listing workflow: model can only ever be set via an explicit edit, never generated', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+    expect(generated.draft.fields.model).toBeUndefined();
+    pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+    const edited: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: { model: 'Cut Out' } },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(edited.draft.fields.model).toBe('Cut Out');
+    expect(edited.draft.editedFieldKeys).toContain('model');
+  });
+
+  it('AI-first listing workflow: computing a marginPreview after adding a proposed price via edit', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+    expect(generated.marginPreview).toBeNull();
+    pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+    const edited: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: { price: 449 } },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(edited.marginPreview).toBeDefined();
+    expect(edited.marginPreview).not.toBeNull();
+  });
+
+  it('AI-first listing workflow: excludeImageUrls/includeImageUrls toggle usable images without ever touching source.images', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+    pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+    const excluded: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: {}, excludeImageUrls: [sourcedItem.images[0]] },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(excluded.draft.excludedImageUrls).toEqual([sourcedItem.images[0]]);
+    expect(excluded.draft.source.images).toEqual(sourcedItem.images); // never touched
+    pushDraftToolCall('conv-1', 'tu3', 'edit_listing_draft', {}, excluded);
+
+    const restored: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: {}, includeImageUrls: [sourcedItem.images[0]] },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(restored.draft.excludedImageUrls).toEqual([]);
+  });
+
+  it('AI-first listing workflow: a fabricated/foreign image url is silently ignored, never recorded as excluded', async () => {
+    pushSearchProductsCall('conv-1', 'tu1', [sourcedItem]);
+    const generated: any = await generateListingDraftTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl }, { conversationId: 'conv-1', userId: 'user-1' });
+    pushDraftToolCall('conv-1', 'tu2', 'generate_listing_draft', {}, generated);
+
+    const result: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: {}, excludeImageUrls: ['https://not-a-real-draft-image.example/x.jpg'] },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.draft.excludedImageUrls ?? []).toEqual([]);
   });
 
   it('rejects editing a sourceUrl with no prior draft in this conversation — never fabricates one', async () => {

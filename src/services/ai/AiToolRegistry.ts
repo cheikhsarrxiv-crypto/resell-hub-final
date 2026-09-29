@@ -13,6 +13,7 @@ import { simulateEngageActionTool, createProductTool, publishListingTool, publis
 import { generateListingDraftTool, editListingDraftTool } from './tools/listingDraftTools';
 import { proposeListingGenerationTool } from './tools/selectionTools';
 import { generateListingDraftImageTool } from './tools/imageGenerationTools';
+import { getMarketplaceConnectionsTool } from './tools/marketplaceTools';
 
 /**
  * Every tool the agent can currently call. Adding a tool means adding one
@@ -53,6 +54,7 @@ const TOOLS: AgentToolDefinition[] = [
   editListingDraftTool,
   proposeListingGenerationTool,
   generateListingDraftImageTool,
+  getMarketplaceConnectionsTool,
 ];
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));

@@ -88,6 +88,15 @@ export const generateListingDraftImageTool: AgentToolDefinition<z.infer<typeof g
     }
 
     const updated = addGeneratedImage(draft, outcome.image);
-    return buildValidationResult(updated);
+    return {
+      ...buildValidationResult(updated),
+      // The provider's own url (see OpenAIImageGenerationProvider) is only
+      // temporary — this draft is conversation-scoped state, never
+      // persisted, so nothing re-hosts it until create_product actually
+      // runs (StorageService.rehostImageFromUrl needs a real Product row
+      // to attach to). Never claim this image is durably stored before
+      // that happens.
+      note: 'This generated image URL is temporary and will expire. It becomes a durable, permanently hosted image only once the product is actually created (create_product).',
+    };
   },
 };

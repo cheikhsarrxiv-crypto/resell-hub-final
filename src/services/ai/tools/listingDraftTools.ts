@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
 import {
   applyDraftEdit,
+  setImageExcluded,
   validateEbayDraft,
   validateEtsyDraft,
   type ListingDraft,
@@ -10,8 +11,31 @@ import {
 import { ListingGenerationService } from '@/services/listing/ListingGenerationService';
 import { isValidEtsyWhenMade } from '@/services/marketplace/EtsyListingMapper';
 import { NotificationService } from '@/services/NotificationService';
+import { PricingService } from '@/services/pricing/PricingService';
+import type { NormalizedSourcingResult } from '@/services/sourcing/types';
 import { AgentToolDefinition } from './types';
 import { findToolResultsByName } from './conversationToolResults';
+
+/**
+ * AI-first listing workflow — the same margin math calculate_margin
+ * itself uses (PricingService.fromSourcingResult + calculateMargin —
+ * never a second/duplicated formula), computed here so a draft's own
+ * "marge estimée" preview is available the moment a proposed selling
+ * price exists, without the reseller having to call calculate_margin
+ * separately. Returns null (never a fabricated number) when the draft has
+ * no proposed price yet — exactly like calculate_margin's own missingData
+ * would report resalePrice as missing.
+ */
+async function computeMarginPreview(sourced: NormalizedSourcingResult, draft: ListingDraft, workspaceId: string) {
+  if (draft.fields.price === undefined || draft.fields.price === null) return null;
+  const input = PricingService.fromSourcingResult(sourced, {
+    targetCurrency: draft.fields.currency,
+    resalePrice: draft.fields.price,
+    resaleCurrency: draft.fields.currency,
+    workspaceId,
+  });
+  return PricingService.calculateMargin(input);
+}
 
 function isListingDraft(value: unknown): value is ListingDraft {
   if (!value || typeof value !== 'object') return false;
@@ -138,7 +162,8 @@ export const generateListingDraftTool: AgentToolDefinition<z.infer<typeof genera
       `/dashboard/agent?conversationId=${context.conversationId}`
     );
 
-    return buildValidationResult(draft);
+    const marginPreview = await computeMarginPreview(sourced, draft, workspaceId);
+    return { ...buildValidationResult(draft), marginPreview };
   },
 };
 
@@ -154,6 +179,7 @@ const editableFieldsPatchSchema = z
     size: z.string().max(50),
     color: z.string().max(50),
     material: z.string().max(100),
+    model: z.string().max(100),
     etsyTaxonomyId: z.number().int().positive(),
     // Audit finding (publish_listing hardening pass): previously any
     // string up to 50 chars was accepted here, so a typo'd/invented
@@ -176,6 +202,14 @@ const editableFieldsPatchSchema = z
 const editListingDraftInputSchema = z.object({
   sourceUrl: z.string().url(),
   patch: editableFieldsPatchSchema,
+  // AI-first listing workflow — image exclusion, never deletion: these
+  // must be image urls already present in the draft's own source.images
+  // or generatedImages (see the handler below, which filters out anything
+  // that isn't) — a real photo is never removed from source.images/
+  // generatedImages themselves, only excluded from what gets used for
+  // this listing (see ListingDraft.excludedImageUrls's own comment).
+  excludeImageUrls: z.array(z.string()).optional(),
+  includeImageUrls: z.array(z.string()).optional(),
 });
 
 export const editListingDraftTool: AgentToolDefinition<z.infer<typeof editListingDraftInputSchema>> = {
@@ -183,7 +217,9 @@ export const editListingDraftTool: AgentToolDefinition<z.infer<typeof editListin
   description:
     'Applies an edit (e.g. a new proposed price, an updated title) on top of the MOST RECENT listing draft already generated for sourceUrl in this conversation, ' +
     'and re-validates it for eBay/Etsy. sourceUrl must match a draft this conversation already produced via generate_listing_draft — never accepted on trust. ' +
-    'Never publishes anything. Only fields explicitly present in patch are changed; every edited field keeps its original generated value recoverable.',
+    'Never publishes anything. Only fields explicitly present in patch are changed; every edited field keeps its original generated value recoverable. ' +
+    'excludeImageUrls/includeImageUrls toggle which of the draft\'s already-real images (source.images/generatedImages) are used for this listing — this ' +
+    'NEVER deletes or overwrites a real photo, only marks it unused/used again; only urls already present on the draft are accepted.',
   category: 'write',
   inputSchema: editListingDraftInputSchema,
   jsonSchema: {
@@ -204,12 +240,23 @@ export const editListingDraftTool: AgentToolDefinition<z.infer<typeof editListin
           size: { type: 'string' },
           color: { type: 'string', description: 'Color — has no source equivalent, only ever set from an explicit reseller instruction, never guessed.' },
           material: { type: 'string', description: 'Material — has no source equivalent, only ever set from an explicit reseller instruction, never guessed.' },
+          model: { type: 'string', description: 'Model — has no source equivalent, only ever set from an explicit reseller instruction, never guessed.' },
           etsyTaxonomyId: { type: 'number', description: 'Etsy category id — only ever set from an explicit reseller instruction, never guessed.' },
           etsyWhenMade: { type: 'string' },
           etsyWhoMade: { type: 'string', description: 'Etsy who_made value (e.g. "i_did", "someone_else", "collective") — only ever set from an explicit reseller instruction, never guessed.' },
           ebayCategoryId: { type: 'number', description: 'eBay category id — only ever set from an explicit reseller instruction, never guessed.' },
           ebayMarketplaceId: { type: 'string', description: 'Target eBay country marketplace to sell on, e.g. "EBAY_FR" — never assumed from the source item\'s own marketplace.' },
         },
+      },
+      excludeImageUrls: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Image urls (from source.images/generatedImages) to stop using for this listing — never deletes the real photo, only excludes it.',
+      },
+      includeImageUrls: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Previously excluded image urls to use again for this listing.',
       },
     },
     required: ['sourceUrl', 'patch'],
@@ -222,7 +269,23 @@ export const editListingDraftTool: AgentToolDefinition<z.infer<typeof editListin
       return { error: 'No listing draft found for this product in this conversation. Generate one first with generate_listing_draft.' };
     }
 
-    const updated = applyDraftEdit(latest, input.patch as Partial<ListingDraftFields>);
-    return buildValidationResult(updated);
+    let updated = applyDraftEdit(latest, input.patch as Partial<ListingDraftFields>);
+
+    // Image exclusion — never deletion. Only urls that genuinely belong to
+    // this draft's own source.images/generatedImages are accepted; a
+    // fabricated/foreign url is silently ignored rather than recorded as
+    // "excluded", since it could never have been shown to the reseller in
+    // the first place.
+    const knownImageUrls = new Set([...updated.source.images, ...(updated.generatedImages ?? []).map((img) => img.url)]);
+    for (const url of input.excludeImageUrls ?? []) {
+      if (knownImageUrls.has(url)) updated = setImageExcluded(updated, url, true);
+    }
+    for (const url of input.includeImageUrls ?? []) {
+      if (knownImageUrls.has(url)) updated = setImageExcluded(updated, url, false);
+    }
+
+    const sourced = await findSourcedResult(context.conversationId, updated.source.sourceUrl, workspaceId);
+    const marginPreview = sourced ? await computeMarginPreview(sourced, updated, workspaceId) : null;
+    return { ...buildValidationResult(updated), marginPreview };
   },
 };

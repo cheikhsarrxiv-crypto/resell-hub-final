@@ -65,6 +65,9 @@ export const TOOL_USAGE_UNITS: Readonly<Record<string, number | null>> = {
   // generate_listing_draft/edit_listing_draft (those are deterministic,
   // no external call at all).
   generate_listing_draft_image: 3,
+  // A read-only, no-external-call lookup of this workspace's own
+  // MarketplaceConnection rows — same tier as get_listing/get_order.
+  get_marketplace_connections: 1,
 };
 
 /**

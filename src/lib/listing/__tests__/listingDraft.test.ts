@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { applyDraftEdit, validateEbayDraft, validateEtsyDraft, mapDraftToEbayInput, mapDraftToEtsyInput, type ListingDraft } from '@/lib/listing/listingDraft';
+import {
+  applyDraftEdit,
+  setImageExcluded,
+  usableDraftImages,
+  validateEbayDraft,
+  validateEtsyDraft,
+  mapDraftToEbayInput,
+  mapDraftToEtsyInput,
+  type ListingDraft,
+} from '@/lib/listing/listingDraft';
 
 function baseDraft(overrides: Partial<ListingDraft['fields']> = {}, sourceOverrides: Partial<ListingDraft['source']> = {}): ListingDraft {
   return {
@@ -96,6 +105,47 @@ describe('applyDraftEdit', () => {
     expect(edited.fields.material).toBe('Coton');
     expect(edited.editedFieldKeys).toEqual(expect.arrayContaining(['color', 'material']));
   });
+
+  it('model (AI-first listing workflow) has no source equivalent — absent until an explicit edit sets it', () => {
+    const draft = baseDraft();
+    expect(draft.fields.model).toBeUndefined();
+
+    const edited = applyDraftEdit(draft, { model: 'Air Force 1' });
+    expect(edited.fields.model).toBe('Air Force 1');
+    expect(edited.editedFieldKeys).toContain('model');
+  });
+});
+
+describe('setImageExcluded / usableDraftImages (AI-first listing workflow — image exclusion, never deletion)', () => {
+  it('excluding an image removes it from usableDraftImages but never from source.images', () => {
+    const draft = baseDraft({}, { images: ['https://img.example/1.jpg', 'https://img.example/2.jpg'] });
+    const excluded = setImageExcluded(draft, 'https://img.example/1.jpg', true);
+
+    expect(excluded.source.images).toEqual(['https://img.example/1.jpg', 'https://img.example/2.jpg']); // untouched
+    expect(usableDraftImages(excluded)).toEqual(['https://img.example/2.jpg']);
+  });
+
+  it('re-including a previously excluded image restores it to usableDraftImages', () => {
+    const draft = baseDraft({}, { images: ['https://img.example/1.jpg'] });
+    const excluded = setImageExcluded(draft, 'https://img.example/1.jpg', true);
+    const restored = setImageExcluded(excluded, 'https://img.example/1.jpg', false);
+
+    expect(usableDraftImages(restored)).toEqual(['https://img.example/1.jpg']);
+  });
+
+  it('never mutates the original draft object', () => {
+    const draft = baseDraft({}, { images: ['https://img.example/1.jpg'] });
+    setImageExcluded(draft, 'https://img.example/1.jpg', true);
+
+    expect(draft.excludedImageUrls).toBeUndefined();
+  });
+
+  it('usableDraftImages includes generated images not excluded, in source-then-generated order', () => {
+    const generatedImage = { url: 'https://x.example/gen.png', provider: 'openai', model: 'dall-e-3', prompt: 'p', generatedAt: 't' };
+    const draft = { ...baseDraft({}, { images: ['https://img.example/1.jpg'] }), generatedImages: [generatedImage] };
+
+    expect(usableDraftImages(draft)).toEqual(['https://img.example/1.jpg', generatedImage.url]);
+  });
 });
 
 describe('validateEbayDraft', () => {
@@ -187,6 +237,14 @@ describe('validateEbayDraft', () => {
     expect(withoutImages.warnings.some((w) => /external source listing/i.test(w))).toBe(false);
     expect(withoutImages.warnings.some((w) => /no source images available/i.test(w))).toBe(true);
   });
+
+  it('AI-first listing workflow: warns distinctly when every available image has been excluded', () => {
+    const draft = setImageExcluded(baseDraft({}, { images: ['https://img.example/1.jpg'] }), 'https://img.example/1.jpg', true);
+    const result = validateEbayDraft(draft);
+
+    expect(result.warnings.some((w) => /all available images have been excluded/i.test(w))).toBe(true);
+    expect(result.warnings.some((w) => /external source listing/i.test(w))).toBe(false);
+  });
 });
 
 describe('mapDraftToEbayInput (Phase 12C-Prep — preview must match reality)', () => {
@@ -214,6 +272,15 @@ describe('mapDraftToEbayInput (Phase 12C-Prep — preview must match reality)', 
     const input = mapDraftToEbayInput(draft) as any;
 
     expect(input.images).toEqual([...draft.source.images, generatedImage.url]);
+  });
+
+  it('AI-first listing workflow: an excluded image is left out of the real eBay payload, and source.images stays untouched', () => {
+    const draft = baseDraft({}, { images: ['https://img.example/1.jpg', 'https://img.example/2.jpg'] });
+    const withExclusion = setImageExcluded(draft, 'https://img.example/1.jpg', true);
+    const input = mapDraftToEbayInput(withExclusion) as any;
+
+    expect(input.images).toEqual(['https://img.example/2.jpg']);
+    expect(withExclusion.source.images).toEqual(['https://img.example/1.jpg', 'https://img.example/2.jpg']);
   });
 });
 

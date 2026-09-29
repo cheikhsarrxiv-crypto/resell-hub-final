@@ -11,6 +11,7 @@ import { ListingDraftPreview } from '@/components/ai/ListingDraftPreview';
 import { ListingDraftEditor } from '@/components/ai/ListingDraftEditor';
 import { ListingDraftList } from '@/components/ai/ListingDraftList';
 import type { ListingDraft, MarketplaceListingValidation } from '@/lib/listing/listingDraft';
+import type { MarginCalculationResult } from '@/services/pricing/types';
 
 const baseDraft: ListingDraft = {
   source: {
@@ -154,6 +155,83 @@ describe('ListingDraftPreview', () => {
     const imgTagCount = (html.match(/<img/g) || []).length;
     expect(imgTagCount).toBe(2); // 1 real + 1 generated
   });
+
+  it('AI-first listing workflow: shows SKU/model as "non défini(e)" rather than inventing a value when absent', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).toContain('SKU : non défini');
+    expect(html).toContain('Modèle : non renseigné');
+  });
+
+  it('AI-first listing workflow: shows the real SKU/model once set', () => {
+    const draft: ListingDraft = { ...baseDraft, fields: { ...baseDraft.fields, sku: 'SKU-PRADA-1', model: 'Cut Out' } };
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={draft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).toContain('SKU : SKU-PRADA-1');
+    expect(html).toContain('Modèle : Cut Out');
+  });
+
+  it('AI-first listing workflow: renders no margin section when marginPreview is absent', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).not.toContain('Marge estimée');
+  });
+
+  const completeMargin: MarginCalculationResult = {
+    currency: 'EUR',
+    costBreakdown: [],
+    totalCost: 300,
+    netProfit: 149,
+    marginAmount: 149,
+    marginPercent: 33.2,
+    roi: 49.7,
+    isEstimate: false,
+    missingData: [],
+    warnings: [],
+  };
+
+  it('AI-first listing workflow: renders a complete marginPreview honestly, using PricingService\'s own numbers verbatim', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} marginPreview={completeMargin} />
+    );
+    expect(html).toContain('Marge estimée');
+    expect(html).toContain('149.00 EUR');
+    expect(html).toContain('33.2%');
+  });
+
+  it('AI-first listing workflow: an incomplete marginPreview (totalCost null) is shown as incomplete, never as a fabricated number', () => {
+    const incompleteMargin: MarginCalculationResult = {
+      ...completeMargin,
+      totalCost: null,
+      netProfit: null,
+      marginAmount: null,
+      marginPercent: null,
+      roi: null,
+      missingData: ['marketplace_fee:ebay'],
+      warnings: ['No configured marketplace fee for ebay.'],
+    };
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} marginPreview={incompleteMargin} />
+    );
+    expect(html).toContain('Incomplète');
+    expect(html).toContain('No configured marketplace fee for ebay.');
+    expect(html).not.toContain('null');
+  });
+
+  it('AI-first listing workflow: renders no per-image exclude/restore buttons when onToggleImageExclusion is not provided', () => {
+    const html = renderToStaticMarkup(<ListingDraftPreview draft={baseDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />);
+    expect(html).not.toContain('Retirer');
+  });
+
+  it('AI-first listing workflow: renders a "Retirer" button per image when onToggleImageExclusion is provided, and "Remettre" for an already-excluded one', () => {
+    const draft: ListingDraft = { ...baseDraft, excludedImageUrls: ['https://img.example/1.jpg'] };
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview
+        draft={draft}
+        marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }}
+        onToggleImageExclusion={() => {}}
+      />
+    );
+    expect(html).toContain('Remettre');
+    expect(html).toContain('non utilisée');
+  });
 });
 
 describe('ListingDraftEditor', () => {
@@ -169,10 +247,37 @@ describe('ListingDraftEditor', () => {
     expect(html).toContain('Brouillon d&#x27;annonce');
   });
 
-  it('AI-first listing workflow: exposes color/material as editable local fields', () => {
+  it('AI-first listing workflow: exposes color/material/model as editable local fields', () => {
     const html = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
     expect(html).toContain('id="draft-color"');
     expect(html).toContain('id="draft-material"');
+    expect(html).toContain('id="draft-model"');
+  });
+
+  it('AI-first listing workflow: forwards marginPreview through to the embedded preview', () => {
+    const margin: MarginCalculationResult = {
+      currency: 'EUR',
+      costBreakdown: [],
+      totalCost: 300,
+      netProfit: 149,
+      marginAmount: 149,
+      marginPercent: 33.2,
+      roi: 49.7,
+      isEstimate: false,
+      missingData: [],
+      warnings: [],
+    };
+    const html = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} marginPreview={margin} />);
+    expect(html).toContain('Marge estimée');
+    expect(html).toContain('149.00 EUR');
+  });
+
+  it('AI-first listing workflow: only renders per-image exclude/restore buttons when onSend is provided (they need it to record the change for real)', () => {
+    const withSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} onSend={() => {}} />);
+    expect(withSend).toContain('Retirer');
+
+    const withoutSend = renderToStaticMarkup(<ListingDraftEditor draft={baseDraft} />);
+    expect(withoutSend).not.toContain('Retirer');
   });
 
   it('AI-first listing workflow: renders "Valider ce brouillon"/"Générer une image IA"/"Annuler" only when onSend is provided', () => {
@@ -205,6 +310,33 @@ describe('ListingDraftList', () => {
       />
     );
     expect(html).toContain('Prada Cut Out Sneakers');
+  });
+
+  it('AI-first listing workflow: forwards a real marginPreview from the tool result through to the rendered draft', () => {
+    const margin: MarginCalculationResult = {
+      currency: 'EUR',
+      costBreakdown: [],
+      totalCost: 300,
+      netProfit: 149,
+      marginAmount: 149,
+      marginPercent: 33.2,
+      roi: 49.7,
+      isEstimate: false,
+      missingData: [],
+      warnings: [],
+    };
+    const html = renderToStaticMarkup(
+      <ListingDraftList
+        toolCalls={[
+          {
+            name: 'generate_listing_draft',
+            result: { draft: baseDraft, marketplaceValidation: { ebay: readyValidation, etsy: notReadyEtsy }, marginPreview: margin },
+          },
+        ]}
+      />
+    );
+    expect(html).toContain('Marge estimée');
+    expect(html).toContain('149.00 EUR');
   });
 
   it('renders an honest error message, never a fabricated draft, for an error outcome', () => {
