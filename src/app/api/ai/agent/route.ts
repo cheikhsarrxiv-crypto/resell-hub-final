@@ -18,6 +18,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import Anthropic from '@anthropic-ai/sdk';
 import { auth } from '@/auth';
 import { verifyWorkspaceAccess, errorResponse } from '@/lib/security';
 import { aiAgentMessageSchema } from '@/lib/validations';
@@ -159,7 +160,23 @@ export async function POST(request: NextRequest) {
     // already logs provider/tool failures safely; other errors here
     // (auth, validation, conversation ownership) don't carry sensitive
     // data in their messages.
-    logger.error('AI agent request failed', error instanceof Error ? error : String(error));
+    //
+    // Temporary diagnostic logging (AI agent 500 investigation): this
+    // catch only ever sees an error thrown BEFORE AiAgentService.sendMessage's
+    // own try block starts (e.g. a missing ANTHROPIC_API_KEY, thrown by
+    // getClient() as a plain "AI agent is not configured" Error — never
+    // an Anthropic.APIError instance, since no API call has happened
+    // yet), or AiAgentService's own already-generic rethrown Error. The
+    // isAnthropicError/status fields below are near-certainly false/null
+    // here in practice — kept only so this catch's own log line is
+    // self-describing if that assumption is ever wrong. No secret is
+    // ever read from `error` here (see AiAgentService.ts's own catch for
+    // the fields that actually matter for a real Anthropic failure).
+    const isAnthropicError = error instanceof Anthropic.APIError;
+    logger.error('AI agent request failed', error instanceof Error ? error : String(error), {
+      status: isAnthropicError ? (error as InstanceType<typeof Anthropic.APIError>).status ?? null : undefined,
+      cause: error instanceof Error && (error as { cause?: unknown }).cause ? String((error as { cause?: unknown }).cause) : undefined,
+    });
     return errorResponse(error);
   }
 }
