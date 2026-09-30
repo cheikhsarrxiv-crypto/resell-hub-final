@@ -54,6 +54,7 @@ export const createProductSchema = z.object({
   category: z.string().optional(),
   size: z.string().optional(),
   color: z.string().optional(),
+  model: z.string().optional(),
   condition: z.enum(['new', 'like-new', 'good', 'fair', 'used']).default('used'),
   purchasePrice: z.number().min(0, 'Purchase price must be positive'),
   sellingPrice: z.number().min(0, 'Selling price must be positive'),

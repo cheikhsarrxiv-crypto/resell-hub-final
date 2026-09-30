@@ -9,6 +9,7 @@
  * never a real network call).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Prisma } from '@prisma/client';
 
 interface FakeRow {
   id: string;
@@ -44,6 +45,35 @@ const { productStore, connectionStore, listingStore, productImageRows } = vi.hoi
 // hoisted, and evaluated once at import time — and the test bodies below
 // share the exact same reference and see each other's mutations.
 const dbDownFlag = vi.hoisted(() => ({ value: false }));
+
+// Race-condition fix (Priority 4) — a SHARPER tool than dbDownFlag above:
+// dbDownFlag fails EVERY listing.update call (both markListingSynced's and
+// markListingFailed's), which can never actually reproduce the audit's
+// exact reported bug ("createListing() succeeds -> markListingSynced()
+// fails -> markListingFailed() SUCCEEDS"). This flag instead fails only the
+// very NEXT listing.update call and then resets itself — letting a test
+// simulate markListingSynced's write failing in isolation, while any
+// update attempted afterwards (there should be none, per the fix) would
+// otherwise succeed normally.
+const failNextListingUpdate = vi.hoisted(() => ({ value: false }));
+
+// P7 (missing-tests audit) — "double concurrent confirm on publish": forces
+// a genuine interleaving of two truly-simultaneous reserveListingForPublish
+// calls at the exact race window the real partial unique index protects
+// (both findFirst checks see no existing row, THEN both attempt create()).
+// Without this, Promise.all([handlerA(), handlerB()]) in a single-threaded
+// mock never naturally lands both calls at create() before either commits
+// — one handler's chain simply finishes first, and the loser's own
+// findFirst pre-check already finds the winner's 'synced' row (the
+// already-tested idempotent-replay path), never actually reaching create()
+// at all. Gating create() itself on its first call, released only once a
+// second concurrent create() has already completed, deterministically
+// reproduces the narrower window instead.
+const concurrentCreateGate = vi.hoisted(() => ({
+  armed: false,
+  release: null as (() => void) | null,
+  promise: null as Promise<void> | null,
+}));
 
 const DEFAULT_PRODUCT_ID = 'product-1';
 const DEFAULT_PRODUCT_SKU = 'SKU-REAL-PRODUCT-1';
@@ -99,6 +129,32 @@ vi.mock('@/lib/prisma', () => ({
         return row ? { ...row } : null;
       }),
       create: vi.fn(async ({ data }: any) => {
+        // P7 (missing-tests audit) — see concurrentCreateGate's own header
+        // comment: paused only on the ARMED first call, released by the
+        // test once a genuinely concurrent second create() has already
+        // committed, so the conflict check below (running only once this
+        // resumes) actually sees it.
+        if (concurrentCreateGate.armed) {
+          concurrentCreateGate.armed = false;
+          await concurrentCreateGate.promise;
+        }
+        // P7 (missing-tests audit) — mirrors the real DB's own partial
+        // unique index (Listing_active_product_connection_key,
+        // reserveListingForPublish's own header comment) so a genuine
+        // "two concurrent FRESH publish attempts for the same
+        // (productId, connectionId) pair" race can actually be exercised
+        // here: without this check every test.create() call silently
+        // succeeded, so reserveListingForPublish's own P2002 recovery
+        // branch had zero coverage in this file.
+        const conflict = Array.from(listingStore.values()).find(
+          (l) => l.productId === data.productId && l.marketplaceConnectionId === data.marketplaceConnectionId && l.deletedAt === null
+        );
+        if (conflict) {
+          throw new Prisma.PrismaClientKnownRequestError(
+            'Unique constraint failed on the fields: (`productId`,`marketplaceConnectionId`)',
+            { code: 'P2002', clientVersion: 'test', meta: { target: ['productId', 'marketplaceConnectionId'] } }
+          );
+        }
         const row = { id: `listing-${++listingIdCounter}`, externalId: null, deletedAt: null, ...data };
         listingStore.set(row.id, row);
         return { ...row };
@@ -111,6 +167,10 @@ vi.mock('@/lib/prisma', () => ({
         // crash scenario the audit identified. Toggled per-test only.
         if (dbDownFlag.value) {
           throw new Error('DB temporarily unavailable');
+        }
+        if (failNextListingUpdate.value) {
+          failNextListingUpdate.value = false;
+          throw new Error('Listing update failed (simulated single-call failure)');
         }
         const row = listingStore.get(where.id);
         if (!row) throw new Error('Listing not found');
@@ -148,7 +208,7 @@ vi.mock('@/lib/prisma', () => ({
 // actually runs (triggered by this file's own hoisted imports resolving
 // the module graph). vi.hoisted() is Vitest's own documented mechanism
 // for exactly this: values that must exist inside a hoisted mock factory.
-const { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock } = vi.hoisted(() => {
+const { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock, uploadListingImageMock } = vi.hoisted(() => {
   const createListingMock = vi.fn();
   // Listing-reconciliation fix — the eBay-only real lookup used to
   // reconcile a stuck 'syncing' Listing (see EbayAdapter.findPublishedOfferBySku).
@@ -160,11 +220,16 @@ const { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuM
       { status: 'found'; listingId: string; offerId: string } | { status: 'not_found' } | { status: 'unable_to_verify'; reason: string }
     > => ({ status: 'unable_to_verify', reason: 'not configured by this test' })
   );
+  // Etsy images fix — Etsy-only extra method (see EtsyAdapter.uploadListingImage's
+  // own header comment), duck-typed exactly like findPublishedOfferBySku
+  // above is for eBay. Never called by any eBay test.
+  const uploadListingImageMock = vi.fn(async () => ({ listingImageId: 'test-image-id', rank: 1 }));
   const getAuthenticatedAdapterMock = vi.fn(async (_workspaceId: string, _marketplaceName: string) => ({
     createListing: createListingMock,
     findPublishedOfferBySku: findPublishedOfferBySkuMock,
+    uploadListingImage: uploadListingImageMock,
   }));
-  return { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock };
+  return { getAuthenticatedAdapterMock, createListingMock, findPublishedOfferBySkuMock, uploadListingImageMock };
 });
 
 vi.mock('@/services/ListingService', () => ({
@@ -192,6 +257,12 @@ const { createProductMock } = vi.hoisted(() => ({ createProductMock: vi.fn() }))
 const { rehostImageFromUrlMock } = vi.hoisted(() => ({ rehostImageFromUrlMock: vi.fn() }));
 vi.mock('@/services/StorageService', () => ({
   StorageService: { rehostImageFromUrl: rehostImageFromUrlMock },
+  // Etsy images fix — actionTools.ts's own downloadImageForEtsyUpload
+  // reuses these two real constants (never a second, drifting list) —
+  // this mock must export them too, or that check throws for every Etsy
+  // publish test exercising the real-adapter path.
+  ALLOWED_MIME_TYPES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+  MAX_FILE_SIZE: 10 * 1024 * 1024,
 }));
 
 vi.mock('@/services/ProductService', async () => {
@@ -283,6 +354,33 @@ async function seedReadyEtsyDraft(conversationId: string) {
   const edited: any = await editListingDraftTool.handler(
     'ws-1',
     { sourceUrl: sourcedItem.sourceUrl, patch: { etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' } },
+    { conversationId, userId: 'user-1' }
+  );
+  pushToolCall(conversationId, 'tu-edit', 'edit_listing_draft', {}, edited);
+
+  return edited.draft;
+}
+
+/**
+ * Etsy images fix — like seedReadyEtsyDraft, but with a caller-chosen
+ * source image list (real tools throughout, never hand-rolled draft
+ * state), so image-specific tests (multiple images, zero images) don't
+ * all have to share sourcedItem's own hardcoded single image.
+ */
+async function seedReadyEtsyDraftWithImages(conversationId: string, images: string[]) {
+  const item = { ...sourcedItem, images };
+  pushToolCall(conversationId, 'tu-search', 'search_products', { query: 'prada' }, { status: 'ok', results: [item], providerErrors: [] });
+
+  const generated: any = await generateListingDraftTool.handler(
+    'ws-1',
+    { sourceUrl: item.sourceUrl, proposedPrice: 449, proposedCurrency: 'EUR' },
+    { conversationId, userId: 'user-1' }
+  );
+  pushToolCall(conversationId, 'tu-gen', 'generate_listing_draft', {}, generated);
+
+  const edited: any = await editListingDraftTool.handler(
+    'ws-1',
+    { sourceUrl: item.sourceUrl, patch: { etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' } },
     { conversationId, userId: 'user-1' }
   );
   pushToolCall(conversationId, 'tu-edit', 'edit_listing_draft', {}, edited);
@@ -606,6 +704,36 @@ describe('create_product tool definition', () => {
     });
   });
 
+  describe('handler() — model (AI-first listing workflow fix)', () => {
+    it('model present: an explicit model value is forwarded to ProductService unchanged', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      await createProductTool.handler('ws-1', { ...validInput, model: 'Air Force 1' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const [, passedData] = createProductMock.mock.calls[0];
+      expect(passedData.model).toBe('Air Force 1');
+    });
+
+    it('model absent: ProductService receives no model field, never a fabricated value', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const [, passedData] = createProductMock.mock.calls[0];
+      expect(passedData.model).toBeUndefined();
+    });
+
+    it('model édité: a model set via edit_listing_draft on the draft is visible in create_product\'s own confirmation preview', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+
+      const preview: any = await createProductTool.preview!('ws-1', { ...validInput, model: 'Cut Out' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(preview.model).toBe('Cut Out');
+    });
+  });
+
   describe('handler() — duplicate provenance (TEST G shape) and SKU conflict (TEST N)', () => {
     it('a PRODUCT_SOURCE_CONFLICT_MESSAGE from ProductService becomes a clean, distinguishable refusal — never a fabricated success', async () => {
       pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
@@ -795,6 +923,8 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
     connectionStore.clear();
     listingStore.clear();
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
     findPublishedOfferBySkuMock.mockReset().mockResolvedValue({ status: 'unable_to_verify', reason: 'not configured by this test' });
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:ebay', { id: 'conn-ebay-1' });
@@ -803,6 +933,8 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
   afterEach(() => {
     delete process.env.ENABLE_REAL_EBAY_PUBLISH;
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
   });
 
   it('is registered in AiToolRegistry as an engage tool — never auto-executed', () => {
@@ -1016,6 +1148,29 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
 
+    it('P7 (missing-tests audit) — marketplace disconnected between proposal and confirmation: preview() succeeds while connected (the action the reseller confirms), but the eBay connection is then removed before handler() actually runs — refused cleanly, never a stale/cached "still connected" assumption, no adapter call, no Listing row', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      await seedReadyDraft('conv-1');
+
+      // The reseller's proposal (preview()) is built while eBay is still
+      // connected — this is the exact confirmable summary
+      // AiActionService.proposeAction would have stored and shown them.
+      const proposal: any = await publishListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(proposal.error).toBeUndefined();
+      expect(proposal.marketplace).toBe('eBay');
+
+      // The reseller disconnects eBay (or the connection is otherwise
+      // revoked/removed) before actually clicking Confirm.
+      connectionStore.clear();
+
+      const result: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/no ebay connection/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0); // never reserved/created for a connection that no longer exists
+    });
+
     describe('the real path — ONLY reachable with ENABLE_REAL_EBAY_PUBLISH="true" AND a fully mocked adapter (never real network)', () => {
       it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload (real product SKU, not the draft\'s), and returns the real result shape', async () => {
         process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
@@ -1064,6 +1219,59 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
         expect(second.alreadyPublished).toBe(true);
         expect(second.listingId).toBe(first.listingId);
         expect(listingStore.size).toBe(1); // no duplicate Listing row
+      });
+
+      it('P7 (missing-tests audit) — double concurrent confirm on publish: two TRULY SIMULTANEOUS handler() calls for the same brand-new (product, connection) pair never create two Listing rows nor call eBay twice', async () => {
+        process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+        createListingMock.mockResolvedValue({ externalId: 'EBAY-CONCURRENT-FRESH-1', status: 'active' });
+        await seedReadyDraft('conv-1');
+
+        // No prior Listing row exists for this (product, connection) pair —
+        // unlike the "already synced" idempotent-replay test above, BOTH
+        // calls here must race past reserveListingForPublish's own
+        // findFirst check while the row genuinely doesn't exist yet, the
+        // real "two clicks on Confirm at the same instant" scenario. A
+        // plain Promise.all of two handler() calls never naturally lands
+        // both at create() before either commits (one chain simply
+        // finishes first, and the loser's OWN findFirst pre-check then
+        // just sees the winner's already-'synced' row — the already-tested
+        // idempotent-replay path, never the P2002 branch at all) — this
+        // test deliberately pauses the FIRST call right inside create()
+        // (concurrentCreateGate) until the SECOND call has genuinely
+        // created and synced its own row first, so create()'s conflict
+        // check (mirroring the real DB's own partial unique index) actually
+        // sees it when it resumes — exercising reserveListingForPublish's
+        // P2002 race-recovery branch for real, never exercised by any other
+        // test in this file (every other test creates its rows one at a time).
+        let releaseGate!: () => void;
+        concurrentCreateGate.promise = new Promise<void>((resolve) => { releaseGate = resolve; });
+        concurrentCreateGate.armed = true;
+
+        const firstPromise = publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+        // Flush microtasks so the first call's chain (findLatestDraft ->
+        // validate -> loadPublishableProduct -> loadMarketplaceConnection ->
+        // reserveListingForPublish's own findFirst -> create()) actually
+        // reaches and pauses inside the gated create() before the second
+        // call starts.
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        const second: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+        expect(second.published).toBe(true); // the second call ran to completion, real eBay call included, while the first is still paused
+        expect(listingStore.size).toBe(1);
+
+        releaseGate(); // let the first call's create() resume and see the conflict
+        const first: any = await firstPromise;
+
+        expect(listingStore.size).toBe(1); // never two rows for the same (product, connection) pair
+        expect(createListingMock).toHaveBeenCalledTimes(1); // the real eBay call happened exactly once, never twice
+        // The loser (first) gracefully reports the winner's own real,
+        // already-published outcome instead of crashing or silently
+        // creating a second eBay listing.
+        expect(first.published).toBe(true);
+        expect(first.alreadyPublished).toBe(true);
+        expect(first.listingId).toBe(second.listingId);
+        expect(first.externalId).toBe(second.externalId);
+        expect(first.error).toBeUndefined();
       });
 
       it('a failed publish leaves the Listing row in a retryable "failed" state, and a later successful retry reuses the SAME row (no duplicate)', async () => {
@@ -1275,6 +1483,8 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
         publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
       ).rejects.toBeTruthy();
       dbDownFlag.value = false;
+      failNextListingUpdate.value = false;
+      concurrentCreateGate.armed = false;
 
       expect(listingStore.size).toBe(1);
       const stuck = Array.from(listingStore.values())[0];
@@ -1291,10 +1501,50 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
       expect(recovered.externalId).toBe('EBAY-CRASHED-SUCCESS');
       expect(listingStore.get(stuck.id).syncStatus).toBe('synced');
     });
+
+    it('P4 — eBay race-condition fix: createListing() succeeds, ONLY markListingSynced()\'s write fails (not a total DB outage) — the row must NEVER be moved to "failed", and a retry must NEVER call createListing() a second time', async () => {
+      process.env.ENABLE_REAL_EBAY_PUBLISH = 'true';
+      createListingMock.mockResolvedValueOnce({ externalId: 'EBAY-RACE-1', status: 'active' });
+      await seedReadyDraft('conv-1');
+
+      // Fails exactly the ONE listing.update call that follows
+      // (markListingSynced's own write) — unlike dbDownFlag above, any
+      // OTHER update attempted afterwards (e.g. the old, buggy
+      // markListingFailed call) would succeed normally. This is the exact
+      // audit scenario: "adapter.createListing() succeeds -> DB write
+      // fails -> markListingFailed() succeeds" — proving the fix never lets
+      // that second write happen.
+      failNextListingUpdate.value = true;
+      await expect(
+        publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+      ).rejects.toBeTruthy();
+
+      expect(listingStore.size).toBe(1);
+      const stuck = Array.from(listingStore.values())[0];
+      // The real eBay listing was created but is NOT falsely marked
+      // 'failed' — that would tell classifyExistingListing "safe to reuse
+      // this slot", and a retry would call the eBay adapter again for a
+      // product already live there.
+      expect(stuck.syncStatus).toBe('syncing');
+      expect(stuck.syncStatus).not.toBe('failed');
+      expect(createListingMock).toHaveBeenCalledTimes(1);
+
+      // A retry must be routed to reconciliation, never straight back to a
+      // fresh adapter call.
+      findPublishedOfferBySkuMock.mockResolvedValue({ status: 'found', listingId: 'EBAY-RACE-1', offerId: 'OFFER-RACE-1' });
+      const retry: any = await publishListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createListingMock).toHaveBeenCalledTimes(1); // never called a second time — no duplicate eBay listing
+      expect(retry.published).toBe(true);
+      expect(retry.externalId).toBe('EBAY-RACE-1');
+      expect(listingStore.get(stuck.id).syncStatus).toBe('synced');
+    });
   });
 });
 
 describe('publish_etsy_listing tool definition (Etsy publication parity)', () => {
+  const originalFetch = global.fetch;
+
   beforeEach(() => {
     rows = [];
     rowIdCounter = 0;
@@ -1306,13 +1556,27 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     connectionStore.clear();
     listingStore.clear();
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
+    // Etsy images fix — the real handler downloads each usable image's
+    // bytes before uploading to Etsy (see actionTools.ts's own
+    // downloadImageForEtsyUpload); stubbed so this suite's real-adapter
+    // tests never make a real network call for it either.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: async () => new ArrayBuffer(10),
+    }) as any;
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
+    global.fetch = originalFetch;
   });
 
   const withProduct = { productId: DEFAULT_PRODUCT_ID };
@@ -1504,6 +1768,24 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
     });
 
+    it('P7 (missing-tests audit, Etsy variant) — marketplace disconnected between proposal and confirmation: preview() succeeds while connected, but the Etsy connection is removed before handler() runs — refused cleanly, no adapter call, no Listing row', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      await seedReadyEtsyDraft('conv-1');
+
+      const proposal: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+      expect(proposal.error).toBeUndefined();
+      expect(proposal.marketplace).toBe('Etsy');
+
+      connectionStore.clear(); // reseller disconnects Etsy before confirming
+
+      const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.error).toMatch(/no etsy connection/i);
+      expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+      expect(createListingMock).not.toHaveBeenCalled();
+      expect(listingStore.size).toBe(0);
+    });
+
     describe('the real path — ONLY reachable with ENABLE_REAL_ETSY_PUBLISH="true" AND a fully mocked adapter (never real network)', () => {
       it('calls getAuthenticatedAdapter + adapter.createListing with the exact mapped payload (real product SKU), and returns the real result shape', async () => {
         process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
@@ -1518,7 +1800,15 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
         expect(sentPayload.price).toBe(449);
         expect(sentPayload.etsy).toEqual({ whoMade: 'i_did', whenMade: '2020_2025', taxonomyId: 1234 });
         expect(sentPayload.sku).toBe(DEFAULT_PRODUCT_SKU);
-        expect(result).toEqual({ published: true, listingId: expect.any(String), externalId: 'ETSY-LISTING-1', status: 'active' });
+        expect(result).toEqual({
+          published: true,
+          listingId: expect.any(String),
+          externalId: 'ETSY-LISTING-1',
+          status: 'active',
+          imagesAttached: 1,
+          imagesTotal: 1,
+        });
+        expect(uploadListingImageMock).toHaveBeenCalledWith('ETSY-LISTING-1', expect.objectContaining({ rank: 1 }));
       });
 
       it('FIXED (persistence-architecture audit): a successful real publish creates a real, synced Listing row', async () => {
@@ -1673,6 +1963,8 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
         publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
       ).rejects.toBeTruthy();
       dbDownFlag.value = false;
+      failNextListingUpdate.value = false;
+      concurrentCreateGate.armed = false;
 
       expect(listingStore.size).toBe(1);
       const stuck = Array.from(listingStore.values())[0];
@@ -1685,6 +1977,173 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
       expect(secondAttempt.error).toBeTruthy();
       expect(listingStore.get(stuck.id).syncStatus).toBe('syncing');
     });
+
+    it('P4 (Etsy variant) — createListing() succeeds, ONLY markListingSynced()\'s write fails — the row must NEVER be moved to "failed", and a retry must NEVER call createListing() a second time', async () => {
+      process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+      createListingMock.mockResolvedValueOnce({ externalId: 'ETSY-RACE-1', status: 'active' });
+      await seedReadyEtsyDraft('conv-1');
+
+      failNextListingUpdate.value = true;
+      await expect(
+        publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' })
+      ).rejects.toBeTruthy();
+
+      expect(listingStore.size).toBe(1);
+      const stuck = Array.from(listingStore.values())[0];
+      // Etsy reconciliation always fails closed (no SKU-indexed lookup —
+      // see ListingReconciliationService), so avoiding a duplicate matters
+      // even more here: a real Etsy listing must never be discoverable as
+      // "failed"/retryable when it may already be live.
+      expect(stuck.syncStatus).toBe('syncing');
+      expect(stuck.syncStatus).not.toBe('failed');
+      expect(createListingMock).toHaveBeenCalledTimes(1);
+
+      const retry: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(createListingMock).toHaveBeenCalledTimes(1); // never called a second time — no duplicate Etsy listing
+      expect(retry.error).toBeTruthy(); // Etsy fails closed — stays unresolved until manual/operator intervention, but never duplicated
+      expect(listingStore.get(stuck.id).syncStatus).toBe('syncing');
+    });
+  });
+});
+
+describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
+  const originalFetch = global.fetch;
+  const withProduct = { productId: DEFAULT_PRODUCT_ID };
+
+  beforeEach(() => {
+    rows = [];
+    rowIdCounter = 0;
+    clock = 0;
+    listingIdCounter = 0;
+    vi.clearAllMocks();
+    process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
+    productStore.clear();
+    connectionStore.clear();
+    listingStore.clear();
+    dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
+    productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
+    connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
+    createListingMock.mockResolvedValue({ externalId: 'ETSY-IMG-1', status: 'active' });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: async () => new ArrayBuffer(10),
+    }) as any;
+  });
+
+  afterEach(() => {
+    delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
+    global.fetch = originalFetch;
+  });
+
+  it('1. a draft with exactly one usable image uploads it at rank 1', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/1.jpg']);
+
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.published).toBe(true);
+    expect(result.imagesAttached).toBe(1);
+    expect(result.imagesTotal).toBe(1);
+    expect(result.imageUploadWarning).toBeUndefined();
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(1);
+    expect(uploadListingImageMock).toHaveBeenCalledWith('ETSY-IMG-1', expect.objectContaining({ rank: 1 }));
+  });
+
+  it('2. a draft with multiple usable images uploads all of them, in order, rank 1..N', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/1.jpg', 'https://img.example/2.jpg', 'https://img.example/3.jpg']);
+
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.imagesAttached).toBe(3);
+    expect(result.imagesTotal).toBe(3);
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(3);
+    expect(uploadListingImageMock.mock.calls.map((c: any) => c[1].rank)).toEqual([1, 2, 3]);
+  });
+
+  it('3. an excluded image is never uploaded to Etsy — only the remaining usable images are', async () => {
+    const draft = await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/1.jpg', 'https://img.example/2.jpg']);
+    const excluded: any = await editListingDraftTool.handler(
+      'ws-1',
+      { sourceUrl: sourcedItem.sourceUrl, patch: {}, excludeImageUrls: ['https://img.example/1.jpg'] },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+    pushToolCall('conv-1', 'tu-exclude', 'edit_listing_draft', {}, excluded);
+    void draft;
+
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.imagesTotal).toBe(1); // only the non-excluded one counted as usable
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(1);
+    expect(uploadListingImageMock).toHaveBeenCalledWith('ETSY-IMG-1', expect.objectContaining({}));
+    // The excluded url itself must never appear in what was fetched/uploaded.
+    expect((global.fetch as any).mock.calls.some((c: any) => c[0] === 'https://img.example/1.jpg')).toBe(false);
+  });
+
+  it('4. no usable image at all -> refused BEFORE any Etsy API call, in both preview() and handler()', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', []);
+
+    const preview: any = await publishEtsyListingTool.preview!('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(preview.error).toMatch(/no usable image/i);
+    expect(result.error).toMatch(/no usable image/i);
+    expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
+    expect(createListingMock).not.toHaveBeenCalled();
+    expect(uploadListingImageMock).not.toHaveBeenCalled();
+  });
+
+  it('5. an invalid/undownloadable image never fails the whole publish — reported honestly, other images still upload', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/bad.jpg', 'https://img.example/good.jpg']);
+    (global.fetch as any).mockImplementation(async (url: string) => {
+      if (url === 'https://img.example/bad.jpg') {
+        return { ok: false, status: 404, statusText: 'Not Found' };
+      }
+      return { ok: true, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new ArrayBuffer(10) };
+    });
+
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.published).toBe(true); // the listing itself is real and published
+    expect(result.imagesTotal).toBe(2);
+    expect(result.imagesAttached).toBe(1); // only the good one
+    expect(result.imageUploadWarning).toMatch(/1 of 2/);
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(1); // never attempted for the bad one
+  });
+
+  it('6. an upload failure AFTER createListing() already succeeded never marks the listing as failed or undoes it', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/1.jpg']);
+    uploadListingImageMock.mockRejectedValueOnce(new Error('Etsy image upload 500'));
+
+    const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.published).toBe(true);
+    expect(result.externalId).toBe('ETSY-IMG-1');
+    expect(result.imagesAttached).toBe(0);
+    expect(result.imageUploadWarning).toMatch(/1 of 1/);
+    expect(listingStore.get(Array.from(listingStore.keys())[0]).syncStatus).toBe('synced'); // never 'failed'
+  });
+
+  it('7/8. retry after a successful publish never re-creates the listing nor re-uploads images (idempotent replay)', async () => {
+    await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/1.jpg']);
+
+    const first: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+    expect(first.published).toBe(true);
+    expect(createListingMock).toHaveBeenCalledTimes(1);
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(1);
+
+    const retry: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(retry.published).toBe(true);
+    expect(retry.alreadyPublished).toBe(true);
+    expect(retry.externalId).toBe(first.externalId);
+    expect(createListingMock).toHaveBeenCalledTimes(1); // never called again
+    expect(uploadListingImageMock).toHaveBeenCalledTimes(1); // never re-uploaded
   });
 });
 
@@ -1711,6 +2170,8 @@ describe('Phase 7 — multi-marketplace publish independence (no rollback on par
     connectionStore.clear();
     listingStore.clear();
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
     findPublishedOfferBySkuMock.mockReset().mockResolvedValue({ status: 'unable_to_verify', reason: 'not configured by this test' });
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:ebay', { id: 'conn-ebay-1' });
@@ -1739,6 +2200,8 @@ describe('Phase 7 — multi-marketplace publish independence (no rollback on par
     delete process.env.ENABLE_REAL_EBAY_PUBLISH;
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
     dbDownFlag.value = false;
+    failNextListingUpdate.value = false;
+    concurrentCreateGate.armed = false;
   });
 
   it('eBay succeeding and Etsy then failing leaves the eBay Listing synced and untouched — never rolled back', async () => {

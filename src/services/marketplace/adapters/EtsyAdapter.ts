@@ -286,6 +286,91 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
   }
 
   /**
+   * REAL: Upload one image to an existing Etsy listing.
+   * https://developer.etsy.com/documentation/reference#operation/uploadListingImage
+   * (endpoint/parameters verified 2026-09-30 against Etsy's own generated
+   * API reference mirror, gordonturner/etsy-open-api-client's
+   * ShopListingImageApi.md — developer.etsy.com itself is unreachable from
+   * this environment's network egress, the same documented limitation as
+   * EtsySourcingProvider.ts's own header comment).
+   *
+   * `POST /v3/application/shops/{shop_id}/listings/{listing_id}/images`,
+   * multipart/form-data (never JSON — unlike every other Etsy call this
+   * adapter makes). Etsy's own contract takes actual file bytes via the
+   * `image` field, never a hotlinked URL — there is no "image by URL"
+   * variant of this operation. `rank` (1-based) is Etsy's own listing
+   * position field; rank 1 is the listing's primary/cover photo, exactly
+   * the same "first image is primary" convention this project's own
+   * usableDraftImages() already produces for eBay's `images` array — the
+   * caller (publish_etsy_listing's handler) uploads in that same order,
+   * numbering rank from 1.
+   *
+   * No documented format/size limit was found in the verified reference
+   * above — this method itself does not second-guess Etsy's own
+   * acceptance/rejection of a given file; the CALLER (actionTools.ts)
+   * still validates against StorageService's own ALLOWED_MIME_TYPES/
+   * MAX_FILE_SIZE before ever reaching here, the same real constraint
+   * already enforced for every other image this app handles — never an
+   * invented, Etsy-specific limit.
+   */
+  async uploadListingImage(
+    listingId: string,
+    image: { data: Buffer; filename: string; contentType: string; rank: number }
+  ): Promise<{ listingImageId: string; rank: number; url?: string }> {
+    const shopId = await this.requireShopId()
+    if (!this.accessToken) {
+      throw new Error('Access token required')
+    }
+
+    const form = new FormData()
+    // Buffer's own ArrayBufferLike type isn't directly assignable to
+    // BlobPart (Buffer's underlying buffer can theoretically be a
+    // SharedArrayBuffer) — a fresh Uint8Array view is always backed by a
+    // real ArrayBuffer, so this is purely a type-level fix, never a copy
+    // of different bytes.
+    form.append('image', new Blob([new Uint8Array(image.data)], { type: image.contentType }), image.filename)
+    form.append('rank', String(image.rank))
+
+    try {
+      // Deliberately NOT setting Content-Type here — fetch computes the
+      // correct multipart/form-data boundary itself from the FormData
+      // body; overriding it manually would break the boundary and is the
+      // exact "do not specify a mime-type" pitfall documented in Etsy's
+      // own community discussions of this operation.
+      const response = await fetch(
+        `${this.baseUrl}/shops/${shopId}/listings/${listingId}/images`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.accessToken}`,
+            'x-api-key': this.config.clientId,
+          },
+          body: form,
+        }
+      )
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        throw {
+          status: response.status,
+          statusCode: response.status,
+          message: error.error || error.message || `Etsy image upload failed: ${response.statusText}`,
+          error,
+        }
+      }
+
+      const data = await response.json()
+      return {
+        listingImageId: data.listing_image_id?.toString(),
+        rank: data.rank,
+        url: data.url_fullxfull,
+      }
+    } catch (error) {
+      throw ErrorNormalizer.normalize(error, 'etsy')
+    }
+  }
+
+  /**
    * REAL: Update existing listing (title, description, price, quantity)
    */
   async updateListing(

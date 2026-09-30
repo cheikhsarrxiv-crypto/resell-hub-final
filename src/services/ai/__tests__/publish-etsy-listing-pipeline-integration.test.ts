@@ -21,10 +21,16 @@ interface FakeMessageRow {
   createdAt: Date;
 }
 
-const { messageRows, actionStore, conversationOwners, productStore, connectionStore, listingStore, createListingMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
+const { messageRows, actionStore, conversationOwners, productStore, connectionStore, listingStore, createListingMock, uploadListingImageMock, getAuthenticatedAdapterMock } = vi.hoisted(() => {
   const createListingMock = vi.fn();
+  // Etsy images fix — the real handler now also calls the adapter's own
+  // (Etsy-only) uploadListingImage after a successful createListing; see
+  // EtsyAdapter.uploadListingImage's own header comment for why this is a
+  // separate call from createListing.
+  const uploadListingImageMock = vi.fn();
   const getAuthenticatedAdapterMock = vi.fn(async (_workspaceId: string, _marketplaceName: string) => ({
     createListing: createListingMock,
+    uploadListingImage: uploadListingImageMock,
   }));
   return {
     messageRows: [] as FakeMessageRow[],
@@ -35,6 +41,7 @@ const { messageRows, actionStore, conversationOwners, productStore, connectionSt
     connectionStore: new Map<string, any>(),
     listingStore: new Map<string, any>(),
     createListingMock,
+    uploadListingImageMock,
     getAuthenticatedAdapterMock,
   };
 });
@@ -263,6 +270,8 @@ async function proposeEtsyPublish(workspaceId: string, conversationId: string, t
 }
 
 describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionService', () => {
+  const originalFetch = global.fetch;
+
   beforeEach(() => {
     messageRows.length = 0; // messageRows is a const binding (from vi.hoisted) — clear in place, never reassign
     actionStore.clear();
@@ -276,10 +285,20 @@ describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionServ
     listingIdCounter = 0;
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    // The real handler downloads each usable image's bytes before
+    // uploading to Etsy (see actionTools.ts's own downloadImageForEtsyUpload)
+    // — stubbed here so this file's own "ZERO real network calls" guarantee
+    // still holds now that publish_etsy_listing makes this extra fetch.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: async () => new ArrayBuffer(10),
+    }) as any;
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
+    global.fetch = originalFetch;
   });
 
   it('propose -> confirm (real publish disabled, the default) -> COMPLETED with a simulated result, adapter never called', async () => {
@@ -295,17 +314,26 @@ describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionServ
     expect(getAuthenticatedAdapterMock).not.toHaveBeenCalled();
   });
 
-  it('propose -> confirm with the real flag enabled -> COMPLETED with the real adapter result (pipeline correct end-to-end)', async () => {
+  it('propose -> confirm with the real flag enabled -> COMPLETED with the real adapter result (pipeline correct end-to-end, images uploaded)', async () => {
     process.env.ENABLE_REAL_ETSY_PUBLISH = 'true';
     createListingMock.mockResolvedValue({ externalId: 'ETSY-1', status: 'active' });
+    uploadListingImageMock.mockResolvedValue({ listingImageId: 'img-1', rank: 1 });
     await seedReadyEtsyDraft('conv-1');
     const proposed = await proposeEtsyPublish('ws-1', 'conv-1');
 
     const confirmed = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
 
     expect(confirmed?.status).toBe('COMPLETED');
-    expect(confirmed?.result).toEqual({ published: true, listingId: expect.any(String), externalId: 'ETSY-1', status: 'active' });
+    expect(confirmed?.result).toEqual({
+      published: true,
+      listingId: expect.any(String),
+      externalId: 'ETSY-1',
+      status: 'active',
+      imagesAttached: 1,
+      imagesTotal: 1,
+    });
     expect(getAuthenticatedAdapterMock).toHaveBeenCalledWith('ws-1', 'etsy');
+    expect(uploadListingImageMock).toHaveBeenCalledWith('ETSY-1', expect.objectContaining({ rank: 1 }));
   });
 
   describe('idempotence', () => {

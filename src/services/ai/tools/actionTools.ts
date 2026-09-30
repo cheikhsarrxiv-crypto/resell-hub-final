@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { AgentToolDefinition } from './types';
 import { findLatestDraft } from './listingDraftTools';
-import { validateEbayDraft, mapDraftToEbayInput, validateEtsyDraft, mapDraftToEtsyInput } from '@/lib/listing/listingDraft';
+import { validateEbayDraft, mapDraftToEbayInput, validateEtsyDraft, mapDraftToEtsyInput, usableDraftImages } from '@/lib/listing/listingDraft';
 import { ListingService, getAuthenticatedAdapter } from '@/services/ListingService';
 import { OrderService } from '@/services/OrderService';
 import { FulfillmentService } from '@/services/FulfillmentService';
@@ -15,7 +15,53 @@ import { ProductService, PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_M
 import { createProductSchema } from '@/lib/validations';
 import { findToolResultsByName } from './conversationToolResults';
 import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
-import { StorageService } from '@/services/StorageService';
+import { StorageService, ALLOWED_MIME_TYPES, MAX_FILE_SIZE } from '@/services/StorageService';
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('action-tools');
+
+/** Etsy-only extra method (see EtsyAdapter.uploadListingImage's own header comment) — not part of the shared MarketplaceAdapter contract eBay/Depop/Vinted implement, same duck-typed-cast convention already used for Etsy's own getCodeVerifier/setCodeVerifier. */
+interface EtsyImageUploadCapableAdapter {
+  uploadListingImage(
+    listingId: string,
+    image: { data: Buffer; filename: string; contentType: string; rank: number }
+  ): Promise<{ listingImageId: string; rank: number; url?: string }>;
+}
+
+const CONTENT_TYPE_EXTENSION: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+/**
+ * Downloads one draft image's bytes for a real Etsy upload — Etsy's own
+ * API takes actual file bytes, never a hotlinked URL (see
+ * EtsyAdapter.uploadListingImage). Reuses StorageService's own real
+ * format/size rule (ALLOWED_MIME_TYPES/MAX_FILE_SIZE) — never a second,
+ * Etsy-specific limit invented here. Throws on any failure (network,
+ * disallowed type, oversized) — the caller treats each image as
+ * best-effort and never lets one failed download fail the whole publish.
+ */
+async function downloadImageForEtsyUpload(url: string): Promise<{ data: Buffer; contentType: string }> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
+  }
+
+  const contentType = (response.headers.get('content-type') || '').split(';')[0].trim();
+  if (!ALLOWED_MIME_TYPES.includes(contentType)) {
+    throw new Error(`Image content-type not allowed for Etsy upload: ${contentType || 'unknown'}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > MAX_FILE_SIZE) {
+    throw new Error('Image too large for Etsy upload');
+  }
+
+  return { data: buffer, contentType };
+}
 
 /**
  * Persistence-architecture audit (see the "Architecture A" report) — a
@@ -215,6 +261,42 @@ async function markListingFailed(listingId: string, marketplaceDisplayName: stri
   }).catch(() => undefined); // best-effort bookkeeping — never masks the real error, which the caller still throws/propagates
 }
 
+/**
+ * Race-condition fix (Priority 4, eBay/Etsy publish-duplicate audit
+ * finding): the exact gap being closed is createListing() succeeding on
+ * the real marketplace, immediately followed by markListingSynced()
+ * failing or crashing (a DB blip, a bad connection) before it can persist
+ * that success. Before this fix, the outer catch unconditionally called
+ * markListingFailed, moving the row to 'failed' — which
+ * classifyExistingListing treats as "no external listing exists, this slot
+ * is free to reuse". A retry would then call the adapter's createListing()
+ * a SECOND time for a product already live on the marketplace, creating a
+ * real duplicate listing there — the one outcome idempotence in this
+ * pipeline exists to prevent.
+ *
+ * `knownExternalId` is the adapter's own response, captured by the caller
+ * BEFORE the throw could have happened — the only place a truthful "the
+ * real call already succeeded" signal can come from. When it's present,
+ * this deliberately does nothing: the row stays exactly as
+ * reserveListingForPublish already left it ('syncing'), which
+ * reserveListingForPublish's own classifyExistingListing already routes to
+ * 'needs_reconciliation' on the very next attempt — the existing
+ * ListingReconciliationService then verifies the real marketplace state
+ * (by SKU for eBay; always fails closed for Etsy, per that service's own
+ * documented reason) before ever concluding "published" or "safe to
+ * retry". This never trusts `knownExternalId` directly as proof by itself
+ * (it is never written to the row here) — only what reconciliation
+ * independently confirms is ever trusted. Only when no real externalId was
+ * ever obtained (the adapter call itself is what failed) does this fall
+ * back to the original, unchanged 'failed' classification.
+ */
+async function handlePublishFailure(listingId: string, marketplaceDisplayName: string, knownExternalId: string | undefined) {
+  if (knownExternalId) {
+    return;
+  }
+  await markListingFailed(listingId, marketplaceDisplayName);
+}
+
 async function markListingSynced(listingId: string, externalId: string | undefined) {
   // A "successful" createListing with no real externalId is not actually
   // usable (nothing to look the listing up by later) — treated as a
@@ -329,6 +411,27 @@ const createProductInputSchema = z.object({
   condition: z.enum(PRODUCT_CONDITION_VALUES).optional(),
   size: z.string().optional(),
   color: z.string().optional(),
+  // AI-first listing workflow fix — previously accepted on the draft
+  // (edit_listing_draft) but had no way to reach the real Product at all
+  // (createProductSchema didn't accept it either). Same rule as size/color:
+  // no source equivalent, only ever set from an explicit reseller edit,
+  // never guessed here or anywhere upstream.
+  model: z.string().optional(),
+  // Deliberately NO `category` input, even though Product.category exists
+  // and is a real, working field for the MANUAL dashboard product forms
+  // (see /dashboard/products/new and .../[id]/edit) — Product.category audit
+  // (AI-first listing workflow, Priority 3): the AI workflow deliberately
+  // uses marketplace-specific category identifiers instead
+  // (ebayCategoryId/etsyTaxonomyId, both real, numeric taxonomy ids
+  // required to actually publish — see ListingDraftFields/validateEbayDraft/
+  // validateEtsyDraft), never a generic string. There is no reliable,
+  // non-guessed mapping from either marketplace's real numeric taxonomy to
+  // a single generic category string, so inventing one here would either
+  // be a guess (forbidden) or a redundant duplicate of data
+  // ebayCategoryId/etsyTaxonomyId already carry precisely. Product.category
+  // is therefore expected to stay NULL for every AI-created product — a
+  // legitimate, permanent state, not a bug — until/unless a real, non-guessed
+  // source for it exists.
   // Deliberately NO `quantity` input: a sourced item is inherently a
   // single physical unit (the same rule ListingGenerationService already
   // applies to a draft's own quantity) — the Agent is never allowed to
@@ -406,6 +509,7 @@ function buildProductPreview(workspaceId: string, input: CreateProductToolInput,
     condition: input.condition ?? 'used',
     size: input.size ?? null,
     color: input.color ?? null,
+    model: input.model ?? null,
     sourceImageCount,
     generatedImageCount,
     message:
@@ -441,6 +545,7 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       condition: { type: 'string', enum: PRODUCT_CONDITION_VALUES as unknown as string[], description: 'Optional, defaults to "used".' },
       size: { type: 'string', description: 'Optional.' },
       color: { type: 'string', description: 'Optional.' },
+      model: { type: 'string', description: 'Optional — the item\'s model (e.g. "Air Force 1"), only if the reseller stated one explicitly on the draft. Never guessed.' },
     },
     required: ['sourceMarketplace', 'sourceId', 'sourceUrl', 'title', 'sellingPrice', 'purchasePrice'],
   },
@@ -476,6 +581,7 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       condition: input.condition,
       size: input.size,
       color: input.color,
+      model: input.model,
       purchasePrice: input.purchasePrice,
       sellingPrice: input.sellingPrice,
       sourceMarketplace: input.sourceMarketplace,
@@ -815,6 +921,13 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
       };
     }
 
+    // Race-condition fix (Priority 4): captured OUTSIDE the try so the
+    // catch block below can tell "the adapter call itself failed" (this
+    // stays undefined) apart from "the adapter call succeeded and only the
+    // bookkeeping after it failed" (this holds the real externalId) — see
+    // handlePublishFailure's own header comment for why that distinction is
+    // the whole fix.
+    let ebayExternalId: string | undefined;
     try {
       // Real path — never exercised in this environment (the flag above is
       // always false here; see the Phase 12C-Offline report's own "zero
@@ -823,10 +936,12 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
       // own catch, which already logs it safely and stores only a generic,
       // secret-free error message — never a second, ad-hoc error handler
       // here that could diverge from that guarantee. The Listing row is
-      // still marked 'failed' first (see markListingFailed) — local
-      // bookkeeping only, never masking or replacing the real error.
+      // marked 'failed' on a real failure (see markListingFailed via
+      // handlePublishFailure below) — local bookkeeping only, never masking
+      // or replacing the real error.
       const adapter = await getAuthenticatedAdapter(workspaceId, 'ebay');
       const result = await adapter.createListing(payload as any);
+      ebayExternalId = result.externalId;
       const finalListing = await markListingSynced(reserveResult.listing.id, result.externalId);
       return {
         published: true,
@@ -835,7 +950,7 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
         status: result.status,
       };
     } catch (error) {
-      await markListingFailed(reserveResult.listing.id, 'eBay');
+      await handlePublishFailure(reserveResult.listing.id, 'eBay', ebayExternalId);
       throw error;
     }
   },
@@ -873,8 +988,11 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
     'attaching it to an existing ADKSY product (productId). ' +
     "sourceUrl must match a draft this conversation already produced — never accepted on trust; productId must be a real, existing product in this workspace " +
     "— sourceUrl alone never identifies one. Requires the reseller's explicit confirmation before anything happens. " +
-    'The draft must be fully ready for Etsy (see validateEtsyDraft — requires who_made/when_made/taxonomy_id, never guessed) or this is rejected with the specific reason. ' +
+    'The draft must be fully ready for Etsy (see validateEtsyDraft — requires who_made/when_made/taxonomy_id AND at least one usable real/generated image, never guessed) ' +
+    'or this is rejected with the specific reason, before any Etsy API call. ' +
     "The SKU actually sent to Etsy is always the product's own real SKU, never a value from the draft. " +
+    "Every usable (real or generated, non-excluded) image is uploaded to the listing after it's created — a failure uploading one image never undoes the " +
+    'already-published listing, and is reported honestly in the result (imagesAttached/imagesTotal/imageUploadWarning). ' +
     'Never claim a listing was really published unless the result explicitly says so.',
   category: 'engage',
   inputSchema: publishEtsyListingInputSchema,
@@ -921,6 +1039,7 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
     if ('error' in connectionResult) return { error: connectionResult.error };
 
     const realPublishEnabled = isRealEtsyPublishEnabled();
+    const usableImages = usableDraftImages(draft);
 
     return {
       action: 'publish_etsy_listing',
@@ -929,9 +1048,10 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
       ...etsyInput,
       sku: product.sku,
       productId: product.id,
+      imagesToUpload: usableImages.length,
       simulatedOnly: !realPublishEnabled,
       message: realPublishEnabled
-        ? 'Confirming this action will attempt a real Etsy publish in this environment.'
+        ? `Confirming this action will attempt a real Etsy publish in this environment, then upload ${usableImages.length} image(s).`
         : 'Confirming this action will NOT publish a real listing — real Etsy publishing is disabled in this environment.',
     };
   },
@@ -971,6 +1091,7 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
         simulated: true,
         reason: 'Real Etsy publishing is disabled in this environment (ENABLE_REAL_ETSY_PUBLISH is not set to "true").',
         wouldHaveSent: payload,
+        wouldUploadImages: usableDraftImages(draft).length,
         message: 'Simulation only — no real marketplace call was made.',
       };
     }
@@ -1022,6 +1143,11 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
       };
     }
 
+    // Race-condition fix (Priority 4) — same reasoning as publish_listing's
+    // own ebayExternalId above, captured outside the try for the same
+    // reason: distinguish "the adapter call itself failed" from "it
+    // succeeded and only the bookkeeping after it failed".
+    let etsyExternalId: string | undefined;
     try {
       // Real path — never exercised in this environment (the flag above is
       // always false here). Any failure here (auth, validation, network)
@@ -1031,15 +1157,64 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
       // here that could diverge from that guarantee.
       const adapter = await getAuthenticatedAdapter(workspaceId, 'etsy');
       const result = await adapter.createListing(payload as any);
+      etsyExternalId = result.externalId;
       const finalListing = await markListingSynced(reserveResult.listing.id, result.externalId);
+
+      // AI-first listing workflow — Etsy images. The real listing already
+      // exists and is already durably recorded as 'synced' above (with its
+      // real externalId) BEFORE any image upload is attempted, so an image
+      // failure here can never cause a real, successfully-created Etsy
+      // listing to look unpublished or trigger a duplicate create on
+      // retry. validateEtsyDraft already guaranteed at least one usable
+      // image before this point was ever reached (both preview() and
+      // handler() call it first) — usableDraftImages(draft) here re-reads
+      // the exact same real/generated/non-excluded set, in the exact same
+      // order (source images first, generated appended, matching
+      // mapDraftToEbayInput's own convention) — rank 1 = Etsy's primary
+      // image. Best-effort per image, same pattern as create_product's own
+      // image attachment: one failed upload is logged and reported, never
+      // thrown (never re-triggers markListingFailed for an already-real,
+      // already-synced listing).
+      const usableImages = usableDraftImages(draft);
+      let imagesAttached = 0;
+      const imageUploadFailures: string[] = [];
+      if (result.externalId) {
+        const uploadCapableAdapter = adapter as unknown as EtsyImageUploadCapableAdapter;
+        for (let i = 0; i < usableImages.length; i++) {
+          const rank = i + 1;
+          try {
+            const downloaded = await downloadImageForEtsyUpload(usableImages[i]);
+            await uploadCapableAdapter.uploadListingImage(result.externalId, {
+              data: downloaded.data,
+              filename: `image-${rank}.${CONTENT_TYPE_EXTENSION[downloaded.contentType] ?? 'jpg'}`,
+              contentType: downloaded.contentType,
+              rank,
+            });
+            imagesAttached++;
+          } catch (imageError) {
+            logger.error(`Etsy image upload failed for listing ${result.externalId} (rank ${rank})`, imageError instanceof Error ? imageError : String(imageError), {
+              workspaceId,
+            });
+            imageUploadFailures.push(`Image ${rank}`);
+          }
+        }
+      }
+
       return {
         published: true,
         listingId: finalListing.id,
         externalId: result.externalId,
         status: result.status,
+        imagesAttached,
+        imagesTotal: usableImages.length,
+        ...(imageUploadFailures.length > 0
+          ? {
+              imageUploadWarning: `${imageUploadFailures.length} of ${usableImages.length} image(s) could not be uploaded to Etsy (${imageUploadFailures.join(', ')}). The listing itself was published successfully and can be edited on Etsy directly to add them.`,
+            }
+          : {}),
       };
     } catch (error) {
-      await markListingFailed(reserveResult.listing.id, 'Etsy');
+      await handlePublishFailure(reserveResult.listing.id, 'Etsy', etsyExternalId);
       throw error;
     }
   },

@@ -48,6 +48,7 @@ function formatProductForAgent(
     category: product.category ?? null,
     size: product.size ?? null,
     color: product.color ?? null,
+    model: product.model ?? null,
     condition: product.condition,
     purchasePrice: product.purchasePrice,
     sellingPrice: product.sellingPrice,
@@ -87,7 +88,7 @@ export const getProductTool: AgentToolDefinition<{ productId: string }> = {
   name: 'get_product',
   description:
     "Look up a single existing product belonging to the reseller's own workspace by its ADKSY product id, to answer factual questions about it " +
-    '(purchase cost, selling price, stock/inventory, SKU, brand, category, size, color, condition, package dimensions, and which listings/marketplaces it is published on). ' +
+    '(purchase cost, selling price, stock/inventory, SKU, brand, category, size, color, model, condition, package dimensions, and which listings/marketplaces it is published on). ' +
     'Read-only — never modifies anything, never calls a marketplace, never requires confirmation. ' +
     "Returns only fields that are actually stored in ADKSY — absent data comes back as null, never guessed or invented. " +
     'declaredQuantity (Product\'s own quantity column) is NOT the live stock figure — use `inventory.available`/`inventory.reserved` for that when present; ' +

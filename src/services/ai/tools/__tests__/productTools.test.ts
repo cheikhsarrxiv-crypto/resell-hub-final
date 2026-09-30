@@ -46,6 +46,7 @@ function makeProduct(overrides: Record<string, any> = {}) {
     category: 'Sneakers',
     size: '42',
     color: 'White',
+    model: 'Cut Out',
     condition: 'like-new',
     purchasePrice: 200,
     sellingPrice: 449,
@@ -115,6 +116,7 @@ describe('get_product tool definition', () => {
       category: 'Sneakers',
       size: '42',
       color: 'White',
+      model: 'Cut Out',
       condition: 'like-new',
       purchasePrice: 200,
       sellingPrice: 449,
@@ -150,6 +152,19 @@ describe('get_product tool definition', () => {
     expect(getProductMock).toHaveBeenCalledWith('product-1', 'ws-B');
   });
 
+  it('AI-first listing workflow fix (model field): model is workspace-scoped exactly like every other product field — never leaked across workspaces', async () => {
+    getProductMock.mockImplementation(async (productId: string, workspaceId: string) => {
+      if (workspaceId !== 'ws-A') return null;
+      return makeProduct({ workspaceId: 'ws-A', model: 'Air Force 1' });
+    });
+
+    const ownWorkspace: any = await getProductTool.handler('ws-A', { productId: 'product-1' });
+    const otherWorkspace: any = await getProductTool.handler('ws-B', { productId: 'product-1' });
+
+    expect(ownWorkspace.product.model).toBe('Air Force 1');
+    expect(otherWorkspace).toEqual({ found: false });
+  });
+
   it('the listings lookup is scoped by BOTH productId and workspaceId, never productId alone', async () => {
     getProductMock.mockResolvedValue(makeProduct());
     inventoryFindUniqueMock.mockResolvedValue(null);
@@ -170,6 +185,7 @@ describe('get_product tool definition', () => {
         category: null,
         size: null,
         color: null,
+        model: null,
         location: null,
         weightGrams: null,
         lengthCm: null,
@@ -188,6 +204,7 @@ describe('get_product tool definition', () => {
     expect(result.product.category).toBeNull();
     expect(result.product.size).toBeNull();
     expect(result.product.color).toBeNull();
+    expect(result.product.model).toBeNull();
     expect(result.product.location).toBeNull();
     expect(result.product.shipping).toBeNull();
     expect(result.product.inventory).toBeNull();
