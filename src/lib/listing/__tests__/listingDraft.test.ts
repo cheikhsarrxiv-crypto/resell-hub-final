@@ -328,6 +328,36 @@ describe('validateEtsyDraft', () => {
     expect(result.ready).toBe(false);
     expect(result.missingFields).toEqual(['etsyWhenMade']);
   });
+
+  it('Etsy images fix: zero usable images is a real, blocking error — never allowed to publish photo-less', () => {
+    const draft = baseDraft({ etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' }, { images: [] });
+    const result = validateEtsyDraft(draft);
+    expect(result.ready).toBe(false);
+    expect(result.errors.some((e) => /image/i.test(e))).toBe(true);
+    expect(result.missingFields).toContain('images');
+  });
+
+  it('Etsy images fix: every source image excluded also blocks readiness, even though source.images is non-empty', () => {
+    const draft = setImageExcluded(
+      baseDraft({ etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' }, { images: ['https://img.example/1.jpg'] }),
+      'https://img.example/1.jpg',
+      true
+    );
+    const result = validateEtsyDraft(draft);
+    expect(result.ready).toBe(false);
+    expect(result.missingFields).toContain('images');
+  });
+
+  it('Etsy images fix: a generated image alone (no source image) satisfies the requirement', () => {
+    const generatedImage = { url: 'https://x.example/gen.png', provider: 'openai', model: 'dall-e-3', prompt: 'p', generatedAt: 't' };
+    const draft = {
+      ...baseDraft({ etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' }, { images: [] }),
+      generatedImages: [generatedImage],
+    };
+    const result = validateEtsyDraft(draft);
+    expect(result.ready).toBe(true);
+    expect(result.missingFields).not.toContain('images');
+  });
 });
 
 describe('mapDraftToEtsyInput', () => {

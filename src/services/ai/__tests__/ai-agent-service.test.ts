@@ -70,6 +70,20 @@ vi.mock('@/services/ai/AiUsageService', () => ({
   },
 }));
 
+// P7 (missing-tests audit) — generate_listing_draft_image's own real
+// provider call (a paid, external one) must never happen once
+// AiUsageService.reserveUsage rejects the reservation — the same generic
+// gate already proven for get_order below, exercised here for this
+// specific tool because it is the one 'write' tool whose handler would
+// otherwise make a real, billed external call and fabricate image data if
+// the gate were ever bypassed.
+const generateImageMock = vi.fn();
+vi.mock('@/services/imagegen/ImageGenerationProviderRegistry', () => ({
+  ImageGenerationProviderRegistry: {
+    getConfiguredProviders: vi.fn(() => [{ name: 'test-provider', generate: generateImageMock }]),
+  },
+}));
+
 import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '@/lib/prisma';
 import { AiAgentService } from '@/services/ai/AiAgentService';
@@ -499,6 +513,41 @@ describe('AiAgentService — AiUsageService reserve/finalize/release wiring (rac
 
     expect((turn.toolCalls[0].result as any).error).toMatch(/quota/i);
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
+    expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+    expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+  });
+
+  it('P7 (missing-tests audit) — AI Units exhausted during generate_listing_draft_image: reservation REJECTED -> the real, paid image provider is NEVER called, no image is fabricated or appended to the draft', async () => {
+    prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+    const existingDraft = {
+      source: {
+        sourceItemId: 'https://source.example/item-1',
+        sourceMarketplace: 'ebay',
+        sourceUrl: 'https://source.example/item-1',
+        title: 'Prada Cut Out Sneakers',
+        images: ['https://img.example/source-1.jpg'],
+        price: 200,
+        currency: 'EUR',
+        authenticityStatus: 'unverified',
+      },
+      fields: { title: 'Prada Cut Out Sneakers', description: 'A real description.', currency: 'EUR', quantity: 1 },
+      generatedFieldKeys: [],
+      editedFieldKeys: [],
+      originalValues: {},
+    };
+    prismaMock.agentMessage.findMany.mockResolvedValue([
+      { id: 'm1', conversationId: 'conv-1', role: 'assistant', content: JSON.stringify([{ type: 'tool_use', id: 'tu-draft-1', name: 'generate_listing_draft', input: { sourceUrl: existingDraft.source.sourceUrl } }]), createdAt: new Date('2026-01-01T00:00:00Z') },
+      { id: 'm2', conversationId: 'conv-1', role: 'tool_result', content: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu-draft-1', content: JSON.stringify({ draft: existingDraft }) }]), createdAt: new Date('2026-01-01T00:00:01Z') },
+    ]);
+    (AiUsageService.reserveUsage as any).mockResolvedValueOnce({ status: 'REJECTED', eventId: 'evt-img-1', units: 3, reason: 'quota_exceeded' });
+    createMock
+      .mockResolvedValueOnce(toolUseResponse('generate_listing_draft_image', { sourceUrl: existingDraft.source.sourceUrl }))
+      .mockResolvedValueOnce(textOnlyResponse('Quota exceeded.'));
+
+    const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'generate an extra photo', 'conv-1');
+
+    expect((turn.toolCalls[0].result as any).error).toMatch(/quota/i);
+    expect(generateImageMock).not.toHaveBeenCalled(); // no real, billed provider call
     expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
     expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
   });

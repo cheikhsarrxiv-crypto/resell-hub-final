@@ -28,6 +28,14 @@ export function NotificationBell() {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Notification UX fix: a failed fetch must still never disrupt the rest
+  // of the dashboard (no throw, no toast, no polling/retry loop) — but it
+  // must also never be completely invisible. `error` only ever changes
+  // what the OPEN panel itself shows (see below), and only when there is
+  // nothing already loaded to show instead: an already-populated list from
+  // a previous successful fetch is left exactly as it was on a later
+  // failed background refresh, never replaced by an error state.
+  const [error, setError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const fetchNotifications = async () => {
@@ -38,9 +46,12 @@ export function NotificationBell() {
       if (data.success) {
         setNotifications(data.notifications);
         setUnreadCount(data.unreadCount);
+        setError(false);
+      } else {
+        setError(true);
       }
     } catch {
-      // Silent — a failed notification fetch must never disrupt the rest of the dashboard.
+      setError(true);
     } finally {
       setLoading(false);
     }
@@ -129,6 +140,17 @@ export function NotificationBell() {
 
           {loading && notifications.length === 0 ? (
             <p className="px-4 py-6 text-sm text-gray-500 text-center">Chargement…</p>
+          ) : error && notifications.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-sm text-gray-500">Impossible de charger les notifications.</p>
+              <button
+                type="button"
+                onClick={fetchNotifications}
+                className="mt-2 text-xs text-[#FF5A1F] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60 rounded"
+              >
+                Réessayer
+              </button>
+            </div>
           ) : notifications.length === 0 ? (
             <p className="px-4 py-6 text-sm text-gray-500 text-center">Aucune notification pour le moment.</p>
           ) : (

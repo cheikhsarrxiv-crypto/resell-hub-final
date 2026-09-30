@@ -73,6 +73,7 @@ function formatListingForAgent(
     category: product.category ?? null,
     size: product.size ?? null,
     color: product.color ?? null,
+    model: product.model ?? null,
     condition: product.condition ?? null,
     images: (product.images ?? [])
       .slice()

@@ -163,6 +163,19 @@ model Product {
   category    String?
   size        String?
   color       String?
+  // AI-first listing workflow fix — was captured on ListingDraft.fields.model
+  // (edit-only, same rule as size/color: no source equivalent, never
+  // guessed) but had no home on Product at all, so it was silently lost
+  // between create_product and here. Nullable: every product created
+  // before this column existed has none, and that stays a perfectly valid,
+  // ordinary state — never backfilled or inferred. Not sent to eBay/Etsy
+  // today — same as size/color/material, neither adapter's real
+  // createListing payload has a slot for any of these (eBay's only
+  // equivalent is Item Specifics/aspects, which this codebase has never
+  // implemented for ANY attribute, not even the already-real Brand; adding
+  // it only for `model` would be a new, unrequested capability, not a wire-up
+  // of an existing one — see actionTools.ts's own comment on this same point).
+  model       String?
   condition   String  @default("used") // new, like-new, good, fair, used
 
   purchasePrice   Float @default(0)

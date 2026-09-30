@@ -328,6 +328,18 @@ describe('ProductService.createProduct — unchanged behavior (TEST E)', () => {
     expect(stored.sellingPrice).toBe(250);
     expect(stored.fulfillmentCost).toBe(12);
   });
+
+  it('AI-first listing workflow fix (model field): model present is persisted exactly as given', async () => {
+    const product = await ProductService.createProduct('ws-1', baseInput({ sku: 'SKU-MODEL-1', model: 'Air Force 1' }));
+    expect(productStore.get(product.id).model).toBe('Air Force 1');
+  });
+
+  it('AI-first listing workflow fix (model field): model absent is never fabricated — stays undefined/null, never guessed', async () => {
+    const input = baseInput({ sku: 'SKU-MODEL-2' });
+    delete (input as any).model;
+    const product = await ProductService.createProduct('ws-1', input);
+    expect(productStore.get(product.id).model == null).toBe(true);
+  });
 });
 
 describe('ProductService.createProduct — source provenance (Option A)', () => {

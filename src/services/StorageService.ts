@@ -14,8 +14,12 @@ const supabase = supabaseUrl && supabaseKey
   : null;
 
 const BUCKET_NAME = 'product-images';
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+// Exported so other places that download/validate an image's bytes before
+// handing them to a third party (e.g. EtsyAdapter.uploadListingImage's own
+// caller in actionTools.ts) reuse the exact same rule — never a second,
+// independently-drifting size/format list.
+export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+export const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 export interface UploadImageData {
   workspaceId: string;

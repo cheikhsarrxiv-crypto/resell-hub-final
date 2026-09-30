@@ -388,6 +388,18 @@ export function validateEtsyDraft(draft: ListingDraft): MarketplaceListingValida
     errors.push('No Etsy "who made" value set — required by Etsy, never guessed. Select one manually before this draft can be ready for Etsy.');
     missingFields.push('etsyWhoMade');
   }
+  // AI-first listing workflow (Etsy images audit finding) — unlike eBay
+  // (where missing images are only a warning, since eBay's own API never
+  // required them for this draft's supported categories), Etsy's real
+  // publish path now genuinely uploads images as a separate step after
+  // creation (see publish_etsy_listing's handler) — a listing with zero
+  // usable images would publish looking broken/unsellable. This is a hard
+  // requirement, checked BEFORE any API call, exactly like every other
+  // required Etsy field above — never guessed, never defaulted.
+  if (usableDraftImages(draft).length === 0) {
+    errors.push('No usable image available for Etsy — at least one real or generated, non-excluded image is required before this draft can be ready for Etsy.');
+    missingFields.push('images');
+  }
 
   const authWarning = authenticityWarning(draft.source);
   if (authWarning) warnings.push(authWarning);
@@ -400,12 +412,21 @@ export function validateEtsyDraft(draft: ListingDraft): MarketplaceListingValida
  * truth for "what would actually be sent to Etsy": builds the real
  * MarketplaceListingInput object EtsyAdapter.createListing expects, from
  * this exact draft. Deliberately a different shape than the eBay mapper —
- * EtsyAdapter.createListing never reads currency/condition/images/category
- * at all (see that adapter's own createListing body: only
- * quantity/title/description/price/who_made/when_made/taxonomy_id/sku),
- * so none of those are included here. Returns null when the draft isn't
- * ready — never a partially-fabricated payload with invented values for
- * the missing fields.
+ * EtsyAdapter.createListing never reads currency/condition/category at all
+ * (see that adapter's own createListing body: only
+ * quantity/title/description/price/who_made/when_made/taxonomy_id/sku), so
+ * none of those are included here. Images are deliberately ALSO excluded
+ * from this payload — not because Etsy doesn't support them, but because
+ * Etsy's real API only accepts images via a SEPARATE call after the
+ * listing already exists (POST .../listings/{listing_id}/images, one
+ * multipart upload per image — see EtsyAdapter.uploadListingImage) —
+ * there is no combined "create with images" request to build a payload
+ * for. publish_etsy_listing's own handler calls usableDraftImages(draft)
+ * directly and uploads them once createListing has returned a real
+ * listing_id (see actionTools.ts). validateEtsyDraft above still requires
+ * at least one usable image before `ready` is ever true. Returns null when
+ * the draft isn't ready — never a partially-fabricated payload with
+ * invented values for the missing fields.
  */
 export function mapDraftToEtsyInput(draft: ListingDraft): Record<string, unknown> | null {
   const validation = validateEtsyDraft(draft);
