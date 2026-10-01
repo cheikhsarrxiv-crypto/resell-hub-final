@@ -611,7 +611,22 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
       // product is already real and committed) — logged, not thrown.
       let attachedImages = 0;
       const draftForImages = await findLatestDraft(context.conversationId, input.sourceUrl, workspaceId);
-      const generatedImages = draftForImages?.generatedImages ?? [];
+      // Data-loss fix (excludedImageUrls ignored by create_product): the
+      // SAME usableDraftImages(draft) the publish tools already rely on
+      // (mapDraftToEbayInput/the Etsy upload loop) is now the single
+      // source of truth here too — an image the reseller excluded via
+      // edit_listing_draft's excludeImageUrls must never reappear on the
+      // Product just because create_product re-read the raw
+      // search_products result / the draft's own unfiltered
+      // generatedImages array instead. No draft at all (create_product
+      // called without ever generating one) means no exclusion concept
+      // exists yet — every real image is kept, exactly the prior
+      // behavior, never narrowed on a guess.
+      const usableImageUrls = draftForImages ? new Set(usableDraftImages(draftForImages)) : null;
+      const realImageUrls = usableImageUrls ? sourced.images.filter((url) => usableImageUrls.has(url)) : sourced.images;
+      const generatedImages = (draftForImages?.generatedImages ?? []).filter(
+        (image) => !usableImageUrls || usableImageUrls.has(image.url)
+      );
       // AI-first listing workflow — an image-generation provider's own url
       // (e.g. OpenAI's dall-e-3 output) is only temporary (~1h, see
       // OpenAIImageGenerationProvider's own doc comment), so it is
@@ -637,7 +652,7 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
         })
       );
       const imageRows = [
-        ...sourced.images.map((imageUrl) => ({
+        ...realImageUrls.map((imageUrl) => ({
           url: imageUrl,
           mimeType: 'image/jpeg',
           sourceType: 'REAL' as const,
