@@ -909,6 +909,135 @@ describe('create_product tool definition', () => {
       expect(result.attachedImages).toBe(0);
     });
   });
+
+  // P1 fix (excludedImageUrls ignored by create_product) — ListingDraft ->
+  // excludedImageUrls -> usableDraftImages(...) -> create_product ->
+  // ProductImage must now be the real, single data path: an image the
+  // reseller excluded in the draft must never be attached to the Product,
+  // for REAL images, GENERATED images, or a mix of both.
+  describe('handler() — excludedImageUrls respected (P1 fix: usableDraftImages is now the single source of truth)', () => {
+    const REAL_A = 'https://img.example/real-a.jpg';
+    const REAL_B = 'https://img.example/real-b.jpg';
+    const GENERATED_C = { url: 'https://oaidalleapi.example/gen-c.png', provider: 'openai', model: 'dall-e-3', prompt: 'c', generatedAt: '2026-01-01T00:00:00.000Z' };
+    const GENERATED_D = { url: 'https://oaidalleapi.example/gen-d.png', provider: 'openai', model: 'dall-e-3', prompt: 'd', generatedAt: '2026-01-01T00:00:00.000Z' };
+
+    function pushHandBuiltDraft(conversationId: string, overrides: { images: string[]; generatedImages?: any[]; excludedImageUrls?: string[] }) {
+      const draft = {
+        source: {
+          sourceItemId: sourcedItem.sourceUrl,
+          sourceMarketplace: 'ebay',
+          sourceUrl: sourcedItem.sourceUrl,
+          title: sourcedItem.title,
+          images: overrides.images,
+          price: 380,
+          currency: 'GBP',
+          authenticityStatus: 'claimed',
+        },
+        fields: { title: sourcedItem.title, description: 'd', currency: 'GBP', quantity: 1 },
+        generatedFieldKeys: [],
+        editedFieldKeys: [],
+        originalValues: {},
+        generatedImages: overrides.generatedImages ?? [],
+        excludedImageUrls: overrides.excludedImageUrls ?? [],
+      };
+      pushToolCall(conversationId, 'tu-draft', 'generate_listing_draft', { sourceUrl: sourcedItem.sourceUrl }, {
+        draft,
+        marketplaceValidation: { ebay: { ready: false, errors: [], warnings: [], missingFields: [] }, etsy: { ready: false, errors: [], warnings: [], missingFields: [] } },
+      });
+    }
+
+    beforeEach(() => {
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+    });
+
+    it('TEST 1 — a REAL image excluded in the draft is never attached, only the non-excluded one is', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [REAL_A, REAL_B] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [REAL_A, REAL_B], excludedImageUrls: [REAL_A] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(1);
+      expect(productImageRows).toHaveLength(1);
+      expect(productImageRows[0]).toMatchObject({ url: REAL_B, sourceType: 'REAL' });
+      expect(productImageRows.some((r) => r.url === REAL_A)).toBe(false);
+    });
+
+    it('TEST 2 — a GENERATED image excluded in the draft is never attached, only the non-excluded one is', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [], generatedImages: [GENERATED_C, GENERATED_D], excludedImageUrls: [GENERATED_C.url] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(1);
+      expect(productImageRows).toHaveLength(1);
+      expect(productImageRows[0]).toMatchObject({ url: GENERATED_D.url, sourceType: 'GENERATED' });
+      expect(productImageRows.some((r) => r.url === GENERATED_C.url)).toBe(false);
+    });
+
+    it('TEST 3 — mix of REAL + GENERATED: only the non-excluded ones of each kind are attached, with correct sourceType/metadata', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [REAL_A, REAL_B] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [REAL_A, REAL_B], generatedImages: [GENERATED_C, GENERATED_D], excludedImageUrls: [REAL_A, GENERATED_D.url] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(2);
+      expect(productImageRows).toHaveLength(2);
+      const real = productImageRows.find((r) => r.sourceType === 'REAL');
+      const generated = productImageRows.find((r) => r.sourceType === 'GENERATED');
+      expect(real).toMatchObject({ url: REAL_B, sourceType: 'REAL', sourceUrl: REAL_B });
+      expect(generated).toMatchObject({ url: GENERATED_C.url, sourceType: 'GENERATED', sourceUrl: null });
+      expect(JSON.parse(generated.generationMetadata)).toMatchObject({ provider: 'openai', model: 'dall-e-3', prompt: 'c' });
+      expect(productImageRows.some((r) => r.url === REAL_A)).toBe(false);
+      expect(productImageRows.some((r) => r.url === GENERATED_D.url)).toBe(false);
+    });
+
+    it('TEST 4 — no exclusion at all: every usable image (REAL + GENERATED) is attached, exactly as before this fix', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [REAL_A, REAL_B] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [REAL_A, REAL_B], generatedImages: [GENERATED_C, GENERATED_D], excludedImageUrls: [] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(4);
+      expect(productImageRows).toHaveLength(4);
+      expect(productImageRows.filter((r) => r.sourceType === 'REAL').map((r) => r.url).sort()).toEqual([REAL_A, REAL_B].sort());
+      expect(productImageRows.filter((r) => r.sourceType === 'GENERATED').map((r) => r.url).sort()).toEqual([GENERATED_C.url, GENERATED_D.url].sort());
+    });
+
+    it('TEST 5 — excludedImageUrls naming a URL that is not actually part of this draft never removes a real image', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [REAL_A, REAL_B] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [REAL_A, REAL_B], excludedImageUrls: ['https://nonexistent.example/ghost.jpg'] });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(2);
+      expect(productImageRows.map((r) => r.url).sort()).toEqual([REAL_A, REAL_B].sort());
+    });
+
+    it('TEST 6 — multi-tenant: workspace B can never read workspace A\'s draft/images to attach them to its own product', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [{ ...sourcedItem, images: [REAL_A, REAL_B] }], providerErrors: [] });
+      pushHandBuiltDraft('conv-1', { images: [REAL_A, REAL_B], excludedImageUrls: [REAL_A] });
+
+      // Scopes the conversation to ws-1 ONLY for this one test — the
+      // file-wide default mock (agentConversation.findFirst always
+      // resolving regardless of workspaceId) exists specifically so
+      // cross-workspace ownership isn't this file's concern (see that
+      // mock's own comment) EXCEPT here, where it is exactly the point:
+      // findMatchingSourcingResult/findLatestDraft both gate on this same
+      // real call (findToolResultsByName -> prisma.agentConversation.findFirst({id, workspaceId})),
+      // so overriding it to behave like the real, workspace-scoped
+      // production check proves ws-2 can never reach ws-1's images.
+      const { prisma } = await import('@/lib/prisma');
+      (prisma.agentConversation.findFirst as any).mockImplementationOnce(
+        async ({ where }: any) => (where.workspaceId === 'ws-1' ? { id: where.id } : null)
+      );
+
+      const result: any = await createProductTool.handler('ws-2', validInput, { conversationId: 'conv-1', userId: 'user-2' });
+
+      expect(result.error).toMatch(/does not match a real search_products result/i);
+      expect(createProductMock).not.toHaveBeenCalled();
+      expect(productImageRows).toHaveLength(0);
+    });
+  });
 });
 
 describe('publish_listing tool definition (Phase 12C-Offline)', () => {
