@@ -15,11 +15,36 @@
  * normalization), never done implicitly here.
  */
 
-/** What the caller passes in — free-text only, no structured filters. A provider receives exactly this text; nothing here interprets or rewrites it. */
+/**
+ * What the caller passes in — free-text query plus a small set of REAL
+ * Tavily request parameters (Deep Web Sourcing Engine). All optional and
+ * passed through unchanged; a provider that doesn't support one of these
+ * simply ignores it rather than guessing an equivalent. None of these
+ * interpret or rewrite `query` itself.
+ */
 export interface WebSearchQuery {
   query: string;
   /** Max results requested. Providers may return fewer; never more than what they actually found. */
   maxResults?: number;
+  /**
+   * Tavily's own `search_depth` ('basic' | 'advanced') — 'advanced' costs
+   * more and returns deeper/more relevant coverage per Tavily's own docs.
+   * Omitted means the provider's own default (Tavily: 'basic'). Never set
+   * to 'advanced' automatically by this type itself — that decision
+   * belongs to the caller (see WebSearchQueryPlanner), which only escalates
+   * when a cheaper pass already proved insufficient.
+   */
+  searchDepth?: 'basic' | 'advanced';
+  /** Tavily's own `topic` ('general' | 'news') — omitted means Tavily's own default ('general'). */
+  topic?: 'general' | 'news';
+  /** Tavily's own `time_range` (e.g. 'day' | 'week' | 'month' | 'year') — omitted means no time restriction. */
+  timeRange?: string;
+  /** Tavily's own `include_domains` — real domains only, never a fabricated list; omitted means no restriction. */
+  includeDomains?: string[];
+  /** Tavily's own `exclude_domains`. */
+  excludeDomains?: string[];
+  /** Tavily's own `country` (boosts results from a given country) — a real ISO country code, never guessed from `query`. */
+  country?: string;
 }
 
 /**

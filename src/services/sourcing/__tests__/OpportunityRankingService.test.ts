@@ -4,7 +4,7 @@
  * comparator. Pure functions, no mocking needed.
  */
 import { describe, it, expect } from 'vitest';
-import { annotateResult, compareByMatch } from '@/services/sourcing/OpportunityRankingService';
+import { annotateResult, compareByMatch, classifyResultQuality, computeOpportunityScore, detectPriceConflict } from '@/services/sourcing/OpportunityRankingService';
 import { NormalizedSourcingResult, NormalizedSearchQuery } from '@/services/sourcing/types';
 
 function makeResult(overrides: Partial<NormalizedSourcingResult> = {}): NormalizedSourcingResult {
@@ -136,6 +136,23 @@ describe('annotateResult — Global Web Sourcing generic-web-result warning', ()
     const etsyWarnings = annotateResult(makeResult({ source: 'etsy' }), { query: 'x' }, noBounds).warnings;
     expect(ebayWarnings.some((w) => /general web search/i.test(w))).toBe(false);
     expect(etsyWarnings.some((w) => /general web search/i.test(w))).toBe(false);
+  });
+});
+
+describe('annotateResult — Global Web Sourcing multi-offer provenance warning (Option A)', () => {
+  it("TEST L — a result from a shared, multi-offer source page (sharedSourcePage: true) gets an explicit warning that the source link may open the general page, not this specific offer", () => {
+    const { warnings } = annotateResult(makeResult({ source: 'web', sharedSourcePage: true }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /listing several offers/i.test(w))).toBe(true);
+  });
+
+  it('TEST M — a result from an individual product page (sharedSourcePage not set) never gets the multi-offer provenance warning', () => {
+    const { warnings } = annotateResult(makeResult({ source: 'web' }), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /listing several offers/i.test(w))).toBe(false);
+  });
+
+  it('the multi-offer provenance warning is never attached to a non-web source, even if sharedSourcePage were somehow set on it', () => {
+    const { warnings } = annotateResult(makeResult({ source: 'ebay', sharedSourcePage: true } as any), { query: 'x' }, noBounds);
+    expect(warnings.some((w) => /listing several offers/i.test(w))).toBe(false);
   });
 });
 
@@ -279,5 +296,120 @@ describe('compareByMatch — deterministic, documented, multi-key', () => {
     ];
     const sorted = [...results].sort(compareByMatch);
     expect(sorted.map((r) => r.title)).toEqual(['A', 'B', 'C']);
+  });
+});
+
+describe('classifyResultQuality (Deep Web Sourcing Engine)', () => {
+  it('HIGH: availability known, condition known, and seller reputation known', () => {
+    const result = makeResult({ availability: 'IN_STOCK', condition: 'used', seller: { name: 'shop', feedbackPercentage: 98 } });
+    expect(classifyResultQuality(result)).toBe('HIGH');
+  });
+
+  it('HIGH: availability known, condition known, and authenticity institutionally verified (seller reputation not required when authenticity evidence exists)', () => {
+    const result = makeResult({ availability: 'IN_STOCK', condition: 'new', authenticityStatus: 'verified', authenticitySource: 'eBay Authenticity Guarantee' });
+    expect(classifyResultQuality(result)).toBe('HIGH');
+  });
+
+  it('MEDIUM: only availability known, no condition, no seller/authenticity evidence', () => {
+    const result = makeResult({ availability: 'IN_STOCK', authenticityStatus: 'unverified' });
+    expect(classifyResultQuality(result)).toBe('MEDIUM');
+  });
+
+  it('MEDIUM: only condition known, no availability', () => {
+    const result = makeResult({ condition: 'used', authenticityStatus: 'unverified' });
+    expect(classifyResultQuality(result)).toBe('MEDIUM');
+  });
+
+  it('LOW: neither availability nor condition known, no seller/authenticity evidence — a bare price', () => {
+    const result = makeResult({ authenticityStatus: 'unverified' });
+    expect(classifyResultQuality(result)).toBe('LOW');
+  });
+
+  it('never upgrades a result just because authenticityStatus is "claimed" without availability/condition also known', () => {
+    const result = makeResult({ authenticityStatus: 'claimed', authenticitySource: '100% authentic' });
+    expect(classifyResultQuality(result)).toBe('LOW');
+  });
+});
+
+describe('computeOpportunityScore (Deep Web Sourcing Engine)', () => {
+  it('a bare result with none of the bonus signals scores 0, with no factors listed', () => {
+    const result = makeResult({ authenticityStatus: 'unverified' });
+    const { score, factors } = computeOpportunityScore(result);
+    expect(score).toBe(0);
+    expect(factors).toEqual([]);
+  });
+
+  it('every real, documented signal adds up transparently, each named in factors', () => {
+    const result = makeResult({
+      estimatedMargin: 50,
+      estimatedMarginPercent: 20,
+      estimatedKnownCostEur: 200,
+      shippingCost: 5,
+      shippingCostCurrency: 'EUR',
+      availability: 'IN_STOCK',
+      condition: 'used',
+      authenticityStatus: 'verified',
+      authenticitySource: 'eBay Authenticity Guarantee',
+      seller: { name: 'shop', feedbackPercentage: 99 },
+    });
+    const { score, factors } = computeOpportunityScore(result);
+    // 25 (margin) + 15 (landed cost) + 10 (shipping) + 10 (in stock) + 15 (verified) + 15 (HIGH quality) = 90
+    expect(score).toBe(90);
+    expect(factors.length).toBe(6);
+    expect(factors.some((f) => f.includes('Margin preview available'))).toBe(true);
+  });
+
+  it('is never negative and never exceeds 100, even in extreme cases', () => {
+    const lowResult = makeResult({ availability: 'OUT_OF_STOCK', authenticityStatus: 'unverified', unknownCostFactors: ['shipping_unknown', 'currency_conversion_unavailable'] });
+    expect(computeOpportunityScore(lowResult).score).toBeGreaterThanOrEqual(0);
+
+    const highResult = makeResult({
+      estimatedMargin: 999,
+      estimatedMarginPercent: 999,
+      estimatedKnownCostEur: 1,
+      shippingCost: 0,
+      shippingCostCurrency: 'EUR',
+      availability: 'IN_STOCK',
+      condition: 'new',
+      authenticityStatus: 'verified',
+      seller: { name: 'shop', feedbackPercentage: 100 },
+    });
+    expect(computeOpportunityScore(highResult).score).toBeLessThanOrEqual(100);
+  });
+
+  it('reporting OUT_OF_STOCK is a real penalty, never scored the same as unknown availability', () => {
+    // Both start from the same non-zero baseline (margin known) so the
+    // penalty's effect is visible rather than clamped to the same 0 floor.
+    const base = { estimatedMargin: 50, estimatedMarginPercent: 20, authenticityStatus: 'unverified' as const };
+    const outOfStock = makeResult({ ...base, availability: 'OUT_OF_STOCK' });
+    const unknown = makeResult(base);
+    expect(computeOpportunityScore(outOfStock).score).toBeLessThan(computeOpportunityScore(unknown).score);
+    expect(computeOpportunityScore(outOfStock).factors.some((f) => f.includes('Reported out of stock (-20)'))).toBe(true);
+  });
+
+  it('each unresolved cost factor is a real, named penalty', () => {
+    const result = makeResult({ authenticityStatus: 'unverified', unknownCostFactors: ['shipping_unknown', 'currency_conversion_unavailable'] });
+    const { factors } = computeOpportunityScore(result);
+    expect(factors.some((f) => f.includes('2 unresolved cost factor'))).toBe(true);
+  });
+});
+
+describe('detectPriceConflict (Deep Web Sourcing Engine)', () => {
+  it('the same price and currency -> not conflicting', () => {
+    const a = makeResult({ price: 220, currency: 'EUR' });
+    const b = makeResult({ price: 220, currency: 'eur' }); // case-insensitive currency compare
+    expect(detectPriceConflict(a, b)).toEqual({ conflicting: false });
+  });
+
+  it('different prices for what would otherwise dedup to the same offer -> conflicting, names both prices, never picks one arbitrarily', () => {
+    const a = makeResult({ price: 34, currency: 'EUR' });
+    const b = makeResult({ price: 41, currency: 'EUR' });
+    expect(detectPriceConflict(a, b)).toEqual({ conflicting: true, priceA: '34 EUR', priceB: '41 EUR' });
+  });
+
+  it('the same numeric price in different currencies -> still conflicting (never assumed equivalent)', () => {
+    const a = makeResult({ price: 50, currency: 'EUR' });
+    const b = makeResult({ price: 50, currency: 'USD' });
+    expect(detectPriceConflict(a, b)).toEqual({ conflicting: true, priceA: '50 EUR', priceB: '50 USD' });
   });
 });

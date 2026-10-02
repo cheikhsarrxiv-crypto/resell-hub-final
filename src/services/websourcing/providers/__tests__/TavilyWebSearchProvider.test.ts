@@ -116,7 +116,38 @@ describe('TavilyWebSearchProvider', () => {
       expect(url).toBe('https://api.tavily.com/search');
       expect(init.method).toBe('POST');
       expect(init.headers.Authorization).toBe(`Bearer ${FAKE_KEY}`);
+      // Deep Web Sourcing Engine's new optional request params are all
+      // omitted here — the request body must stay EXACTLY this shape,
+      // never growing extra keys just because the type now declares them.
       expect(JSON.parse(init.body)).toEqual({ query: 'Nike Tech Fleece black L', max_results: 5 });
+    });
+
+    it('Deep Web Sourcing Engine: sends search_depth/topic/time_range/include_domains/exclude_domains/country only when the caller actually sets them', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await new TavilyWebSearchProvider().search({
+        query: 'Nike Air Max used',
+        maxResults: 10,
+        searchDepth: 'advanced',
+        topic: 'general',
+        timeRange: 'month',
+        includeDomains: ['vinted.fr', 'depop.com'],
+        excludeDomains: ['pinterest.com'],
+        country: 'france',
+      });
+
+      const [, init] = fetchMock.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        query: 'Nike Air Max used',
+        max_results: 10,
+        search_depth: 'advanced',
+        topic: 'general',
+        time_range: 'month',
+        include_domains: ['vinted.fr', 'depop.com'],
+        exclude_domains: ['pinterest.com'],
+        country: 'france',
+      });
     });
   });
 

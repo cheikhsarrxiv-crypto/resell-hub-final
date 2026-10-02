@@ -131,6 +131,16 @@ export function annotateResult(
   // value — see WebSourcingProvider.ts's own header comment.
   if (result.source === 'web') {
     warnings.push('This result comes from a general web search (not a structured marketplace API) — details were extracted automatically and may be incomplete or inexact.');
+    // Multi-offer web extraction (Global Web Sourcing, Option A) — see
+    // NormalizedSourcingResult.sharedSourcePage's own comment for exactly
+    // when this is set. Must be attached here, not by WebSourcingProvider
+    // itself, for the same "warnings gets replaced wholesale" reason as
+    // the warning right above.
+    if (result.sharedSourcePage) {
+      warnings.push(
+        "This result's source link points to a page listing several offers (a category/search/brand page), not a direct link to this specific offer — opening it may show the general page rather than this exact item."
+      );
+    }
   }
 
   // --- Known-cost uncertainty ---
@@ -226,9 +236,130 @@ export function compareByMatch(a: NormalizedSourcingResult, b: NormalizedSourcin
   return a.normalizedPriceEur - b.normalizedPriceEur;
 }
 
+/**
+ * Deep Web Sourcing Engine (mission section 15) — a documented, testable
+ * tier. `price`/`currency`/`title`/`sourceUrl` are all already guaranteed
+ * present by construction for every NormalizedSourcingResult that exists
+ * at all (no provider ever builds one without a confident price —
+ * WebSourcingProvider drops a priceless offer before it ever reaches this
+ * type), so this tier's real differentiator is how much of the REST of
+ * the listing is actually known, never a guess layered on top of an
+ * uncertain price.
+ *
+ * HIGH: availability known AND condition known AND (seller reputation
+ *   known OR authenticity institutionally verified/claimed) — a
+ *   well-documented listing.
+ * MEDIUM: at least one of availability/condition is known, but not
+ *   enough for HIGH.
+ * LOW: neither availability nor condition is known, and there is no
+ *   seller/authenticity signal either — a bare price and little else.
+ */
+export function classifyResultQuality(result: NormalizedSourcingResult): 'HIGH' | 'MEDIUM' | 'LOW' {
+  const availabilityKnown = result.availability !== undefined;
+  const conditionKnown = result.condition !== undefined;
+  const sellerKnown = result.seller !== undefined && (result.seller.feedbackScore !== undefined || result.seller.feedbackPercentage !== undefined);
+  const authenticityEvidence = result.authenticityStatus === 'verified' || result.authenticityStatus === 'claimed';
+
+  if (availabilityKnown && conditionKnown && (sellerKnown || authenticityEvidence)) {
+    return 'HIGH';
+  }
+  if (availabilityKnown || conditionKnown) {
+    return 'MEDIUM';
+  }
+  return 'LOW';
+}
+
+/**
+ * Deep Web Sourcing Engine (mission section 14) — a transparent, additive
+ * point total (clamped to [0, 100]) built ONLY from signals already real
+ * on this result; never a claim of certain profitability.
+ *
+ * Deliberately NOT scored here (documented, not silently omitted):
+ * "concurrence" (competition) — no provider/field in this codebase
+ * reports how many other sellers list the same item; "fraîcheur du
+ * résultat" (result freshness) — WebSearchResult.publishedDate exists on
+ * the RAW web hit but is not threaded through to NormalizedSourcingResult
+ * today, and most hits report no publish date at all. Both would need a
+ * real signal this engine does not have; adding either now would mean
+ * guessing, which this mission's own rules forbid.
+ */
+export function computeOpportunityScore(result: NormalizedSourcingResult): { score: number; factors: string[] } {
+  let score = 0;
+  const factors: string[] = [];
+
+  const add = (points: number, label: string) => {
+    score += points;
+    factors.push(`${label} (${points >= 0 ? '+' : ''}${points})`);
+  };
+
+  if (result.estimatedMargin !== undefined && result.estimatedMarginPercent !== undefined) {
+    add(25, 'Margin preview available');
+  }
+  if (result.estimatedKnownCostEur !== undefined) {
+    add(15, 'Landed cost fully known');
+  }
+  if (result.shippingCost !== undefined) {
+    add(10, 'Shipping cost known');
+  }
+
+  if (result.availability === 'OUT_OF_STOCK') {
+    add(-20, 'Reported out of stock');
+  } else if (result.availability === 'IN_STOCK') {
+    add(10, 'Confirmed in stock');
+  }
+
+  if (result.authenticityStatus === 'verified') {
+    add(15, 'Authenticity institutionally verified');
+  } else if (result.authenticityStatus === 'claimed') {
+    add(5, "Authenticity claimed by the seller (not verified)");
+  }
+
+  const qualityTier = classifyResultQuality(result);
+  if (qualityTier === 'HIGH') {
+    add(15, 'High listing completeness');
+  } else if (qualityTier === 'MEDIUM') {
+    add(5, 'Partial listing completeness');
+  }
+
+  const missingCostFactors = result.unknownCostFactors?.length ?? 0;
+  if (missingCostFactors > 0) {
+    add(-5 * missingCostFactors, `${missingCostFactors} unresolved cost factor(s)`);
+  }
+
+  return { score: Math.max(0, Math.min(100, score)), factors };
+}
+
+/**
+ * Deep Web Sourcing Engine (mission section 13) — the ONE real
+ * cross-validation check this engine performs: two results that
+ * SourcingService.deduplicate() would otherwise treat as the exact same
+ * offer (same provider+sourceId, or same sourceUrl when sourceId is
+ * absent) but which report different prices. Returns the price
+ * discrepancy only when one genuinely exists; this is never a live
+ * re-fetch/second confirmation request — see NormalizedSourcingResult.
+ * verificationStatus's own comment for exactly what this does and does
+ * not mean.
+ */
+export function detectPriceConflict(
+  a: NormalizedSourcingResult,
+  b: NormalizedSourcingResult
+): { conflicting: true; priceA: string; priceB: string } | { conflicting: false } {
+  if (a.price === b.price && a.currency.toUpperCase() === b.currency.toUpperCase()) {
+    return { conflicting: false };
+  }
+  return {
+    conflicting: true,
+    priceA: `${a.price} ${a.currency.toUpperCase()}`,
+    priceB: `${b.price} ${b.currency.toUpperCase()}`,
+  };
+}
+
 export const OpportunityRankingService = {
   annotateResult,
   compareByMatch,
+  classifyResultQuality,
+  computeOpportunityScore,
+  detectPriceConflict,
 };
 
 export default OpportunityRankingService;

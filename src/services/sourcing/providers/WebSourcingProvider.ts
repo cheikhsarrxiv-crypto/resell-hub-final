@@ -27,22 +27,29 @@
  *      small, fixed number of them are ever actually analyzed by the
  *      extraction model.
  *
- * A candidate is converted into a NormalizedSourcingResult ONLY when
- * extraction reports isProductOffer: true AND a real numeric price AND a
+ * A candidate's extraction reports zero, one, or several distinct OFFERS
+ * (Global Web Sourcing, Option A — see WebResultExtractionService's own
+ * header for the full rationale: a category/brand/search-results page can
+ * legitimately list several items at several prices, never forced into
+ * one combined/averaged entry, and never automatically discarded just for
+ * listing more than one item). Each offer becomes its own
+ * NormalizedSourcingResult ONLY when it has a real numeric price AND a
  * real currency — NormalizedSourcingResult.price/currency are REQUIRED,
- * non-optional fields (see ../types.ts), so a candidate with no
- * confidently extracted price is dropped rather than forced into that
- * shape with an invented number. This is a deliberate, documented
- * consequence of "never invent a price", not an oversight: a real product
- * page whose price could not be confidently read is simply not
- * exploitable as a sourcing opportunity yet.
+ * non-optional fields (see ../types.ts), so an offer with no confidently
+ * extracted price is dropped rather than forced into that shape with an
+ * invented number. This is a deliberate, documented consequence of
+ * "never invent a price", not an oversight: a real offer whose price
+ * could not be confidently read is simply not exploitable as a sourcing
+ * opportunity yet.
  *
  * Currency conversion, landed cost, margin preview, and the generic
- * "this is a web result" warning are ALL handled by the existing,
- * shared SourcingService/OpportunityRankingService pipeline — never
- * duplicated here (see OpportunityRankingService.annotateResult's own
- * `result.source === 'web'` branch for the warning).
+ * "this is a web result" / "this source page lists several offers"
+ * warnings are ALL handled by the existing, shared SourcingService/
+ * OpportunityRankingService pipeline — never duplicated here (see
+ * OpportunityRankingService.annotateResult's own `result.source === 'web'`
+ * branch for both warnings).
  */
+import crypto from 'crypto';
 import { createLogger } from '@/lib/logger';
 import {
   NormalizedSearchQuery,
@@ -54,22 +61,40 @@ import {
 } from '../types';
 import { WebSearchProviderRegistry } from '@/services/websourcing/WebSearchProviderRegistry';
 import { WebSearchResult, WebSearchProviderErrorInfo } from '@/services/websourcing/types';
-import { WebResultExtractionService, ExtractedWebProductInfo } from '../WebResultExtractionService';
+import { WebResultExtractionService, ExtractedWebOffer, ExtractedWebPageOffers } from '../WebResultExtractionService';
+import { WebSearchQueryPlanner, PlannedQuery } from '../WebSearchQueryPlanner';
 
 const logger = createLogger('sourcing-web');
 
-/** How many raw hits are requested from the web search engine per search — a ceiling on the candidate pool, not on how many get analyzed (see MAX_CANDIDATES_FOR_EXTRACTION below, which is the real cost bound). */
+/** How many raw hits are requested from the web search engine per search PASS — a ceiling on the candidate pool, not on how many get analyzed (see MAX_CANDIDATES_FOR_EXTRACTION below, which is the real cost bound). */
 export const TAVILY_MAX_RAW_RESULTS = 10;
 
 /**
- * Hard cap on how many of those raw hits ever get a real LLM extraction
- * call — the deliberate cost/latency bound this task's brief asked for
- * ("Ne fais PAS un appel LLM illimité"). Candidates are pre-selected by
- * the search engine's OWN relevance score (descending) before this limit
- * is applied, so the results that ARE analyzed are the ones the engine
- * itself ranked highest, not an arbitrary prefix.
+ * Hard cap on how many raw hits from ONE pass ever get a real LLM
+ * extraction call — the deliberate cost/latency bound this task's brief
+ * asked for ("Ne fais PAS un appel LLM illimité"). Candidates are
+ * pre-selected by the search engine's OWN relevance score (descending)
+ * before this limit is applied, so the results that ARE analyzed are the
+ * ones the engine itself ranked highest, not an arbitrary prefix. Also
+ * bounded by MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH below across ALL
+ * passes combined, so deep search can never multiply this per-pass cap
+ * unboundedly.
  */
 export const MAX_CANDIDATES_FOR_EXTRACTION = 5;
+
+/**
+ * Deep Web Sourcing Engine (mission section 18) — hard GLOBAL ceiling on
+ * how many extraction LLM calls this provider makes across EVERY pass of
+ * ONE searchProducts() invocation, regardless of how many passes
+ * WebSearchQueryPlanner planned. Combined with MAX_WEB_SEARCH_PASSES (4),
+ * this bounds one search_products tool call (fixed at 3 AI Units
+ * regardless) to at most 4 Tavily searches + 11 extraction calls = 15
+ * external calls, matching the mission's own "deep search: 8-15 queries
+ * maximum" ceiling exactly. The default, non-deepSearch path only ever
+ * consumes up to MAX_CANDIDATES_FOR_EXTRACTION (5) of this budget in its
+ * one pass — unchanged from before this budget existed.
+ */
+export const MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH = 11;
 
 /**
  * A small, honest, curated map from a known marketplace's own domain to
@@ -96,41 +121,14 @@ function deriveMarketplace(domain: string | undefined): string {
   return KNOWN_DOMAIN_MARKETPLACE_NAMES[bare] ?? bare;
 }
 
-/**
- * Folds the query's own structured fields into free-text keywords, the
- * exact same treatment brand/model/size/color already get for EVERY
- * provider in this codebase (see NormalizedSearchQuery's own comments) —
- * a general web search engine has no structured filter API at all, so
- * this is the ONLY way any of these constraints can reach it. A price
- * bound is folded in as a plain text hint ("under 300 EUR") to help the
- * engine's own relevance ranking surface pages that mention that range —
- * the REAL price filtering/exclusion still happens downstream, in
- * SourcingService's shared pipeline, exactly like it already does for
- * Etsy (which also has no native price filter).
- *
- * Location/region intent (e.g. "in France", "in Europe") is NEVER added
- * here independently — there is no separate geo field on
- * NormalizedSearchQuery for this, by design (see this task's own audit).
- * If the reseller named a region, the model is expected to have already
- * folded it into `query.query` itself, the same free-text field every
- * other constraint with no structured equivalent goes through. This
- * function never invents or infers a location that was not already part
- * of the caller-supplied query text.
- */
-function buildWebSearchQueryText(query: NormalizedSearchQuery): string {
-  const parts = [query.query, query.brand, query.model, query.size, query.color, query.category].filter(
-    (part): part is string => Boolean(part && part.trim().length > 0)
-  );
-
-  if (query.maxPrice !== undefined) {
-    parts.push(`under ${query.maxPrice} ${query.currency ?? ''}`.trim());
-  }
-  if (query.minPrice !== undefined) {
-    parts.push(`over ${query.minPrice} ${query.currency ?? ''}`.trim());
-  }
-
-  return parts.join(' ');
-}
+// Location/region intent (e.g. "in France", "in Europe") is NEVER added
+// independently to any pass's query text — there is no separate geo field
+// on NormalizedSearchQuery for this, by design (see this task's own
+// audit). If the reseller named a region, the model is expected to have
+// already folded it into `query.query` itself. Query text construction
+// itself now lives in WebSearchQueryPlanner.buildBaseQueryText (Deep Web
+// Sourcing Engine) — moved there so every pass's text is built in exactly
+// one place; behavior for the 'exact' pass is unchanged byte-for-byte.
 
 function toSourcingErrorInfo(error: WebSearchProviderErrorInfo): SourcingProviderErrorInfo {
   return {
@@ -164,40 +162,100 @@ function selectCandidates(results: WebSearchResult[]): WebSearchResult[] {
 }
 
 /**
- * Converts one raw web hit + its extraction outcome into a
- * NormalizedSourcingResult, or null when it isn't (yet) a real,
- * exploitable sourcing opportunity:
- *   - extraction failed outright (network/model/schema error), or
- *   - the model reported isProductOffer: false (an article, guide, forum
- *     post, category page, ... never a concrete offer), or
- *   - no confident numeric price, or no confident currency, was found.
- * The last rule is what keeps this provider from ever inventing a price:
- * NormalizedSourcingResult.price/currency are required fields, so a
- * candidate without both simply cannot become one — it is dropped, not
- * forced into the shape with a fabricated number.
+ * Multi-offer extraction (Global Web Sourcing, Option A) — a deterministic
+ * identifier for ONE offer within ONE page, built ONLY from real,
+ * already-extracted fields (source, the page's own sourceUrl, and the
+ * offer's own productName/price/currency/size/model) — never
+ * `Math.random()`, never a counter, never anything that could differ
+ * between two runs for the exact same offer. This is what lets
+ * SourcingService.deduplicate() (keyed on `(source, sourceId)` whenever
+ * sourceId is set) tell apart several distinct offers that all share the
+ * same page's sourceUrl, instead of collapsing them into one. Two
+ * genuinely different offers from the same page will, in the ordinary
+ * case, differ in at least one of these fields (that's what makes them
+ * distinct offers at all) and therefore hash differently; two identical
+ * sets of fields are — by construction — not distinguishable from each
+ * other by anything this provider actually knows, so they are treated as
+ * the same offer, which is the correct, conservative outcome (never a
+ * guessed difference).
  */
-function toNormalizedResult(raw: WebSearchResult, extracted: ExtractedWebProductInfo): NormalizedSourcingResult | null {
-  if (!extracted.isProductOffer) return null;
-  if (extracted.price === null || extracted.currency === null) return null;
+function buildOfferSourceId(source: string, sourceUrl: string, offer: ExtractedWebOffer): string {
+  const key = [
+    source,
+    sourceUrl,
+    offer.productName ?? offer.title ?? '',
+    String(offer.price ?? ''),
+    offer.currency ?? '',
+    offer.size ?? '',
+    offer.model ?? '',
+  ].join('|');
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
 
-  return {
+/**
+ * Converts one raw web hit + its (possibly multi-offer) extraction
+ * outcome into zero, one, or several NormalizedSourcingResult objects —
+ * never forces the whole page into a single, possibly-wrong entry, and
+ * never discards a page just for genuinely listing more than one offer
+ * (Global Web Sourcing, Option A). An individual offer is dropped,
+ * on its own, when:
+ *   - no confident numeric price, or no confident currency, was found for
+ *     it specifically. This is what keeps this provider from ever
+ *     inventing a price: NormalizedSourcingResult.price/currency are
+ *     required fields, so an offer without both simply cannot become
+ *     one — it is dropped, not forced into the shape with a fabricated
+ *     number.
+ * Extraction itself (see WebResultExtractionService's own system prompt)
+ * is where "never combine a price from one offer with a size/model from
+ * another" and "never invent a correspondence when it's ambiguous which
+ * price belongs to which item" are enforced — this function trusts each
+ * already-returned offer's OWN fields as a self-contained unit, it never
+ * re-pairs or re-derives anything across offers itself.
+ */
+function toNormalizedResults(
+  raw: WebSearchResult,
+  extracted: ExtractedWebPageOffers,
+  plannedQuery: PlannedQuery
+): NormalizedSourcingResult[] {
+  const validOffers = extracted.offers.filter((offer) => offer.price !== null && offer.currency !== null);
+  // extracted.pageType is always a real value from the real
+  // WebResultExtractionService (defaulted to 'UNKNOWN' by its own schema
+  // when the model didn't classify it) — the `?? 'UNKNOWN'` fallback here
+  // only matters for a caller that bypasses that schema entirely (as this
+  // provider's own unit tests do, mocking extractBatch directly).
+  const pageType = extracted.pageType ?? 'UNKNOWN';
+  // Provenance (Option A audit, point 3): when a page yields more than one
+  // offer, every one of those results shares the SAME raw.url (Tavily
+  // never gives this provider a distinct per-offer URL — see
+  // WebSourcingProvider.ts's own file header) — OpportunityRankingService
+  // turns this flag into an explicit warning that the source link may open
+  // the general page rather than this exact offer. A page that happens to
+  // yield exactly one valid offer gets no such warning: there is nothing
+  // ambiguous about a single offer's own source link.
+  const sharedSourcePage = validOffers.length > 1;
+
+  return validOffers.map((offer) => ({
     source: 'web',
-    sourceId: raw.id,
+    sourceId: buildOfferSourceId('web', raw.url, offer),
+    sharedSourcePage,
     sourceUrl: raw.url,
-    title: extracted.title ?? raw.title, // raw.title is itself real, provider-reported data — never invented — used only when extraction didn't separately confirm one.
-    brand: extracted.brand ?? undefined,
-    price: extracted.price,
-    currency: extracted.currency.toUpperCase(),
+    title: offer.title ?? offer.productName ?? raw.title, // raw.title is itself real, provider-reported data — never invented — used only when extraction didn't separately confirm one for this offer.
+    brand: offer.brand ?? undefined,
+    price: offer.price as number,
+    currency: (offer.currency as string).toUpperCase(),
     marketplace: deriveMarketplace(raw.domain),
-    condition: extracted.condition ?? undefined,
-    images: [], // Tavily's WebSearchResult carries no image field today — never fabricated.
-    seller: extracted.seller ? { name: extracted.seller } : undefined,
+    condition: offer.condition ?? undefined,
+    // offer.imageUrl only exists on the real schema (default null) or a
+    // mocked test fixture (undefined if omitted) — either way, a falsy
+    // value here means "not reported", never a fabricated placeholder.
+    images: offer.imageUrl ? [offer.imageUrl] : [],
+    seller: offer.seller ? { name: offer.seller } : undefined,
     // Never 'verified': no institutional authenticity program exists for
     // a generic web result — only ever the page's own claim, or nothing.
-    authenticityStatus: extracted.authenticityClaim ? 'claimed' : 'unverified',
-    authenticitySource: extracted.authenticityClaim ?? undefined,
-    shippingCost: extracted.shippingCost ?? undefined,
-    shippingCostCurrency: extracted.shippingCost !== null ? extracted.currency.toUpperCase() : undefined,
+    authenticityStatus: offer.authenticityClaim ? 'claimed' : 'unverified',
+    authenticitySource: offer.authenticityClaim ?? undefined,
+    shippingCost: offer.shippingCost ?? undefined,
+    shippingCostCurrency: offer.shippingCost !== null ? (offer.currency as string).toUpperCase() : undefined,
     // Free text as extracted (e.g. "Paris, France"), NOT the ISO 3166-1
     // alpha-2 code EbayBrowseSourcingProvider reports here — a general
     // web page never states a clean country code, and this field has no
@@ -205,8 +263,23 @@ function toNormalizedResult(raw: WebSearchResult, extracted: ExtractedWebProduct
     // comment); SourcingResultCard only ever displays it as plain text,
     // never parses it as a code, so this stays honest rather than
     // guessing/normalizing into a code that wasn't really there.
-    itemLocationCountry: extracted.location ?? undefined,
-  };
+    itemLocationCountry: offer.location ?? undefined,
+    // Deep Web Sourcing Engine additions — all additive, all "absent
+    // means not reported", never a guess.
+    productUrl: offer.productUrl ?? undefined,
+    material: offer.material ?? undefined,
+    size: offer.size ?? undefined,
+    availability: offer.availability ?? undefined,
+    pageType,
+    foundByQuery: plannedQuery.queryText,
+    searchPass: plannedQuery.pass,
+    // Deep Web Sourcing Engine (mission section 13) — the one, honest
+    // default: no live second-confirmation request is ever made by this
+    // provider. SourcingService's deduplicate step is the only place that
+    // may ever upgrade this to 'conflicting', for the one narrow case it
+    // actually detects (see that function's own comment).
+    verificationStatus: 'unverified',
+  }));
 }
 
 export class WebSourcingProvider implements SourcingProvider {
@@ -243,50 +316,82 @@ export class WebSourcingProvider implements SourcingProvider {
       return { results: [] };
     }
 
-    const queryText = buildWebSearchQueryText(query);
+    // Deep Web Sourcing Engine — deepSearch defaults to false, which
+    // yields exactly one pass ('exact', the SAME query text as before
+    // this feature existed) — a caller that never sets this field sees
+    // byte-identical behavior.
+    const deepSearch = query.deepSearch === true;
+    const passes = WebSearchQueryPlanner.buildPasses(query, deepSearch);
+
     const errors: SourcingProviderErrorInfo[] = [];
-    const rawResults: WebSearchResult[] = [];
-
-    await Promise.all(
-      engines.map(async (engine) => {
-        try {
-          const outcome = await engine.search({ query: queryText, maxResults: TAVILY_MAX_RAW_RESULTS });
-          rawResults.push(...outcome.results);
-          if (outcome.error) {
-            errors.push(toSourcingErrorInfo(outcome.error));
-          }
-        } catch (error) {
-          // A web search engine is expected to catch its own errors (see
-          // TavilyWebSearchProvider) — this is a defensive backstop
-          // against a provider bug, not the normal path.
-          logger.error(
-            `Web search engine "${engine.name}" threw instead of returning a structured error`,
-            error instanceof Error ? error : String(error)
-          );
-          errors.push({ provider: 'web', message: `${engine.displayName} search failed unexpectedly`, kind: 'unknown' });
-        }
-      })
-    );
-
-    // No raw hits at all (every engine returned zero, or every engine
-    // failed) — a clean, honest empty result, never a fabricated one.
-    if (rawResults.length === 0) {
-      return { results: [], error: errors[0] };
-    }
-
-    const candidates = selectCandidates(rawResults);
-    const extractions = await WebResultExtractionService.extractBatch(candidates);
-
     const results: NormalizedSourcingResult[] = [];
-    for (const { result: raw, outcome } of extractions) {
-      if (outcome.status === 'error') {
-        // One failed extraction never fails the whole search — logged,
-        // and simply not turned into a result (never a fabricated one).
-        logger.warn('Skipped one web candidate: extraction failed', { url: raw.url, reason: outcome.reason });
-        continue;
+    const seenUrls = new Set<string>();
+    let validOfferCount = 0;
+    let remainingExtractionBudget = MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH;
+
+    for (const plannedQuery of passes) {
+      // Recovery only ever runs as a last resort — never when an earlier
+      // pass already found at least one real, priced offer.
+      if (plannedQuery.pass === 'recovery' && validOfferCount > 0) break;
+      // "Stop early once enough high-quality results are found" (mission
+      // section 4) — only applies to escalation passes, never skips the
+      // first ('exact') pass itself.
+      if (plannedQuery.pass !== 'exact' && validOfferCount >= WebSearchQueryPlanner.SUFFICIENT_VALID_OFFERS_TO_STOP_EARLY) break;
+      if (remainingExtractionBudget <= 0) break;
+
+      const rawResultsThisPass: WebSearchResult[] = [];
+      await Promise.all(
+        engines.map(async (engine) => {
+          try {
+            const outcome = await engine.search({
+              query: plannedQuery.queryText,
+              maxResults: TAVILY_MAX_RAW_RESULTS,
+              // Omitted entirely for 'basic' (Tavily's own default) —
+              // only the recovery pass's 'advanced' depth is ever sent
+              // explicitly, so the default path's request shape is
+              // unchanged from before this feature existed.
+              ...(plannedQuery.searchDepth === 'advanced' ? { searchDepth: 'advanced' as const } : {}),
+            });
+            rawResultsThisPass.push(...outcome.results);
+            if (outcome.error) {
+              errors.push(toSourcingErrorInfo(outcome.error));
+            }
+          } catch (error) {
+            // A web search engine is expected to catch its own errors
+            // (see TavilyWebSearchProvider) — this is a defensive
+            // backstop against a provider bug, not the normal path.
+            logger.error(
+              `Web search engine "${engine.name}" threw instead of returning a structured error`,
+              error instanceof Error ? error : String(error)
+            );
+            errors.push({ provider: 'web', message: `${engine.displayName} search failed unexpectedly`, kind: 'unknown' });
+          }
+        })
+      );
+
+      // A page already seen in an earlier pass this search is never
+      // re-extracted (saves budget) and never produces a second,
+      // duplicate set of results for the exact same URL.
+      const newHits = rawResultsThisPass.filter((hit) => !seenUrls.has(hit.url));
+      for (const hit of newHits) seenUrls.add(hit.url);
+      if (newHits.length === 0) continue;
+
+      const candidates = selectCandidates(newHits).slice(0, remainingExtractionBudget);
+      if (candidates.length === 0) continue;
+      remainingExtractionBudget -= candidates.length;
+
+      const extractions = await WebResultExtractionService.extractBatch(candidates);
+      for (const { result: raw, outcome } of extractions) {
+        if (outcome.status === 'error') {
+          // One failed extraction never fails the whole search — logged,
+          // and simply not turned into a result (never a fabricated one).
+          logger.warn('Skipped one web candidate: extraction failed', { url: raw.url, reason: outcome.reason });
+          continue;
+        }
+        const normalized = toNormalizedResults(raw, outcome.data, plannedQuery);
+        results.push(...normalized);
+        validOfferCount += normalized.length;
       }
-      const normalized = toNormalizedResult(raw, outcome.data);
-      if (normalized) results.push(normalized);
     }
 
     return { results, error: errors[0] };

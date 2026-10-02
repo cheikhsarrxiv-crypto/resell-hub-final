@@ -92,6 +92,14 @@ describe('SourcingService.search', () => {
           'Seller reputation is not reported by this source.',
           'Stock availability is not reported by this source.',
         ],
+        // Deep Web Sourcing Engine — real, transparent signals computed
+        // from this exact result's own fields (see OpportunityRankingService):
+        // no availability/condition known and no seller/authenticity
+        // evidence -> LOW; authenticityStatus 'claimed' (+5) offset by the
+        // one unresolved cost factor (-5) -> 0, clamped.
+        qualityTier: 'LOW',
+        opportunityScore: 0,
+        scoreFactors: ['Authenticity claimed by the seller (not verified) (+5)', '1 unresolved cost factor(s) (-5)'],
       },
     ]);
     expect(response.providerErrors).toEqual([]);
@@ -291,6 +299,19 @@ describe('SourcingService.search', () => {
       expect(response.results).toHaveLength(2);
     });
 
+    it('TEST G/H (Global Web Sourcing, Option A) — the SAME sourceUrl but a DIFFERENT sourceId stays two distinct results, never fused into one: a category page\'s several offers must survive as separate opportunities', async () => {
+      const sharedUrl = 'https://www.sellpy.com/store/brand/Nike%20Air%20Max';
+      const offerA = fakeResult({ source: 'web', sourceId: 'hash-of-offer-a', sourceUrl: sharedUrl, title: 'Nike Air Max, size 39', price: 24, sharedSourcePage: true });
+      const offerB = { ...offerA, sourceId: 'hash-of-offer-b', title: 'Nike Air Max, size 40', price: 34 };
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [offerA, offerB] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike Air Max' });
+
+      expect(response.results).toHaveLength(2);
+      expect(response.results.map((r) => r.sourceUrl)).toEqual([sharedUrl, sharedUrl]);
+      expect(response.results.map((r) => r.price).sort((a, b) => a - b)).toEqual([24, 34]);
+    });
+
     it('results with no sourceId fall back to exact sourceUrl matching for dedup', async () => {
       const first = fakeResult({ sourceUrl: 'https://x/same', title: 'A' });
       const duplicate = { ...first, title: 'B' };
@@ -319,6 +340,226 @@ describe('SourcingService.search', () => {
       const response = await SourcingService.search({ query: 'x' });
 
       expect(response.results).toHaveLength(2);
+    });
+  });
+
+  describe('Deep Web Sourcing Engine — price-conflict detection on an otherwise-deduplicated pair', () => {
+    it('two results sharing the same (provider, sourceId) but DIFFERENT prices -> kept as one, flagged "conflicting", warning names both prices', async () => {
+      const first = fakeResult({ sourceId: 'ITEM-1', sourceUrl: 'https://x/1', price: 34 });
+      const duplicate = { ...first, price: 41 };
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [first, duplicate] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results).toHaveLength(1);
+      expect(response.results[0].verificationStatus).toBe('conflicting');
+      expect(response.results[0].warnings).toContain(
+        'Price conflict: this exact listing was reported as both 34 EUR and 41 EUR by duplicate sources — shown with the first price found; verify before relying on it.'
+      );
+    });
+
+    it('two results sharing the same (provider, sourceId) and the SAME price -> no conflict, no "conflicting" status', async () => {
+      const first = fakeResult({ sourceId: 'ITEM-1', sourceUrl: 'https://x/1', price: 34 });
+      const duplicate = { ...first, price: 34 };
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [first, duplicate] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results[0].verificationStatus).toBeUndefined();
+    });
+  });
+
+  describe('Deep Web Sourcing Engine — advanced "web"-only signal dedup', () => {
+    function webOffer(overrides: Record<string, any> = {}) {
+      return fakeResult({
+        source: 'web',
+        sourceId: undefined,
+        sourceUrl: `https://a.example/${Math.random()}`, // distinct URL/page per fixture — this dedup pass must catch the match anyway, on signal alone
+        brand: 'Nike',
+        marketplace: 'vinted',
+        price: 50,
+        currency: 'EUR',
+        ...overrides,
+      });
+    }
+
+    it('two "web" results with identical marketplace/brand/price/currency/size (both undefined) -> merged to one', async () => {
+      const a = webOffer();
+      const b = webOffer();
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(1);
+    });
+
+    it('two "web" results with DIFFERENT sizes are NEVER merged, even if everything else matches', async () => {
+      const a = webOffer({ size: '39' });
+      const b = webOffer({ size: '40' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2);
+    });
+
+    it('one "web" result WITH a size and another with NO size are never merged (never assume the missing one matches)', async () => {
+      const a = webOffer({ size: '39' });
+      const b = webOffer({ size: undefined });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2);
+    });
+
+    it('two "web" results with DIFFERENT named sellers are NEVER merged', async () => {
+      const a = webOffer({ seller: { name: 'ShopA' } });
+      const b = webOffer({ seller: { name: 'ShopB' } });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2);
+    });
+
+    it('two "web" results with DIFFERENT prices are never merged (a real price difference means a real different offer, or at minimum not confidently the same one)', async () => {
+      const a = webOffer({ price: 50 });
+      const b = webOffer({ price: 60 });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2);
+    });
+
+    it('a "web" result with no brand at all is never merged with anything via this pass (no signal to anchor the comparison on)', async () => {
+      const a = webOffer({ brand: undefined });
+      const b = webOffer({ brand: undefined });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2);
+    });
+
+    it('eBay/Etsy results are never touched by this pass, even if they would otherwise "match" on signal', async () => {
+      const a = fakeResult({ source: 'ebay', sourceId: 'A', sourceUrl: 'https://ebay/a', brand: 'Nike', marketplace: 'EBAY_FR', price: 50, currency: 'EUR' });
+      const b = fakeResult({ source: 'ebay', sourceId: 'B', sourceUrl: 'https://ebay/b', brand: 'Nike', marketplace: 'EBAY_FR', price: 50, currency: 'EUR' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) })]);
+
+      const response = await SourcingService.search({ query: 'Nike' });
+
+      expect(response.results).toHaveLength(2); // real, distinct eBay listings (different sourceId) — never merged just for sharing brand/price
+    });
+  });
+
+  describe('Deep Web Sourcing Engine — minQuality filtering (opt-in)', () => {
+    it('omitted minQuality: every result is kept regardless of qualityTier — unchanged default behavior', async () => {
+      const low = fakeResult({ sourceId: '1', sourceUrl: 'https://x/1' }); // no availability/condition -> LOW
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [low] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.results).toHaveLength(1);
+      expect(response.diagnostics.excludedByMinQuality).toBe(0);
+    });
+
+    it('minQuality: "HIGH" excludes a LOW-tier result, counted in diagnostics.excludedByMinQuality', async () => {
+      const low = fakeResult({ sourceId: '1', sourceUrl: 'https://x/1' });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [low] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', minQuality: 'HIGH' });
+
+      expect(response.results).toHaveLength(0);
+      expect(response.diagnostics.excludedByMinQuality).toBe(1);
+    });
+
+    it('minQuality: "HIGH" keeps a genuinely HIGH-tier result', async () => {
+      const high = fakeResult({
+        sourceId: '1',
+        sourceUrl: 'https://x/1',
+        availability: 'IN_STOCK',
+        condition: 'used',
+        seller: { name: 'shop', feedbackPercentage: 99 },
+      });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [high] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', minQuality: 'HIGH' });
+
+      expect(response.results).toHaveLength(1);
+      expect(response.results[0].qualityTier).toBe('HIGH');
+    });
+  });
+
+  describe('Deep Web Sourcing Engine — sort: opportunity_score', () => {
+    it('orders results descending by the real, computed opportunityScore', async () => {
+      const weak = fakeResult({ sourceId: '1', sourceUrl: 'https://x/1', title: 'Weak' }); // no bonus signals -> low score
+      const strong = fakeResult({
+        sourceId: '2',
+        sourceUrl: 'https://x/2',
+        title: 'Strong',
+        availability: 'IN_STOCK',
+        authenticityStatus: 'verified' as const,
+        authenticitySource: 'eBay Authenticity Guarantee',
+      });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [weak, strong] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', sort: 'opportunity_score' });
+
+      expect(response.results.map((r) => r.title)).toEqual(['Strong', 'Weak']);
+      expect(response.results[0].opportunityScore).toBeGreaterThan(response.results[1].opportunityScore!);
+    });
+  });
+
+  describe('Deep Web Sourcing Engine — diagnostics (zero/low-result provenance)', () => {
+    it('a real, empty outcome reports rawResultsBeforeFiltering: 0 and every exclusion count at 0 — never a guess', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay')]);
+
+      const response = await SourcingService.search({ query: 'nothing matches this' });
+
+      expect(response.diagnostics).toEqual({
+        rawResultsBeforeFiltering: 0,
+        excludedByDeduplication: 0,
+        excludedByPriceBound: 0,
+        excludedByMinQuality: 0,
+        excludedByOverallLimit: 0,
+      });
+    });
+
+    it('SOURCE_NOT_CONFIGURED still reports a real (empty) diagnostics object, never omitted', async () => {
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { isConfigured: false })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.diagnostics).toEqual({
+        rawResultsBeforeFiltering: 0,
+        excludedByDeduplication: 0,
+        excludedByPriceBound: 0,
+        excludedByMinQuality: 0,
+        excludedByOverallLimit: 0,
+      });
+    });
+
+    it('a real duplicate is counted in excludedByDeduplication', async () => {
+      const first = fakeResult({ sourceId: 'ITEM-1', sourceUrl: 'https://x/1' });
+      const duplicate = { ...first };
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [first, duplicate] }) })]);
+
+      const response = await SourcingService.search({ query: 'x' });
+
+      expect(response.diagnostics.rawResultsBeforeFiltering).toBe(2);
+      expect(response.diagnostics.excludedByDeduplication).toBe(1);
+    });
+
+    it('a result excluded by an explicit price bound is counted in excludedByPriceBound', async () => {
+      const tooExpensive = fakeResult({ sourceId: '1', sourceUrl: 'https://x/1', price: 500, normalizedPriceEur: 500 });
+      getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [tooExpensive] }) })]);
+
+      const response = await SourcingService.search({ query: 'x', minPrice: 0, maxPrice: 100, currency: 'EUR' });
+
+      expect(response.results).toHaveLength(0);
+      expect(response.diagnostics.excludedByPriceBound).toBe(1);
     });
   });
 
@@ -498,6 +739,22 @@ describe('SourcingService.search', () => {
       const response = await SourcingService.search({ query: 'x', maxPrice: 400, currency: 'EUR' });
 
       expect(response.results.map((r) => r.sourceUrl)).toEqual(['https://etsy/1']);
+    });
+
+    it('TEST I (Global Web Sourcing, Option A) — multiple offers from the same category page still go through the EXISTING price filter unchanged: <50 EUR keeps 24/34/41, eliminates 50.50', async () => {
+      const sharedUrl = 'https://www.sellpy.com/store/brand/Nike%20Air%20Max';
+      const offer24 = fakeResult({ source: 'web', sourceId: 'offer-24', sourceUrl: sharedUrl, price: 24, currency: 'EUR', sharedSourcePage: true });
+      const offer34 = { ...offer24, sourceId: 'offer-34', price: 34 };
+      const offer41 = { ...offer24, sourceId: 'offer-41', price: 41 };
+      const offer50_50 = { ...offer24, sourceId: 'offer-50-50', price: 50.5 };
+      getAllProvidersMock.mockReturnValue([
+        makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [offer24, offer34, offer41, offer50_50] }) }),
+      ]);
+
+      const response = await SourcingService.search({ query: 'Nike Air Max', maxPrice: 50, currency: 'EUR' });
+
+      expect(response.results.map((r) => r.price).sort((a, b) => a - b)).toEqual([24, 34, 41]);
+      expect(response.results.some((r) => r.price === 50.5)).toBe(false);
     });
   });
 

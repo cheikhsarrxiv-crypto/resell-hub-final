@@ -96,8 +96,11 @@ export interface NormalizedSearchQuery {
    *   documented multi-key comparator (constraint matches, then known
    *   landed cost, then authenticity evidence, then price), never a
    *   summed/weighted score.
+   * - 'opportunity_score' (Deep Web Sourcing Engine): descending by the
+   *   real, documented OpportunityRankingService.computeOpportunityScore
+   *   total (undefined last) — see NormalizedSourcingResult.opportunityScore.
    */
-  sort?: 'price_asc' | 'price_desc' | 'normalized_price_asc' | 'known_cost_asc' | 'match';
+  sort?: 'price_asc' | 'price_desc' | 'normalized_price_asc' | 'known_cost_asc' | 'match' | 'opportunity_score';
   limit?: number;
   offset?: number;
   /**
@@ -111,6 +114,27 @@ export interface NormalizedSearchQuery {
    */
   targetResalePrice?: number;
   targetMargin?: number;
+  /**
+   * Deep Web Sourcing Engine (mission section 2/4/18) — opt-in, additive.
+   * Omitted/false (the default, UNCHANGED behavior): WebSourcingProvider
+   * runs exactly one Tavily search pass, identical to before this field
+   * existed. true: allows WebSourcingProvider's own WebSearchQueryPlanner
+   * to run additional passes (variant/secondhand/outlet keywords, then a
+   * recovery pass) up to its fixed, documented budget — see
+   * WebSearchQueryPlanner's own constants. Never affects eBay/Etsy, which
+   * have no concept of "passes". Never changes the AI Units cost of
+   * search_products (fixed at 3 regardless).
+   */
+  deepSearch?: boolean;
+  /**
+   * Deep Web Sourcing Engine (mission section 15) — opt-in only. Omitted
+   * (the default, UNCHANGED behavior): every result is kept regardless of
+   * qualityTier, exactly as before this field existed. When set, a result
+   * whose qualityTier ranks below the requested minimum is excluded —
+   * same "never silently drop" discipline as excludedByPrice: this is an
+   * explicit, caller-requested filter, never an automatic one.
+   */
+  minQuality?: 'HIGH' | 'MEDIUM' | 'LOW';
 }
 
 /**
@@ -134,6 +158,19 @@ export type AuthenticityStatus = 'verified' | 'claimed' | 'unverified' | 'unknow
 export interface NormalizedSourcingResult {
   source: string; // provider name, e.g. 'ebay'
   sourceId?: string;
+  /**
+   * Multi-offer web extraction (Global Web Sourcing, Option A) — true only
+   * when this result is one of SEVERAL distinct offers WebSourcingProvider
+   * extracted from the exact same raw web page (e.g. a category/brand
+   * listing page naming several items at several prices). `sourceUrl`
+   * below is then the page's own URL, not a direct link to this specific
+   * offer — OpportunityRankingService.annotateResult turns this into an
+   * explicit warning for exactly that reason (never silently implied as a
+   * precise per-offer link). Undefined/false for every other provider and
+   * for a web result that was the only offer found on its page — never set
+   * except by WebSourcingProvider itself, and never used to invent a URL.
+   */
+  sharedSourcePage?: boolean;
   sourceUrl: string;
   title: string;
   brand?: string;
@@ -154,8 +191,43 @@ export interface NormalizedSourcingResult {
   /** The market/country the listing is actually from — e.g. 'EBAY_GB' for EbayBrowseSourcingProvider. Never normalized into an ISO country code here, to avoid inventing a mapping no provider actually confirms. */
   marketplace: string;
   condition?: string;
+  /**
+   * Kept as a free string (unchanged type) since EbayBrowseSourcingProvider
+   * already populates it with eBay's own raw `estimatedAvailabilityStatus`
+   * values (e.g. 'IN_STOCK', 'LIMITED_STOCK') — tightening this to a fixed
+   * union would misrepresent that real provider data. Deep Web Sourcing
+   * Engine (WebSourcingProvider) only ever writes the literal strings
+   * 'IN_STOCK' or 'OUT_OF_STOCK' here, and ONLY when the page text
+   * confidently states one — "not stated" is represented by leaving this
+   * field entirely absent (undefined), never by writing a literal
+   * 'UNKNOWN' string, consistent with every other "not reported" field on
+   * this type. A caller must never treat an absent value as IN_STOCK.
+   */
   availability?: string;
   images: string[];
+  /**
+   * Deep Web Sourcing Engine — a direct link to THIS specific offer, only
+   * when the source distinctly reported one (e.g. a per-offer anchor on a
+   * category page) — distinct from `sourceUrl`, which is always the page
+   * actually fetched/searched. Undefined means no such distinct link was
+   * found; `sourceUrl` remains the only real link in that case (unchanged
+   * from before this field existed). Never derived/guessed from `sourceUrl`.
+   */
+  productUrl?: string;
+  /** Deep Web Sourcing Engine — ONLY when explicitly stated in the source text for this specific offer. Never inferred from product category/brand. */
+  material?: string;
+  /**
+   * Deep Web Sourcing Engine — ONLY when explicitly stated in the source
+   * text for this specific offer (WebSourcingProvider, from
+   * ExtractedWebOffer.size). No other current provider reports a size on
+   * a RESULT either (eBay/Etsy have no such field in their own listing
+   * responses) — this is purely additive, never backfilled for an
+   * existing provider. Distinct from NormalizedSearchQuery.size (the
+   * search INPUT, folded into keywords) — this is the result's own
+   * reported value, used by SourcingService's web-only signal dedup to
+   * avoid ever merging two genuinely different sizes.
+   */
+  size?: string;
   seller?: {
     name?: string;
     feedbackScore?: number;
@@ -326,6 +398,69 @@ export interface NormalizedSourcingResult {
    * and never a value the caller didn't actually supply.
    */
   targetResalePrice?: number;
+  /**
+   * Deep Web Sourcing Engine — source provenance (mission section 12):
+   * the EXACT query string that actually produced this result, and which
+   * search pass found it ('exact' | 'variant' | 'secondhand' | 'outlet' |
+   * 'recovery') — see WebSearchQueryPlanner. Undefined for every provider
+   * that doesn't run multi-pass search (eBay/Etsy query the full
+   * NormalizedSearchQuery directly, there is no separate "pass"). Lets
+   * the Agent/UI answer "why am I being shown this" precisely.
+   */
+  foundByQuery?: string;
+  searchPass?: 'exact' | 'secondhand' | 'outlet' | 'recovery';
+  /**
+   * Deep Web Sourcing Engine — the page type the extraction step itself
+   * classified this result's source page as (mission section 7). Only
+   * ever set by a provider whose extraction step actually determines this
+   * (WebSourcingProvider); undefined for eBay/Etsy (a structured API
+   * response has no "page type" concept at all). 'UNKNOWN' is a real,
+   * honest classification outcome, not a placeholder for "not set".
+   */
+  pageType?: 'PRODUCT_PAGE' | 'CATEGORY_PAGE' | 'SEARCH_PAGE' | 'COLLECTION_PAGE' | 'UNKNOWN';
+  /**
+   * Deep Web Sourcing Engine (mission section 15) — a documented, testable
+   * tier computed ONLY from fields already real on this result (never a
+   * new signal of its own): HIGH requires price+currency+a usable
+   * sourceUrl+availability all known; MEDIUM requires price+currency+
+   * sourceUrl but some other field missing; LOW means even price/currency
+   * confidence is thin (e.g. a web result with no availability AND no
+   * condition AND no seller at all). See OpportunityRankingService.
+   * classifyResultQuality for the exact, fixed criteria. Never used to
+   * silently drop a result — only ever an informational tier, filterable
+   * only when the caller explicitly opts in via NormalizedSearchQuery.minQuality.
+   */
+  qualityTier?: 'HIGH' | 'MEDIUM' | 'LOW';
+  /**
+   * Deep Web Sourcing Engine (mission section 14) — a transparent, additive
+   * point total (0-100) computed ONLY from real signals already present on
+   * this result (margin known, landed cost known, shipping known,
+   * authenticity, availability, quality tier) — see
+   * OpportunityRankingService.computeOpportunityScore. NEVER a claim of
+   * certain profitability — `scoreFactors` always lists exactly which
+   * components contributed, so this is never an opaque number. Additive to
+   * (never a replacement for) matchReasons/compareByMatch.
+   */
+  opportunityScore?: number;
+  /** Paired with opportunityScore — the real, specific factors that contributed to it, e.g. "Margin preview available (+20)". Always present (possibly empty) whenever opportunityScore is. */
+  scoreFactors?: string[];
+  /**
+   * Deep Web Sourcing Engine (mission section 13) — ONLY ever
+   * 'unverified' for every provider today (the honest default: no live
+   * second-confirmation request is actually made to any source). The
+   * other three values exist as real, structured outcomes of the ONE
+   * check this engine does perform — comparing two results that
+   * deduplicate to the same (provider, sourceId)/(sourceUrl) but report
+   * different prices (see SourcingService's deduplicate step): that
+   * specific, narrow case sets 'conflicting' with a warning naming both
+   * prices, rather than silently picking one. 'verified'/
+   * 'partially_verified' are reserved for a future real re-fetch
+   * confirmation step — no code path sets either today. This NEVER means
+   * "authenticity guaranteed" (see authenticityStatus for that, a fully
+   * separate concept) — only that the DATA (price/etc.) was, or wasn't,
+   * corroborated.
+   */
+  verificationStatus?: 'verified' | 'partially_verified' | 'unverified' | 'conflicting';
 }
 
 export interface SourcingProviderErrorInfo {
@@ -412,6 +547,30 @@ export interface SourcingSearchResponse {
    * search/ranking decision.
    */
   providerLatencyMs: Record<string, number>;
+  /**
+   * Deep Web Sourcing Engine (mission section 16) — real, counted reasons
+   * results were lost along the pipeline, so a zero/low-result outcome is
+   * never just silence. Every count here is a real number SourcingService
+   * actually computed from this exact search's own intermediate state —
+   * never a guess, never populated when the corresponding stage didn't
+   * run (e.g. excludedByPriceBound stays 0 when no price bound was
+   * requested at all, same as "no exclusion happened", which is also the
+   * honest answer in that case).
+   */
+  diagnostics: SourcingSearchDiagnostics;
+}
+
+export interface SourcingSearchDiagnostics {
+  /** Raw results every queried provider returned, before dedup/filtering — includes web search raw hits (pre-extraction) folded in by WebSourcingProvider as part of its own outcome.results, so this is "candidates before this search's own quality gates", not literally every HTTP hit. */
+  rawResultsBeforeFiltering: number;
+  /** Results dropped by deduplicate() (exact id/url, or the Deep Web Sourcing Engine's additional web-only signal match — see SourcingService). */
+  excludedByDeduplication: number;
+  /** Results dropped because their price was confidently outside the requested [minPrice, maxPrice] range (never one merely uncertain — those are kept with a warning instead). */
+  excludedByPriceBound: number;
+  /** Results dropped by an explicit NormalizedSearchQuery.minQuality filter — 0 whenever minQuality was not set at all. */
+  excludedByMinQuality: number;
+  /** Results dropped only by balanceByProvider's fairness cap once the combined set exceeded the requested `limit` — these were otherwise valid. */
+  excludedByOverallLimit: number;
 }
 
 /**

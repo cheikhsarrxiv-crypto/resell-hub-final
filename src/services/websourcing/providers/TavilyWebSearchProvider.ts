@@ -137,6 +137,17 @@ export class TavilyWebSearchProvider implements WebSearchProvider {
         body: JSON.stringify({
           query: query.query,
           max_results: query.maxResults,
+          // Deep Web Sourcing Engine — real Tavily request params, sent
+          // only when the caller actually set them (JSON.stringify drops
+          // an undefined property, so omitting one of these keeps the
+          // exact same request shape as before this addition — never a
+          // guessed default injected here).
+          search_depth: query.searchDepth,
+          topic: query.topic,
+          time_range: query.timeRange,
+          include_domains: query.includeDomains,
+          exclude_domains: query.excludeDomains,
+          country: query.country,
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });

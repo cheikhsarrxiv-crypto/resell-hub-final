@@ -3,11 +3,19 @@ import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
   SourcingSearchResponse,
+  SourcingSearchDiagnostics,
 } from './types';
 import { SourcingProviderRegistry } from './SourcingProviderRegistry';
 import { CurrencyConversionService } from '@/services/pricing/CurrencyConversionService';
 import { PricingService } from '@/services/pricing/PricingService';
-import { annotateResult, compareByMatch, ResolvedPriceBounds } from './OpportunityRankingService';
+import {
+  annotateResult,
+  compareByMatch,
+  classifyResultQuality,
+  computeOpportunityScore,
+  detectPriceConflict,
+  ResolvedPriceBounds,
+} from './OpportunityRankingService';
 
 const logger = createLogger('sourcing-service');
 
@@ -25,14 +33,87 @@ const DEFAULT_OVERALL_LIMIT = 20;
  * rule). The first occurrence wins; later duplicates are dropped.
  */
 function deduplicate(results: NormalizedSourcingResult[]): NormalizedSourcingResult[] {
-  const seen = new Set<string>();
-  const deduped: NormalizedSourcingResult[] = [];
+  const seen = new Map<string, NormalizedSourcingResult>();
+  const order: string[] = [];
 
   for (const result of results) {
     const key = result.sourceId
       ? `id:${result.source}:${result.sourceId}`
       : `url:${result.sourceUrl}`;
 
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, result);
+      order.push(key);
+      continue;
+    }
+
+    // Deep Web Sourcing Engine (mission section 13) — a real duplicate
+    // (same provider+sourceId, or same sourceUrl) that disagrees on price
+    // is never silently resolved by keeping whichever came first with no
+    // trace of the discrepancy. The survivor is flagged 'conflicting' and
+    // a warning names both real amounts — see
+    // NormalizedSourcingResult.verificationStatus's own comment for why
+    // this is the one, narrow case this engine actually sets it.
+    const conflict = detectPriceConflict(existing, result);
+    if (conflict.conflicting) {
+      seen.set(key, {
+        ...existing,
+        verificationStatus: 'conflicting',
+        warnings: [
+          ...(existing.warnings ?? []),
+          `Price conflict: this exact listing was reported as both ${conflict.priceA} and ${conflict.priceB} by duplicate sources — shown with the first price found; verify before relying on it.`,
+        ],
+      });
+    }
+  }
+
+  return order.map((key) => seen.get(key)!);
+}
+
+/**
+ * Deep Web Sourcing Engine (mission section 11) — a SECOND, narrower
+ * dedup pass applied ONLY to `source === 'web'` results (the only
+ * provider with no stable sourceId/sourceUrl-per-offer guarantee across
+ * different pages — eBay/Etsy already dedup correctly on real IDs via
+ * `deduplicate` above and are never touched here).
+ *
+ * Two web results are treated as the same real offer only when EVERY one
+ * of these matches: normalized `marketplace`, normalized `brand`, `price`,
+ * `currency` (case-insensitive), AND `size` — but `size` must be
+ * EXACTLY equal (including "both undefined"); one result having a size
+ * and the other not is NEVER treated as a match (could easily be two
+ * different items). The same guard applies to `seller.name`: both must
+ * be either equal or both undefined — two different named sellers (or a
+ * named seller vs. an unknown one) are NEVER merged. This is deliberately
+ * conservative — the mission's own warning against merging two really
+ * distinct offers (different sizes, different sellers) is enforced as a
+ * hard precondition, not a tiebreak.
+ */
+function deduplicateWebResultsBySignal(results: NormalizedSourcingResult[]): NormalizedSourcingResult[] {
+  const webSignalKey = (r: NormalizedSourcingResult): string | null => {
+    if (r.source !== 'web' || !r.brand) return null;
+    return [
+      r.marketplace.toLowerCase(),
+      r.brand.toLowerCase().trim(),
+      r.price,
+      r.currency.toUpperCase(),
+      r.size?.toLowerCase().trim() ?? '\u0000no-size',
+      r.seller?.name?.toLowerCase().trim() ?? '\u0000no-seller',
+    ].join('|');
+  };
+
+  const seen = new Set<string>();
+  const deduped: NormalizedSourcingResult[] = [];
+
+  for (const result of results) {
+    const key = webSignalKey(result);
+    if (key === null) {
+      // Not eligible for this pass at all (not a 'web' result, or no
+      // brand to anchor the comparison on) — always kept.
+      deduped.push(result);
+      continue;
+    }
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(result);
@@ -264,6 +345,17 @@ function sortResults(results: NormalizedSourcingResult[], sort: NormalizedSearch
       });
     case 'match':
       return sorted.sort(compareByMatch);
+    case 'opportunity_score':
+      // Deep Web Sourcing Engine — descending by the real, documented
+      // OpportunityRankingService.computeOpportunityScore total,
+      // undefined last (never treated as 0 — a result without a score
+      // is "not scored", not "scored lowest").
+      return sorted.sort((a, b) => {
+        if (a.opportunityScore === undefined && b.opportunityScore === undefined) return 0;
+        if (a.opportunityScore === undefined) return 1;
+        if (b.opportunityScore === undefined) return -1;
+        return b.opportunityScore - a.opportunityScore;
+      });
     case 'normalized_price_asc':
     default:
       return sorted.sort((a, b) => {
@@ -359,6 +451,14 @@ export class SourcingService {
           .map((provider) => provider.name)
       : [];
 
+    const emptyDiagnostics: SourcingSearchDiagnostics = {
+      rawResultsBeforeFiltering: 0,
+      excludedByDeduplication: 0,
+      excludedByPriceBound: 0,
+      excludedByMinQuality: 0,
+      excludedByOverallLimit: 0,
+    };
+
     if (configuredProviders.length === 0) {
       logger.info('No sourcing provider is configured', { query: query.query });
       return {
@@ -371,9 +471,11 @@ export class SourcingService {
         providersSkipped: [],
         totalResults: 0,
         providerLatencyMs: {},
+        diagnostics: emptyDiagnostics,
       };
     }
 
+    const searchStartedAt = Date.now();
     const rawResults: NormalizedSourcingResult[] = [];
     const providerErrors: SourcingSearchResponse['providerErrors'] = [];
     const providersSearched: string[] = [];
@@ -414,21 +516,72 @@ export class SourcingService {
     );
 
     const deduped = deduplicate(rawResults);
-    const withPrice = await Promise.all(deduped.map((result) => attachNormalizedPrice(result)));
+    // Deep Web Sourcing Engine (mission section 11) — a second, narrower
+    // dedup pass for 'web' results only (see this function's own
+    // comment); eBay/Etsy results already deduped above are never
+    // touched again here.
+    const webDeduped = deduplicateWebResultsBySignal(deduped);
+    const withPrice = await Promise.all(webDeduped.map((result) => attachNormalizedPrice(result)));
     const withLandedCost = await Promise.all(withPrice.map((result) => attachLandedCost(result)));
     const withMargin = await Promise.all(withLandedCost.map((result) => attachMargin(result, query)));
 
     const priceBounds = await resolvePriceBoundsEur(query);
+    const qualityRank: Record<'HIGH' | 'MEDIUM' | 'LOW', number> = { HIGH: 3, MEDIUM: 2, LOW: 1 };
     const kept: NormalizedSourcingResult[] = [];
+    let excludedByPriceBound = 0;
+    let excludedByMinQuality = 0;
     for (const result of withMargin) {
-      const { matchReasons, warnings, excludedByPrice } = annotateResult(result, query, priceBounds);
-      if (excludedByPrice) continue;
-      kept.push({ ...result, matchReasons, warnings });
+      const { matchReasons, warnings: annotatedWarnings, excludedByPrice } = annotateResult(result, query, priceBounds);
+      if (excludedByPrice) {
+        excludedByPriceBound++;
+        continue;
+      }
+
+      // Deep Web Sourcing Engine (mission sections 14/15) — real,
+      // documented, additive signals computed from this result's own
+      // already-real fields; never used to silently drop a result on
+      // their own (only an explicit NormalizedSearchQuery.minQuality
+      // opt-in, right below, ever excludes on quality).
+      const qualityTier = classifyResultQuality(result);
+      const { score: opportunityScore, factors: scoreFactors } = computeOpportunityScore(result);
+
+      if (query.minQuality && qualityRank[qualityTier] < qualityRank[query.minQuality]) {
+        excludedByMinQuality++;
+        continue;
+      }
+
+      // Merge (never replace) — a pre-existing warning (today, only ever
+      // the price-conflict warning deduplicate() may have set) is kept
+      // alongside annotateResult's own freshly computed ones, never
+      // silently dropped.
+      const warnings = [...(result.warnings ?? []), ...annotatedWarnings];
+      kept.push({ ...result, matchReasons, warnings, qualityTier, opportunityScore, scoreFactors });
     }
 
     const overallLimit = query.limit ?? DEFAULT_OVERALL_LIMIT;
     const balanced = balanceByProvider(kept, overallLimit);
     const results = sortResults(balanced, query.sort);
+
+    const diagnostics: SourcingSearchDiagnostics = {
+      rawResultsBeforeFiltering: rawResults.length,
+      excludedByDeduplication: rawResults.length - webDeduped.length,
+      excludedByPriceBound,
+      excludedByMinQuality,
+      excludedByOverallLimit: kept.length - balanced.length,
+    };
+
+    // Deep Web Sourcing Engine (mission section 19) — one structured
+    // observability line per search, real counts only, never a secret
+    // (no API key/token is ever part of this object).
+    logger.info('Sourcing search completed', {
+      query: query.query,
+      deepSearch: query.deepSearch === true,
+      providersSearched,
+      providersFailed,
+      durationMs: Date.now() - searchStartedAt,
+      ...diagnostics,
+      finalResultCount: results.length,
+    });
 
     return {
       status: 'ok',
@@ -440,6 +593,7 @@ export class SourcingService {
       providersSkipped,
       totalResults: results.length,
       providerLatencyMs,
+      diagnostics,
     };
   }
 }

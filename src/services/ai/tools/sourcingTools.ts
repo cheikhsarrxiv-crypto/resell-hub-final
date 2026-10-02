@@ -49,13 +49,21 @@ const searchProductsInputSchema = z
     // Phase 3 — deterministic final ordering of the combined result set;
     // see NormalizedSearchQuery.sort's own comment for exactly what each
     // option means. Omitted = 'normalized_price_asc' (unchanged default).
-    sort: z.enum(['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match']).optional(),
+    sort: z.enum(['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match', 'opportunity_score']).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     offset: z.number().int().min(0).optional(),
     // Phase 3 — ONLY when set, a margin preview (estimatedMargin/
     // estimatedMarginPercent) is attached to results whose landed cost is
     // computable. Never invented: omitted means no margin preview at all.
     targetResalePrice: z.number().min(0).optional(),
+    // Deep Web Sourcing Engine — opt-in, additive; see
+    // NormalizedSearchQuery.deepSearch's own comment for exactly what
+    // this enables (multi-pass web search) and its fixed cost ceiling.
+    // Omitted/false: unchanged, single-pass behavior.
+    deepSearch: z.boolean().optional(),
+    // Deep Web Sourcing Engine — opt-in only; omitted keeps every result
+    // regardless of qualityTier, unchanged default behavior.
+    minQuality: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
   })
   .refine((data) => (data.minPrice === undefined && data.maxPrice === undefined) || data.currency !== undefined, {
     message: 'currency is required whenever minPrice or maxPrice is set',
@@ -134,14 +142,25 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       },
       sort: {
         type: 'string',
-        enum: ['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match'],
-        description: "Final ordering of the combined result set. Defaults to 'normalized_price_asc'. 'match' orders by real constraint matches, then known landed cost, then authenticity evidence, then price.",
+        enum: ['price_asc', 'price_desc', 'normalized_price_asc', 'known_cost_asc', 'match', 'opportunity_score'],
+        description: "Final ordering of the combined result set. Defaults to 'normalized_price_asc'. 'match' orders by real constraint matches, then known landed cost, then authenticity evidence, then price. 'opportunity_score' orders descending by the transparent, additive score on each result (see opportunityScore/scoreFactors) — never a claim of certain profitability.",
       },
       limit: { type: 'number', description: 'Max combined results returned overall (1-50), balanced fairly across providers when more candidates than this were found.' },
       offset: { type: 'number', description: 'Pagination offset.' },
       targetResalePrice: {
         type: 'number',
         description: 'Optional real resale price the reseller has in mind. When set, results whose landed cost is known get a margin preview (estimatedMargin/estimatedMarginPercent). Never invented — omit to skip margin entirely.',
+      },
+      deepSearch: {
+        type: 'boolean',
+        description:
+          'Deep Web Sourcing Engine — opt-in, affects the "web" provider only. false/omitted (default): one fast Tavily search pass, unchanged cost/latency. true: allows up to 4 search passes (exact, then — only if the first found too few valid priced offers — secondhand/outlet keyword variants, then a recovery pass only if still zero) and up to 11 extraction calls total, stopping early once enough high-quality results are found. Never changes the fixed AI Units cost of this tool (3). Use true for an exploratory or under-served query (e.g. few/no results from a first fast search); keep it false/omitted for a quick, cheap lookup.',
+      },
+      minQuality: {
+        type: 'string',
+        enum: ['HIGH', 'MEDIUM', 'LOW'],
+        description:
+          'Opt-in only — omit to keep every result regardless of quality tier (default, unchanged). When set, excludes any result whose qualityTier ranks below this (HIGH requires availability+condition+seller/authenticity evidence all known; MEDIUM requires at least one of availability/condition known; LOW is everything else). Excluded count is reported in diagnostics.excludedByMinQuality, never silent.',
       },
     },
     required: ['query'],
@@ -182,7 +201,11 @@ export const searchProductsTool: AgentToolDefinition<z.infer<typeof searchProduc
       // Phase 3 — observability only, never used to rank/filter results.
       providerLatencyMs: response.providerLatencyMs,
       knownUnavailableSources,
-      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. estimatedMargin/estimatedMarginPercent (when present) are a landed-cost-only preview, never including a marketplace selling fee, and only ever computed when targetResalePrice was explicitly given — never invented.",
+      // Deep Web Sourcing Engine — real, counted reasons results were
+      // lost along the pipeline (never a guess), so a zero/low-result
+      // outcome can be explained precisely instead of just "no results".
+      diagnostics: response.diagnostics,
+      note: "Prices are in each result's own original currency, not converted; normalizedPriceEur/estimatedKnownCostEur (when present) are supplementary conversions, not the authoritative price. estimatedMargin/estimatedMarginPercent (when present) are a landed-cost-only preview, never including a marketplace selling fee, and only ever computed when targetResalePrice was explicitly given — never invented. qualityTier/opportunityScore/scoreFactors (when present) are transparent, additive signals computed only from this result's own real fields — never a guarantee of profitability or availability.",
     };
   },
 };

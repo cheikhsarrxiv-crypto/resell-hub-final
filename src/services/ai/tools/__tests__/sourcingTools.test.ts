@@ -51,6 +51,20 @@ describe('search_products tool definition', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', condition: 'mint' }).success).toBe(false);
     });
 
+    it('Deep Web Sourcing Engine — accepts an optional deepSearch boolean, omitted by default', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', deepSearch: true }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x' }).success).toBe(true);
+    });
+
+    it('Deep Web Sourcing Engine — accepts a valid minQuality, rejects an invalid one', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', minQuality: 'HIGH' }).success).toBe(true);
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', minQuality: 'EXCELLENT' }).success).toBe(false);
+    });
+
+    it('Deep Web Sourcing Engine — accepts "opportunity_score" as a sort value', () => {
+      expect(searchProductsTool.inputSchema.safeParse({ query: 'x', sort: 'opportunity_score' }).success).toBe(true);
+    });
+
     it('accepts an optional worldwide boolean', () => {
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x', worldwide: true }).success).toBe(true);
       expect(searchProductsTool.inputSchema.safeParse({ query: 'x' }).success).toBe(true);
@@ -225,6 +239,15 @@ describe('search_products tool definition', () => {
       const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
 
       expect(result.providerLatencyMs).toEqual({ ebay: 123 });
+    });
+
+    it('Deep Web Sourcing Engine — diagnostics is passed through unchanged, for zero/low-result explanation', async () => {
+      const diagnostics = { rawResultsBeforeFiltering: 3, excludedByDeduplication: 1, excludedByPriceBound: 1, excludedByMinQuality: 0, excludedByOverallLimit: 0 };
+      searchMock.mockResolvedValue({ status: 'ok', results: [], providerErrors: [], diagnostics });
+
+      const result: any = await searchProductsTool.handler('ws-1', { query: 'x' });
+
+      expect(result.diagnostics).toEqual(diagnostics);
     });
 
     it('Phase 3 — matchReasons/warnings/estimatedMargin flow through untouched as part of each result', async () => {
