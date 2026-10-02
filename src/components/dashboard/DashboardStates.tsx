@@ -1,6 +1,7 @@
 'use client';
 
-import { AlertCircle, InboxIcon, Loader } from 'lucide-react';
+import Link from 'next/link';
+import { AlertCircle, InboxIcon, Loader, Lock } from 'lucide-react';
 import { ReactNode } from 'react';
 import { DashboardButton } from './DashboardButton';
 
@@ -23,23 +24,57 @@ interface DashboardErrorStateProps {
   message?: string;
   details?: string | null;
   onRetry?: (() => void) | null;
+  /** Takes precedence over onRetry when given — e.g. a "Sign in again" link for an auth error, where retrying the same request would just fail again. */
+  action?: ReactNode | null;
 }
 
 export function DashboardErrorState({
   message = 'An error occurred',
   details = null,
   onRetry = null,
+  action = null,
 }: DashboardErrorStateProps) {
   return (
     <div className="flex flex-col items-center justify-center py-10 text-center bg-red-500/[0.04] rounded-2xl border border-red-500/20 p-6">
       <AlertCircle className="w-6 h-6 text-red-400 mb-4" />
       <p className="text-red-300 font-medium mb-1">{message}</p>
       {details && <p className="text-red-400/70 text-sm mb-4">{details}</p>}
-      {onRetry && (
-        <DashboardButton variant="danger" size="sm" onClick={onRetry}>
-          Try Again
-        </DashboardButton>
+      {action ? (
+        action
+      ) : (
+        onRetry && (
+          <DashboardButton variant="danger" size="sm" onClick={onRetry}>
+            Try Again
+          </DashboardButton>
+        )
       )}
+    </div>
+  );
+}
+
+interface DashboardUpgradeStateProps {
+  message?: string;
+}
+
+/**
+ * A 403 from a plan-gated endpoint (e.g. advancedAnalytics) is never a
+ * failure — it's expected tiering. Rendered instead of
+ * DashboardErrorState so the user sees an actionable upgrade path, not a
+ * generic "something went wrong".
+ */
+export function DashboardUpgradeState({
+  message = 'This feature is not included in your current plan.',
+}: DashboardUpgradeStateProps) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 text-center bg-[#FF5A1F]/[0.04] rounded-2xl border border-[#FF5A1F]/20 p-6">
+      <Lock className="w-6 h-6 text-[#FF5A1F] mb-4" />
+      <p className="text-white font-medium mb-1">Upgrade required</p>
+      <p className="text-gray-400 text-sm mb-4 max-w-sm">{message}</p>
+      <Link href="/dashboard/subscription">
+        <DashboardButton variant="primary" size="sm">
+          View plans
+        </DashboardButton>
+      </Link>
     </div>
   );
 }

@@ -13,16 +13,15 @@ import {
 import { StatCard } from '@/components/dashboard/StatCard';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
-import { DashboardLoadingState } from '@/components/dashboard/DashboardStates';
-import { DashboardMetrics } from '@/types';
+import { DashboardLoadingState, DashboardErrorState, DashboardUpgradeState } from '@/components/dashboard/DashboardStates';
+import { classifyMetricsResponse, type MetricsFetchOutcome } from '@/lib/dashboardMetricsState';
 import { formatCurrency, formatNumber } from '@/lib/utils';
 import { TrendingUp, ShoppingCart, Package, Zap, Plus } from 'lucide-react';
 
 export default function DashboardPage() {
   const { workspaceId, isReady } = useWorkspace();
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [state, setState] = useState<MetricsFetchOutcome | { kind: 'loading' }>({ kind: 'loading' });
   const [revenueTrend, setRevenueTrend] = useState<{ date: string; revenue: number }[]>([]);
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!isReady) return;
@@ -31,37 +30,62 @@ export default function DashboardPage() {
 
   const fetchMetrics = async () => {
     if (!workspaceId) {
-      setLoading(false);
+      setState({ kind: 'error', message: 'No workspace found for this account.' });
       return;
     }
+
+    setState({ kind: 'loading' });
 
     try {
       const [metricsRes, overviewRes] = await Promise.all([
         fetch(`/api/analytics/dashboard?workspaceId=${workspaceId}&days=30`),
         fetch(`/api/analytics/overview?workspaceId=${workspaceId}&days=14`),
       ]);
-      const data = await metricsRes.json();
-      if (data.success) {
-        setMetrics(data.metrics);
-      }
-      const overviewData = await overviewRes.json();
-      if (overviewData.success) {
+      const data = await metricsRes.json().catch(() => null);
+      setState(classifyMetricsResponse(metricsRes.status, data, 'Failed to load metrics.'));
+
+      // Best-effort: the revenue sparkline is a nice-to-have, never the
+      // reason the whole page shows an error — a failure here just means
+      // no sparkline, same as before this fix.
+      const overviewData = await overviewRes.json().catch(() => null);
+      if (overviewRes.ok && overviewData?.success) {
         setRevenueTrend(overviewData.revenueTrend || []);
       }
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
-    } finally {
-      setLoading(false);
+      setState({ kind: 'error', message: 'A network error occurred while loading your dashboard.' });
     }
   };
 
-  if (loading) {
+  if (state.kind === 'loading') {
     return <DashboardLoadingState message="Loading dashboard..." />;
   }
 
-  if (!metrics) {
-    return <DashboardLoadingState message="Failed to load metrics" />;
+  if (state.kind === 'plan_upgrade_required') {
+    return <DashboardUpgradeState message={state.message} />;
   }
+
+  if (state.kind === 'unauthorized') {
+    return (
+      <DashboardErrorState
+        message="Session expired"
+        details={state.message}
+        action={
+          <Link href="/login">
+            <DashboardButton variant="primary" size="sm">
+              Sign in again
+            </DashboardButton>
+          </Link>
+        }
+      />
+    );
+  }
+
+  if (state.kind === 'error') {
+    return <DashboardErrorState message="Failed to load metrics" details={state.message} onRetry={fetchMetrics} />;
+  }
+
+  const metrics = state.metrics;
 
   return (
     <div className="space-y-6">

@@ -2,17 +2,18 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, StatCard } from '@/components/UI/Card';
-import { DashboardMetrics } from '@/types';
+import { LoadingState, ErrorState, UpgradeState } from '@/components/StateComponents';
 import { formatCurrency, formatNumber } from '@/lib/utils';
 import { TrendingUp, ShoppingCart, Package, Zap } from 'lucide-react';
 import { getWorkspaceId } from '@/lib/workspace-client';
+import { classifyMetricsResponse, type MetricsFetchOutcome } from '@/lib/dashboardMetricsState';
 
 export default function DashboardPage() {
   const params = useParams();
   const slug = params.slug as string;
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [state, setState] = useState<MetricsFetchOutcome | { kind: 'loading' }>({ kind: 'loading' });
   const [workspaceId, setWorkspaceId] = useState<string>('');
 
   useEffect(() => {
@@ -31,33 +32,51 @@ export default function DashboardPage() {
       setWorkspaceId(id);
     } catch (error) {
       console.error('Failed to get workspace ID:', error);
-      setLoading(false);
+      setState({ kind: 'error', message: 'Unable to load your workspace. Please try again.' });
     }
   };
 
   const fetchMetrics = async () => {
+    setState({ kind: 'loading' });
     try {
       const response = await fetch(
         `/api/analytics/dashboard?workspaceId=${workspaceId}&days=30`
       );
-      const data = await response.json();
-      if (data.success) {
-        setMetrics(data.metrics);
-      }
+      const data = await response.json().catch(() => null);
+      setState(classifyMetricsResponse(response.status, data, 'Failed to load metrics.'));
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
-    } finally {
-      setLoading(false);
+      setState({ kind: 'error', message: 'A network error occurred while loading your dashboard.' });
     }
   };
 
-  if (loading) {
-    return <div className="text-center py-12">Loading dashboard...</div>;
+  if (state.kind === 'loading') {
+    return <LoadingState message="Loading dashboard..." />;
   }
 
-  if (!metrics) {
-    return <div className="text-center py-12">Failed to load metrics</div>;
+  if (state.kind === 'plan_upgrade_required') {
+    return <UpgradeState message={state.message} />;
   }
+
+  if (state.kind === 'unauthorized') {
+    return (
+      <ErrorState
+        message="Session expired"
+        details={state.message}
+        action={
+          <Link href="/login" className="px-4 py-2 bg-[#FF5A1F] text-white rounded hover:bg-[#e64f18] text-sm font-medium">
+            Sign in again
+          </Link>
+        }
+      />
+    );
+  }
+
+  if (state.kind === 'error') {
+    return <ErrorState message="Failed to load metrics" details={state.message} onRetry={fetchMetrics} />;
+  }
+
+  const metrics = state.metrics;
 
   return (
     <div className="space-y-8">
