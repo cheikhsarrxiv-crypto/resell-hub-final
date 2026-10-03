@@ -523,6 +523,7 @@ describe('SourcingService.search', () => {
         excludedByDeduplication: 0,
         excludedByPriceBound: 0,
         excludedByMinQuality: 0,
+        excludedByUnresolvedListingPage: 0,
         excludedByOverallLimit: 0,
       });
     });
@@ -537,6 +538,7 @@ describe('SourcingService.search', () => {
         excludedByDeduplication: 0,
         excludedByPriceBound: 0,
         excludedByMinQuality: 0,
+        excludedByUnresolvedListingPage: 0,
         excludedByOverallLimit: 0,
       });
     });
@@ -772,6 +774,86 @@ describe('SourcingService.search', () => {
           if (originalStaticRates === undefined) delete process.env.CURRENCY_STATIC_RATES;
           else process.env.CURRENCY_STATIC_RATES = originalStaticRates;
         }
+      });
+
+      it('Deep Web Sourcing Engine regression — the exact real production case: 4021 INR, no reliable rate configured -> REJECT, never presented as "under 50 EUR"', async () => {
+        const response = await run(4021, 'INR');
+        expect(response.results).toHaveLength(0);
+        expect(response.diagnostics.excludedByPriceBound).toBe(1);
+      });
+    });
+
+    // Deep Web Sourcing Engine regression tests — reproduces the exact
+    // real production case reported: a "Vintage Nike Air Max 2 Cross
+    // Trainer..." result from an Etsy /market/nike_air_max_used page,
+    // price 4021 INR, pageType UNKNOWN, no productUrl, kept with only a
+    // warning by the previous fix. Both real causes (unconvertible price,
+    // AND unresolved listing page) are reproduced independently here so a
+    // future regression on either one is caught even if the other were
+    // somehow fixed differently.
+    describe('Deep Web Sourcing Engine regression — the real "Etsy /market/nike_air_max_used" production case', () => {
+      it('the exact real case reproduced end-to-end: 4021 INR + Etsy /market/ page, no reliable rate, no productUrl -> excluded on BOTH grounds', async () => {
+        const result = fakeResult({
+          source: 'web',
+          sourceId: 'etsy-market-nike-air-max-used',
+          sourceUrl: 'https://www.etsy.com/market/nike_air_max_used',
+          title: 'Vintage Nike Air Max 2 Cross Trainer Sneakers Black White',
+          brand: 'Nike',
+          price: 4021,
+          currency: 'INR',
+          pageType: 'UNKNOWN' as const,
+          productUrl: undefined,
+        });
+        getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+        const response = await SourcingService.search({ query: 'Nike Air Max', condition: 'used', maxPrice: 50, currency: 'EUR' });
+
+        expect(response.results).toHaveLength(0);
+        // Price is checked before the listing-page check in the pipeline,
+        // so this specific case is counted under price — the dedicated
+        // isUnresolvedListingPage unit tests (OpportunityRankingService
+        // test file) independently confirm the listing-page exclusion
+        // itself fires on this exact URL/pageType/productUrl combination.
+        expect(response.diagnostics.excludedByPriceBound).toBe(1);
+      });
+
+      it('an Etsy /market/... page with NO productUrl is excluded even when its price IS reliably comparable and within budget — the page-type problem is independent of the price problem', async () => {
+        const result = fakeResult({
+          source: 'web',
+          sourceId: 'etsy-market-nike-air-max-used-eur',
+          sourceUrl: 'https://www.etsy.com/market/nike_air_max_used',
+          title: 'Nike Air Max 90 used',
+          brand: 'Nike',
+          price: 30,
+          currency: 'EUR',
+          pageType: 'UNKNOWN' as const,
+          productUrl: undefined,
+        });
+        getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+        const response = await SourcingService.search({ query: 'Nike Air Max', maxPrice: 50, currency: 'EUR' });
+
+        expect(response.results).toHaveLength(0);
+        expect(response.diagnostics.excludedByUnresolvedListingPage).toBe(1);
+      });
+
+      it('a real Nike Air Max offer with a direct EUR price within maxPrice is ALWAYS accepted — the fix never over-rejects a genuine, well-formed offer', async () => {
+        const result = fakeResult({
+          source: 'web',
+          sourceId: 'real-nike-air-max-90',
+          sourceUrl: 'https://www.vinted.fr/items/123-nike-air-max-90',
+          title: 'Nike Air Max 90 used size 42',
+          brand: 'Nike',
+          price: 40,
+          currency: 'EUR',
+          pageType: 'PRODUCT_PAGE' as const,
+        });
+        getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+        const response = await SourcingService.search({ query: 'Nike Air Max', condition: 'used', maxPrice: 50, currency: 'EUR' });
+
+        expect(response.results).toHaveLength(1);
+        expect(response.results[0].sourceUrl).toBe('https://www.vinted.fr/items/123-nike-air-max-90');
       });
     });
 

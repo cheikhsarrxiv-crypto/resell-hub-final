@@ -301,6 +301,60 @@ export function classifyResultQuality(result: NormalizedSourcingResult): 'HIGH' 
   return tier;
 }
 
+// Deliberately narrow, documented URL path patterns that reliably mean
+// "this is a listing of several items, not one specific product" across
+// the platforms this provider has actually seen — e.g. Etsy's own
+// /market/<slug> browse pages (the real false positive this fix
+// addresses), generic /collections//category(ies)//search//browse paths,
+// or a query-string search (?q=...). This is a FALLBACK, consulted only
+// when the LLM extraction itself reported pageType as 'UNKNOWN' (never
+// overrides an explicit PRODUCT_PAGE classification) — see
+// isUnresolvedListingPage below for exactly when it applies. Extend only
+// with another real, verified listing-page URL convention, never a guess.
+const LISTING_PAGE_URL_PATTERN = /\/(market|collections?|categor(?:y|ies)|search|browse|shop\/all)(?:[/?]|$)|[?&]q=/i;
+
+/** Mechanical URL-path check only — never a claim about the page's actual content, which no one here has fetched. Returns false for an unparseable URL rather than guessing. */
+export function isLikelyListingPageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return LISTING_PAGE_URL_PATTERN.test(parsed.pathname) || LISTING_PAGE_URL_PATTERN.test(parsed.search);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deep Web Sourcing Engine fix (mission: "une page catégorie/search/
+ * brand/marketplace page qui ne fournit pas un productUrl direct doit
+ * être exclue du résultat final"). Stronger than classifyResultQuality's
+ * own MEDIUM-cap above: this is an outright exclusion, applied in
+ * SourcingService BEFORE a result is kept at all.
+ *
+ * A result is an unresolved listing page when it has NO distinct
+ * `productUrl` of its own AND EITHER:
+ *   - the extraction itself classified pageType as CATEGORY_PAGE/
+ *     SEARCH_PAGE/COLLECTION_PAGE (trust the model's own classification), OR
+ *   - pageType came back UNKNOWN (or was never set) AND the result's own
+ *     sourceUrl deterministically looks like a listing page by URL path
+ *     (isLikelyListingPageUrl) — this is the real gap this fix closes:
+ *     the extraction model mis-classified a real Etsy /market/... browse
+ *     page as UNKNOWN instead of CATEGORY_PAGE, so relying on pageType
+ *     alone let it through. The URL itself is real, provider-reported
+ *     data, never guessed, so checking it is not an invented signal.
+ *
+ * A result the extraction explicitly classified as PRODUCT_PAGE is NEVER
+ * excluded by this function even with no productUrl — its own sourceUrl
+ * already IS the direct product link in that case (see
+ * classifyResultQuality's own PRODUCT_PAGE test for the same rule applied
+ * to quality tier).
+ */
+export function isUnresolvedListingPage(result: NormalizedSourcingResult): boolean {
+  if (result.productUrl) return false;
+  if (result.pageType === 'CATEGORY_PAGE' || result.pageType === 'SEARCH_PAGE' || result.pageType === 'COLLECTION_PAGE') return true;
+  if ((result.pageType === undefined || result.pageType === 'UNKNOWN') && isLikelyListingPageUrl(result.sourceUrl)) return true;
+  return false;
+}
+
 /**
  * Deep Web Sourcing Engine (mission section 14) — a transparent, additive
  * point total (clamped to [0, 100]) built ONLY from signals already real
@@ -392,6 +446,8 @@ export const OpportunityRankingService = {
   classifyResultQuality,
   computeOpportunityScore,
   detectPriceConflict,
+  isLikelyListingPageUrl,
+  isUnresolvedListingPage,
 };
 
 export default OpportunityRankingService;

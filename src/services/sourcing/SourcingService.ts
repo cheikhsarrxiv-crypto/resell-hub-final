@@ -14,6 +14,7 @@ import {
   classifyResultQuality,
   computeOpportunityScore,
   detectPriceConflict,
+  isUnresolvedListingPage,
   ResolvedPriceBounds,
 } from './OpportunityRankingService';
 
@@ -456,6 +457,7 @@ export class SourcingService {
       excludedByDeduplication: 0,
       excludedByPriceBound: 0,
       excludedByMinQuality: 0,
+      excludedByUnresolvedListingPage: 0,
       excludedByOverallLimit: 0,
     };
 
@@ -530,10 +532,20 @@ export class SourcingService {
     const kept: NormalizedSourcingResult[] = [];
     let excludedByPriceBound = 0;
     let excludedByMinQuality = 0;
+    let excludedByUnresolvedListingPage = 0;
     for (const result of withMargin) {
       const { matchReasons, warnings: annotatedWarnings, excludedByPrice } = annotateResult(result, query, priceBounds);
       if (excludedByPrice) {
         excludedByPriceBound++;
+        continue;
+      }
+
+      // Deep Web Sourcing Engine fix — a category/search/collection/browse
+      // listing page with no distinct productUrl is never presented as an
+      // exploitable single offer, unconditionally (never opt-in, unlike
+      // minQuality below) — see isUnresolvedListingPage's own comment.
+      if (isUnresolvedListingPage(result)) {
+        excludedByUnresolvedListingPage++;
         continue;
       }
 
@@ -567,6 +579,7 @@ export class SourcingService {
       excludedByDeduplication: rawResults.length - webDeduped.length,
       excludedByPriceBound,
       excludedByMinQuality,
+      excludedByUnresolvedListingPage,
       excludedByOverallLimit: kept.length - balanced.length,
     };
 

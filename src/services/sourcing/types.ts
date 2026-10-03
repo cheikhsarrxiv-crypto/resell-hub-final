@@ -569,6 +569,15 @@ export interface SourcingSearchDiagnostics {
   excludedByPriceBound: number;
   /** Results dropped by an explicit NormalizedSearchQuery.minQuality filter — 0 whenever minQuality was not set at all. */
   excludedByMinQuality: number;
+  /**
+   * Deep Web Sourcing Engine fix — results dropped because they came from
+   * a category/search/collection/browse listing page with no distinct
+   * productUrl of their own (see OpportunityRankingService.
+   * isUnresolvedListingPage). Never a PRODUCT_PAGE result — those are
+   * never excluded on this basis, their own sourceUrl already is the
+   * direct link.
+   */
+  excludedByUnresolvedListingPage: number;
   /** Results dropped only by balanceByProvider's fairness cap once the combined set exceeded the requested `limit` — these were otherwise valid. */
   excludedByOverallLimit: number;
 }

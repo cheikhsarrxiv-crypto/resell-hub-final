@@ -4,7 +4,15 @@
  * comparator. Pure functions, no mocking needed.
  */
 import { describe, it, expect } from 'vitest';
-import { annotateResult, compareByMatch, classifyResultQuality, computeOpportunityScore, detectPriceConflict } from '@/services/sourcing/OpportunityRankingService';
+import {
+  annotateResult,
+  compareByMatch,
+  classifyResultQuality,
+  computeOpportunityScore,
+  detectPriceConflict,
+  isLikelyListingPageUrl,
+  isUnresolvedListingPage,
+} from '@/services/sourcing/OpportunityRankingService';
 import { NormalizedSourcingResult, NormalizedSearchQuery } from '@/services/sourcing/types';
 
 function makeResult(overrides: Partial<NormalizedSourcingResult> = {}): NormalizedSourcingResult {
@@ -450,5 +458,64 @@ describe('detectPriceConflict (Deep Web Sourcing Engine)', () => {
     const a = makeResult({ price: 50, currency: 'EUR' });
     const b = makeResult({ price: 50, currency: 'USD' });
     expect(detectPriceConflict(a, b)).toEqual({ conflicting: true, priceA: '50 EUR', priceB: '50 USD' });
+  });
+});
+
+describe('isLikelyListingPageUrl (Deep Web Sourcing Engine fix)', () => {
+  it('the exact real false positive observed: Etsy /market/nike_air_max_used', () => {
+    expect(isLikelyListingPageUrl('https://www.etsy.com/market/nike_air_max_used')).toBe(true);
+  });
+
+  it('other real listing-page URL conventions', () => {
+    expect(isLikelyListingPageUrl('https://commonhype.com/collections/used-shoes')).toBe(true);
+    expect(isLikelyListingPageUrl('https://example.com/category/sneakers')).toBe(true);
+    expect(isLikelyListingPageUrl('https://example.com/categories/sneakers')).toBe(true);
+    expect(isLikelyListingPageUrl('https://example.com/search?q=nike+air+max')).toBe(true);
+    expect(isLikelyListingPageUrl('https://example.com/browse/nike')).toBe(true);
+  });
+
+  it('a real single-product URL is never flagged as a listing page', () => {
+    expect(isLikelyListingPageUrl('https://www.vinted.fr/items/123-nike-air-max-90')).toBe(false);
+    expect(isLikelyListingPageUrl('https://example.com/product/nike-air-max-90')).toBe(false);
+  });
+
+  it('an unparseable URL -> false, never a guess', () => {
+    expect(isLikelyListingPageUrl('not a url')).toBe(false);
+  });
+});
+
+describe('isUnresolvedListingPage (Deep Web Sourcing Engine fix)', () => {
+  it('the real production case: pageType UNKNOWN + an Etsy /market/... URL + no productUrl -> excluded', () => {
+    const result = makeResult({
+      sourceUrl: 'https://www.etsy.com/market/nike_air_max_used',
+      pageType: 'UNKNOWN',
+      productUrl: undefined,
+    });
+    expect(isUnresolvedListingPage(result)).toBe(true);
+  });
+
+  it('pageType explicitly CATEGORY_PAGE/SEARCH_PAGE/COLLECTION_PAGE with no productUrl -> excluded, regardless of URL shape', () => {
+    expect(isUnresolvedListingPage(makeResult({ pageType: 'CATEGORY_PAGE', sourceUrl: 'https://example.com/anything', productUrl: undefined }))).toBe(true);
+    expect(isUnresolvedListingPage(makeResult({ pageType: 'SEARCH_PAGE', sourceUrl: 'https://example.com/anything', productUrl: undefined }))).toBe(true);
+    expect(isUnresolvedListingPage(makeResult({ pageType: 'COLLECTION_PAGE', sourceUrl: 'https://example.com/anything', productUrl: undefined }))).toBe(true);
+  });
+
+  it('a direct productUrl resolves the ambiguity regardless of pageType or URL shape — never excluded', () => {
+    const result = makeResult({
+      sourceUrl: 'https://www.etsy.com/market/nike_air_max_used',
+      pageType: 'UNKNOWN',
+      productUrl: 'https://www.etsy.com/listing/123456/nike-air-max-90',
+    });
+    expect(isUnresolvedListingPage(result)).toBe(false);
+  });
+
+  it('pageType explicitly PRODUCT_PAGE is never excluded on this basis, even with a listing-shaped URL and no productUrl — its own sourceUrl already is the direct link', () => {
+    const result = makeResult({ sourceUrl: 'https://example.com/collections/anything', pageType: 'PRODUCT_PAGE', productUrl: undefined });
+    expect(isUnresolvedListingPage(result)).toBe(false);
+  });
+
+  it('pageType UNKNOWN with a URL that does NOT look like a listing page -> kept (genuinely ambiguous, never dropped on a guess)', () => {
+    const result = makeResult({ sourceUrl: 'https://www.vinted.fr/items/123-nike-air-max-90', pageType: 'UNKNOWN', productUrl: undefined });
+    expect(isUnresolvedListingPage(result)).toBe(false);
   });
 });
