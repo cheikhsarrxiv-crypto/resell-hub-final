@@ -34,7 +34,10 @@ import {
   WebSourcingProvider,
   MAX_CANDIDATES_FOR_EXTRACTION,
   MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH,
+  isProductRelevant,
 } from '@/services/sourcing/providers/WebSourcingProvider';
+import { ExtractedWebOffer } from '@/services/sourcing/WebResultExtractionService';
+import { NormalizedSearchQuery } from '@/services/sourcing/types';
 import { MAX_WEB_SEARCH_PASSES } from '@/services/sourcing/WebSearchQueryPlanner';
 import { WebSearchResult } from '@/services/websourcing/types';
 
@@ -78,6 +81,81 @@ function fakeEngine(name: string, results: WebSearchResult[], error?: any) {
     search: vi.fn().mockResolvedValue({ results, error }),
   };
 }
+
+/** A minimal ExtractedWebOffer with only the given fields set, every other field null — matches the real extraction schema's shape. */
+function offer(overrides: Partial<ExtractedWebOffer> = {}): ExtractedWebOffer {
+  return {
+    title: null,
+    brand: null,
+    productName: null,
+    model: null,
+    price: null,
+    currency: null,
+    condition: null,
+    size: null,
+    color: null,
+    seller: null,
+    shippingCost: null,
+    location: null,
+    category: null,
+    authenticityClaim: null,
+    availability: null,
+    material: null,
+    imageUrl: null,
+    productUrl: null,
+    ...overrides,
+  };
+}
+
+// Deep Web Sourcing Engine fix (mission sections 1 & 4) — deterministic
+// product-relevance filter, run AFTER extraction, before an offer ever
+// becomes a NormalizedSourcingResult. Exact acceptance table from the
+// mission brief.
+describe('isProductRelevant (Deep Web Sourcing Engine fix)', () => {
+  const query: NormalizedSearchQuery = { query: 'Nike Air Max' };
+
+  it('ACCEPT — Nike Air Max 90', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90' }), query)).toBe(true);
+  });
+
+  it('ACCEPT — Nike Air Max 97', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 97' }), query)).toBe(true);
+  });
+
+  it('REJECT — Nike Air Jordan 1 (has "nike"/"air" but not "max")', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Jordan 1' }), query)).toBe(false);
+  });
+
+  it('REJECT — Jordan 1 (a different product line entirely)', () => {
+    expect(isProductRelevant(offer({ title: 'Jordan 1 Retro High OG SP Fragment x Union LA' }), query)).toBe(false);
+  });
+
+  it('REJECT — Nike Dunk (a different Nike product line)', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Dunk Low Retro' }), query)).toBe(false);
+  });
+
+  it('REJECT — Nike Air Max laces only (accessory, not the shoe)', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Max laces only' }), query)).toBe(false);
+  });
+
+  it('REJECT — "Nike Air Max 1/97 Sean Wotherspoon (Extra Lace Set Only)" — the real false-positive observed in production', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 1/97 Sean Wotherspoon (Extra Lace Set Only)' }), query)).toBe(false);
+  });
+
+  it('ACCEPT when the matching tokens are spread across brand/model/productName instead of title', () => {
+    expect(isProductRelevant(offer({ brand: 'Nike', model: 'Air Max 95', productName: 'Air Max' }), query)).toBe(true);
+  });
+
+  it('never rejects on insufficient information — a query with no usable tokens checks nothing', () => {
+    expect(isProductRelevant(offer({ title: 'anything at all' }), { query: 'x' })).toBe(true);
+  });
+
+  it('uses query.brand/model when the free-text query is more generic — "sneakers" + brand "Nike" + model "Air Max" still requires all three', () => {
+    const structuredQuery: NormalizedSearchQuery = { query: 'sneakers', brand: 'Nike', model: 'Air Max' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90 sneakers' }), structuredQuery)).toBe(true);
+    expect(isProductRelevant(offer({ title: 'Adidas sneakers' }), structuredQuery)).toBe(false);
+  });
+});
 
 describe('WebSourcingProvider.isConfigured', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -453,7 +531,11 @@ describe('WebSourcingProvider.searchProducts', () => {
       const engine = routedEngine({ 'Nike Air Max': { results: hits } });
       getConfiguredProvidersMock.mockReturnValue([engine]);
       extractBatchMock.mockImplementation(async (candidates: WebSearchResult[]) =>
-        candidates.map((c) => ({ result: c, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, price: 10 }) } }))
+        // title/brand overridden to match the "Nike Air Max" query — this
+        // test is about escalation/budget, not the relevance filter (see
+        // its own dedicated describe block), so the fixture must pass that
+        // filter to exercise what it's actually testing.
+        candidates.map((c) => ({ result: c, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, title: 'Nike Air Max 90', brand: 'Nike', price: 10 }) } }))
       );
 
       const outcome = await provider.searchProducts({ query: 'Nike Air Max', deepSearch: true });
@@ -471,7 +553,9 @@ describe('WebSourcingProvider.searchProducts', () => {
       });
       getConfiguredProvidersMock.mockReturnValue([engine]);
       extractBatchMock.mockImplementation(async (candidates: WebSearchResult[]) =>
-        candidates.map((c) => ({ result: c, outcome: { status: 'ok', data: offers(FULL_OFFER) } }))
+        // title/brand overridden to match the "Nike Air Max" query — see
+        // the previous test's own comment for why.
+        candidates.map((c) => ({ result: c, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, title: 'Nike Air Max 90', brand: 'Nike' }) } }))
       );
 
       await provider.searchProducts({ query: 'Nike Air Max', deepSearch: true });

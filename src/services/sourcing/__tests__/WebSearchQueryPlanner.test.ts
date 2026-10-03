@@ -68,4 +68,17 @@ describe('buildPasses', () => {
     const query: NormalizedSearchQuery = { query: 'vintage Burberry jacket', brand: 'Burberry', size: 'M', maxPrice: 100, currency: 'EUR' };
     expect(buildPasses(query, true)).toEqual(buildPasses(query, true));
   });
+
+  it('Deep Web Sourcing Engine fix (mission section 6): never repeats "used" when condition is already "used" — fixes the observed "... used used second hand pre-owned" noise', () => {
+    const passes = buildPasses({ query: 'Nike Air Max', condition: 'used', maxPrice: 50, currency: 'EUR' }, true);
+    const secondhand = passes.find((p) => p.pass === 'secondhand')!;
+    expect(secondhand.queryText).toBe('Nike Air Max under 50 EUR used second hand pre-owned');
+    expect(secondhand.queryText.match(/\bused\b/g)).toHaveLength(1);
+  });
+
+  it('never drops a keyword that is genuinely new — only an exact, already-present word is deduplicated', () => {
+    const passes = buildPasses({ query: 'Nike Air Max' }, true); // no condition set -> base has no "used" at all
+    const secondhand = passes.find((p) => p.pass === 'secondhand')!;
+    expect(secondhand.queryText).toBe('Nike Air Max used second hand pre-owned');
+  });
 });

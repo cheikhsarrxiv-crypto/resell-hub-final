@@ -192,6 +192,65 @@ function buildOfferSourceId(source: string, sourceUrl: string, offer: ExtractedW
   return crypto.createHash('sha256').update(key).digest('hex');
 }
 
+// Deliberately narrow, curated vocabulary — never a guess about any
+// specific listing's facts, only a generic "this text names a component/
+// accessory, not the item itself" signal (mission section 4's own
+// "Extra Lace Set Only" example). Extend only with another real,
+// unambiguous accessory-only phrase, never a product name.
+const ACCESSORY_ONLY_PATTERN = /\b(extra\s+)?laces?\s+(only|set)\b|\blace\s+set\b|\binsoles?\s+only\b|\bbox\s+only\b|\bsoles?\s+only\b|\bstrap\s+only\b|\bshoelaces?\s+only\b|\bkeychain\b|\bsticker\b/i;
+
+const RELEVANCE_STOPWORDS = new Set(['the', 'a', 'an', 'and', 'for', 'with', 'of', 'in', 'on']);
+
+/** Lowercases, splits on non-alphanumeric, drops stopwords and single characters — deterministic, no inference. */
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2 && !RELEVANCE_STOPWORDS.has(token));
+}
+
+/**
+ * Deep Web Sourcing Engine fix (mission sections 1 & 4) — a DETERMINISTIC
+ * check run AFTER LLM extraction, never relying on the model's own
+ * judgment of "is this the right product". A general web search for
+ * "Nike Air Max" can legitimately surface a page about a Jordan 1, a
+ * Nike Dunk, or an accessory-only listing ("Extra Lace Set Only") simply
+ * because the page also mentions "Nike" — this function rejects those
+ * before they ever become a NormalizedSourcingResult.
+ *
+ * Rule (deliberately simple and auditable, never a fuzzy/ML match):
+ * every significant token from the ORIGINAL structured query
+ * (query.brand + query.model + query.query — never the pass's own
+ * expanded text, which would already contain unrelated keywords like
+ * "used"/"outlet") must appear, verbatim, somewhere in the offer's own
+ * title/productName/brand/model. "Nike Air Max" requires "nike", "air"
+ * AND "max" all present — "Nike Air Jordan 1" has "nike"/"air" but not
+ * "max", so it is rejected without needing a hardcoded "Jordan" blocklist.
+ * A query with no usable tokens at all (should not happen — query.query
+ * is required/non-empty) never rejects anything on this basis, since
+ * there would be nothing real to check against.
+ *
+ * Separately, an offer whose own text matches ACCESSORY_ONLY_PATTERN is
+ * always rejected regardless of token overlap — "Nike Air Max 1/97 Sean
+ * Wotherspoon (Extra Lace Set Only)" contains every required token but
+ * the item actually sold is a lace set, not the shoe.
+ */
+export function isProductRelevant(offer: ExtractedWebOffer, query: NormalizedSearchQuery): boolean {
+  const offerText = [offer.title, offer.productName, offer.brand, offer.model].filter(Boolean).join(' ');
+
+  if (ACCESSORY_ONLY_PATTERN.test(offerText)) {
+    return false;
+  }
+
+  const requiredTokens = tokenize([query.brand, query.model, query.query].filter(Boolean).join(' '));
+  if (requiredTokens.length === 0) {
+    return true;
+  }
+
+  const offerTokens = new Set(tokenize(offerText));
+  return requiredTokens.every((token) => offerTokens.has(token));
+}
+
 /**
  * Converts one raw web hit + its (possibly multi-offer) extraction
  * outcome into zero, one, or several NormalizedSourcingResult objects —
@@ -205,6 +264,9 @@ function buildOfferSourceId(source: string, sourceUrl: string, offer: ExtractedW
  *     required fields, so an offer without both simply cannot become
  *     one — it is dropped, not forced into the shape with a fabricated
  *     number.
+ *   - it fails the deterministic isProductRelevant() check above (Deep
+ *     Web Sourcing Engine fix) — a real offer for a DIFFERENT product
+ *     than what was searched for, never shown as if it matched.
  * Extraction itself (see WebResultExtractionService's own system prompt)
  * is where "never combine a price from one offer with a size/model from
  * another" and "never invent a correspondence when it's ambiguous which
@@ -215,9 +277,18 @@ function buildOfferSourceId(source: string, sourceUrl: string, offer: ExtractedW
 function toNormalizedResults(
   raw: WebSearchResult,
   extracted: ExtractedWebPageOffers,
-  plannedQuery: PlannedQuery
+  plannedQuery: PlannedQuery,
+  query: NormalizedSearchQuery
 ): NormalizedSourcingResult[] {
   const validOffers = extracted.offers.filter((offer) => offer.price !== null && offer.currency !== null);
+  const relevantOffers = validOffers.filter((offer) => {
+    if (isProductRelevant(offer, query)) return true;
+    logger.warn('Dropped one extracted offer: not relevant to the requested product', {
+      url: raw.url,
+      offerTitle: offer.title ?? offer.productName ?? undefined,
+    });
+    return false;
+  });
   // extracted.pageType is always a real value from the real
   // WebResultExtractionService (defaulted to 'UNKNOWN' by its own schema
   // when the model didn't classify it) — the `?? 'UNKNOWN'` fallback here
@@ -232,9 +303,9 @@ function toNormalizedResults(
   // the general page rather than this exact offer. A page that happens to
   // yield exactly one valid offer gets no such warning: there is nothing
   // ambiguous about a single offer's own source link.
-  const sharedSourcePage = validOffers.length > 1;
+  const sharedSourcePage = relevantOffers.length > 1;
 
-  return validOffers.map((offer) => ({
+  return relevantOffers.map((offer) => ({
     source: 'web',
     sourceId: buildOfferSourceId('web', raw.url, offer),
     sharedSourcePage,
@@ -388,7 +459,7 @@ export class WebSourcingProvider implements SourcingProvider {
           logger.warn('Skipped one web candidate: extraction failed', { url: raw.url, reason: outcome.reason });
           continue;
         }
-        const normalized = toNormalizedResults(raw, outcome.data, plannedQuery);
+        const normalized = toNormalizedResults(raw, outcome.data, plannedQuery, query);
         results.push(...normalized);
         validOfferCount += normalized.length;
       }

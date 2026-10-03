@@ -44,17 +44,17 @@ describe('annotateResult — matchReasons', () => {
     expect(excludedByPrice).toBe(true);
   });
 
-  it('never excludes when price comparison is unresolvable — only a warning is added', () => {
+  it('Deep Web Sourcing Engine fix: a result is EXCLUDED (never kept "just in case") when the price bound itself is unresolvable — an unreliable comparison is never presented as having passed the filter', () => {
     const result = makeResult({ normalizedPriceEur: 9999 }); // would be "outside" if compared, but bounds themselves are unresolvable
     const { excludedByPrice, warnings } = annotateResult(result, { query: 'x' }, { requested: true, unresolvable: true });
-    expect(excludedByPrice).toBe(false);
+    expect(excludedByPrice).toBe(true);
     expect(warnings.some((w) => /uncertain/i.test(w))).toBe(true);
   });
 
-  it("never excludes a result whose OWN normalizedPriceEur is undefined, even with resolvable bounds — flags it 'uncertain' instead", () => {
+  it("Deep Web Sourcing Engine fix: a result whose OWN normalizedPriceEur is undefined is EXCLUDED, even with resolvable bounds — never shown as if it were within a price cap it could not actually be compared against", () => {
     const result = makeResult({ normalizedPriceEur: undefined, currency: 'JPY' });
     const { excludedByPrice, warnings } = annotateResult(result, { query: 'x' }, { requested: true, unresolvable: false, maxEur: 400 });
-    expect(excludedByPrice).toBe(false);
+    expect(excludedByPrice).toBe(true);
     expect(warnings.some((w) => /uncertain/i.test(w))).toBe(true);
   });
 
@@ -328,6 +328,45 @@ describe('classifyResultQuality (Deep Web Sourcing Engine)', () => {
   it('never upgrades a result just because authenticityStatus is "claimed" without availability/condition also known', () => {
     const result = makeResult({ authenticityStatus: 'claimed', authenticitySource: '100% authentic' });
     expect(classifyResultQuality(result)).toBe('LOW');
+  });
+
+  it('Deep Web Sourcing Engine fix (mission section 5): a result that would otherwise be HIGH is capped to MEDIUM when it comes from a CATEGORY_PAGE with no direct productUrl', () => {
+    const wouldBeHigh = makeResult({
+      availability: 'IN_STOCK',
+      condition: 'used',
+      seller: { name: 'shop', feedbackPercentage: 98 },
+      pageType: 'CATEGORY_PAGE',
+      productUrl: undefined,
+    });
+    expect(classifyResultQuality(wouldBeHigh)).toBe('MEDIUM');
+  });
+
+  it('same CATEGORY_PAGE result IS allowed to stay HIGH once a real, distinct productUrl is present', () => {
+    const result = makeResult({
+      availability: 'IN_STOCK',
+      condition: 'used',
+      seller: { name: 'shop', feedbackPercentage: 98 },
+      pageType: 'CATEGORY_PAGE',
+      productUrl: 'https://example.com/exact-item',
+    });
+    expect(classifyResultQuality(result)).toBe('HIGH');
+  });
+
+  it('SEARCH_PAGE and COLLECTION_PAGE results with no productUrl are capped the same way as CATEGORY_PAGE', () => {
+    const base = { availability: 'IN_STOCK' as const, condition: 'used', seller: { name: 'shop', feedbackPercentage: 98 }, productUrl: undefined };
+    expect(classifyResultQuality(makeResult({ ...base, pageType: 'SEARCH_PAGE' }))).toBe('MEDIUM');
+    expect(classifyResultQuality(makeResult({ ...base, pageType: 'COLLECTION_PAGE' }))).toBe('MEDIUM');
+  });
+
+  it('a PRODUCT_PAGE result with no productUrl is NOT capped — the page itself already IS the product page, sourceUrl is already direct', () => {
+    const result = makeResult({
+      availability: 'IN_STOCK',
+      condition: 'used',
+      seller: { name: 'shop', feedbackPercentage: 98 },
+      pageType: 'PRODUCT_PAGE',
+      productUrl: undefined,
+    });
+    expect(classifyResultQuality(result)).toBe('HIGH');
   });
 });
 

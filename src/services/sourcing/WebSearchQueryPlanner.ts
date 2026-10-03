@@ -86,6 +86,23 @@ export function buildBaseQueryText(query: NormalizedSearchQuery): string {
 }
 
 /**
+ * Deep Web Sourcing Engine fix (mission section 6) — appends `keywords`
+ * to `base`, but never repeats a whole word `base` already contains
+ * (case-insensitive). Fixes the observed "Nike Air Max under 50 EUR used
+ * used second hand pre-owned" noise: buildBaseQueryText already appends
+ * "used" for condition: 'used', and the secondhand pass's own keyword
+ * list also starts with "used" — this collapses the duplicate instead of
+ * sending a visibly broken query to the search engine. Purely textual
+ * deduplication, never drops a keyword that isn't genuinely already
+ * present.
+ */
+function appendKeywords(base: string, keywords: string): string {
+  const existingWords = new Set(base.toLowerCase().split(/\s+/).filter(Boolean));
+  const newWords = keywords.split(/\s+/).filter((word) => word && !existingWords.has(word.toLowerCase()));
+  return [base, ...newWords].join(' ').trim();
+}
+
+/**
  * Builds the ordered list of passes WebSourcingProvider should ATTEMPT,
  * in order — the caller (WebSourcingProvider) decides, after each pass's
  * real results come back, whether to actually run the next one (early
@@ -108,9 +125,9 @@ export function buildPasses(query: NormalizedSearchQuery, deepSearch: boolean): 
     return passes;
   }
 
-  passes.push({ pass: 'secondhand', queryText: `${base} ${SECONDHAND_KEYWORDS}`.trim(), searchDepth: 'basic' });
-  passes.push({ pass: 'outlet', queryText: `${base} ${OUTLET_KEYWORDS}`.trim(), searchDepth: 'basic' });
-  passes.push({ pass: 'recovery', queryText: `${base} ${RECOVERY_KEYWORDS}`.trim(), searchDepth: 'advanced' });
+  passes.push({ pass: 'secondhand', queryText: appendKeywords(base, SECONDHAND_KEYWORDS), searchDepth: 'basic' });
+  passes.push({ pass: 'outlet', queryText: appendKeywords(base, OUTLET_KEYWORDS), searchDepth: 'basic' });
+  passes.push({ pass: 'recovery', queryText: appendKeywords(base, RECOVERY_KEYWORDS), searchDepth: 'advanced' });
 
   return passes.slice(0, MAX_WEB_SEARCH_PASSES);
 }

@@ -40,10 +40,17 @@ export interface ResultAnnotation {
   matchReasons: string[];
   warnings: string[];
   /**
-   * True only when this result's own normalizedPriceEur is confidently
-   * known AND confidently outside the requested [minEur, maxEur] range —
-   * SourcingService excludes it entirely in that case. A result whose
-   * price comparison is uncertain is NEVER excluded on that basis alone.
+   * True when a price bound was requested and this result is EITHER
+   * confidently outside [minEur, maxEur], OR the comparison itself could
+   * not be reliably made (no exchange rate available for this result's
+   * own currency, or for the bound itself) — Deep Web Sourcing Engine fix
+   * (mission: "un résultat dont le prix ne peut pas être comparé de
+   * manière fiable à Xa EUR doit être exclu ... jamais présenté comme une
+   * opportunité <X EUR"). An unreliable comparison is never presented as
+   * if it had passed the filter — it is excluded exactly like a
+   * confidently-out-of-range result, never kept "just in case" with only
+   * a warning (the previous behavior, which let USD/MXN-priced results
+   * leak through a EUR price cap whenever no FX provider was configured).
    */
   excludedByPrice: boolean;
 }
@@ -75,12 +82,17 @@ export function annotateResult(
   const warnings: string[] = [];
   let excludedByPrice = false;
 
-  // --- Price bounds (Phase 3 "robust price filtering") ---
+  // --- Price bounds (Phase 3 "robust price filtering", tightened by the
+  // Deep Web Sourcing Engine fix — see ResultAnnotation.excludedByPrice's
+  // own comment for why an unreliable comparison is now excluded rather
+  // than kept with only a warning) ---
   if (priceBounds.requested) {
     if (priceBounds.unresolvable) {
       warnings.push('Price comparison against the requested price range is uncertain — no reliable exchange rate was available to convert it to EUR.');
+      excludedByPrice = true;
     } else if (result.normalizedPriceEur === undefined) {
       warnings.push(`Price comparison is uncertain — no reliable exchange rate was available to convert this listing's price (${result.currency}) to EUR.`);
+      excludedByPrice = true;
     } else {
       const aboveMin = priceBounds.minEur === undefined || result.normalizedPriceEur >= priceBounds.minEur;
       const belowMax = priceBounds.maxEur === undefined || result.normalizedPriceEur <= priceBounds.maxEur;
@@ -253,6 +265,16 @@ export function compareByMatch(a: NormalizedSourcingResult, b: NormalizedSourcin
  *   enough for HIGH.
  * LOW: neither availability nor condition is known, and there is no
  *   seller/authenticity signal either — a bare price and little else.
+ *
+ * Deep Web Sourcing Engine fix (mission section 5): a result extracted
+ * from a CATEGORY_PAGE/SEARCH_PAGE/COLLECTION_PAGE with no distinct
+ * `productUrl` of its own (the source link only opens the general
+ * listing page, not this specific offer) can never reach HIGH, however
+ * complete its other fields look — a well-documented row inside an
+ * unresolved category page is still less trustworthy than a real,
+ * direct product page. It is only ever capped down to MEDIUM, never
+ * dropped by this function alone (see SourcingResultCard's existing
+ * sharedSourcePage warning for the other half of this signal).
  */
 export function classifyResultQuality(result: NormalizedSourcingResult): 'HIGH' | 'MEDIUM' | 'LOW' {
   const availabilityKnown = result.availability !== undefined;
@@ -260,13 +282,23 @@ export function classifyResultQuality(result: NormalizedSourcingResult): 'HIGH' 
   const sellerKnown = result.seller !== undefined && (result.seller.feedbackScore !== undefined || result.seller.feedbackPercentage !== undefined);
   const authenticityEvidence = result.authenticityStatus === 'verified' || result.authenticityStatus === 'claimed';
 
+  let tier: 'HIGH' | 'MEDIUM' | 'LOW';
   if (availabilityKnown && conditionKnown && (sellerKnown || authenticityEvidence)) {
-    return 'HIGH';
+    tier = 'HIGH';
+  } else if (availabilityKnown || conditionKnown) {
+    tier = 'MEDIUM';
+  } else {
+    tier = 'LOW';
   }
-  if (availabilityKnown || conditionKnown) {
-    return 'MEDIUM';
+
+  const fromUnresolvedListingPage =
+    (result.pageType === 'CATEGORY_PAGE' || result.pageType === 'SEARCH_PAGE' || result.pageType === 'COLLECTION_PAGE') &&
+    !result.productUrl;
+  if (fromUnresolvedListingPage && tier === 'HIGH') {
+    tier = 'MEDIUM';
   }
-  return 'LOW';
+
+  return tier;
 }
 
 /**

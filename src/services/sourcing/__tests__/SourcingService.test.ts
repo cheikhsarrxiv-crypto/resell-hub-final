@@ -705,14 +705,14 @@ describe('SourcingService.search', () => {
       expect(response.results.map((r) => r.sourceUrl)).toEqual(['https://x/1']);
     });
 
-    it('never excludes a result whose price comparison is merely uncertain (no reliable EUR rate) — keeps it with a warning', async () => {
-      const uncertain = fakeResult({ price: 100, currency: 'JPY' }); // no rate configured in this test env
+    it('Deep Web Sourcing Engine fix: a result whose price comparison is merely uncertain (no reliable EUR rate) is EXCLUDED — never presented as if it passed a price cap it could not actually be compared against', async () => {
+      const uncertain = fakeResult({ sourceId: 'uncertain-1', sourceUrl: 'https://x/uncertain', price: 100, currency: 'JPY' }); // no rate configured in this test env
       getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [uncertain] }) })]);
 
       const response = await SourcingService.search({ query: 'x', maxPrice: 400, currency: 'EUR' });
 
-      expect(response.results).toHaveLength(1);
-      expect(response.results[0].warnings?.some((w) => /uncertain/i.test(w))).toBe(true);
+      expect(response.results).toHaveLength(0);
+      expect(response.diagnostics.excludedByPriceBound).toBe(1);
     });
 
     it('no minPrice/maxPrice requested -> nothing is excluded on price grounds', async () => {
@@ -722,6 +722,57 @@ describe('SourcingService.search', () => {
       const response = await SourcingService.search({ query: 'x' });
 
       expect(response.results).toHaveLength(1);
+    });
+
+    // Deep Web Sourcing Engine fix (mission section 2/8) — exact price
+    // acceptance matrix from the brief, maxPrice = 50 EUR throughout.
+    describe('price bound matrix (maxPrice = 50 EUR)', () => {
+      const run = (price: number, currency: string) => {
+        const result = fakeResult({ sourceId: `p-${price}-${currency}`, sourceUrl: `https://x/${price}-${currency}`, price, currency });
+        getAllProvidersMock.mockReturnValue([makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+        return SourcingService.search({ query: 'x', maxPrice: 50, currency: 'EUR' });
+      };
+
+      it('40 EUR -> ACCEPT (already in EUR, within bound)', async () => {
+        const response = await run(40, 'EUR');
+        expect(response.results).toHaveLength(1);
+      });
+
+      it('60 EUR -> REJECT (already in EUR, confidently outside bound)', async () => {
+        const response = await run(60, 'EUR');
+        expect(response.results).toHaveLength(0);
+      });
+
+      it('275 USD sans taux fiable configuré -> REJECT / non-comparable (never treated as "under 50 EUR")', async () => {
+        const response = await run(275, 'USD');
+        expect(response.results).toHaveLength(0);
+        expect(response.diagnostics.excludedByPriceBound).toBe(1);
+      });
+
+      it('275 USD AVEC un taux fiable configuré -> REJECT (converts to well above 50 EUR, a real comparison, not a guess)', async () => {
+        const originalStaticRates = process.env.CURRENCY_STATIC_RATES;
+        process.env.CURRENCY_STATIC_RATES = JSON.stringify({ USD_EUR: 0.9 }); // 275 * 0.9 = 247.5 EUR
+        try {
+          const response = await run(275, 'USD');
+          expect(response.results).toHaveLength(0);
+        } finally {
+          if (originalStaticRates === undefined) delete process.env.CURRENCY_STATIC_RATES;
+          else process.env.CURRENCY_STATIC_RATES = originalStaticRates;
+        }
+      });
+
+      it('40 USD AVEC un taux fiable configuré -> conversion then comparison -> ACCEPT (converts to below 50 EUR)', async () => {
+        const originalStaticRates = process.env.CURRENCY_STATIC_RATES;
+        process.env.CURRENCY_STATIC_RATES = JSON.stringify({ USD_EUR: 0.9 }); // 40 * 0.9 = 36 EUR
+        try {
+          const response = await run(40, 'USD');
+          expect(response.results).toHaveLength(1);
+          expect(response.results[0].normalizedPriceEur).toBeCloseTo(36, 5);
+        } finally {
+          if (originalStaticRates === undefined) delete process.env.CURRENCY_STATIC_RATES;
+          else process.env.CURRENCY_STATIC_RATES = originalStaticRates;
+        }
+      });
     });
 
     it('provider capability filtering: a provider with NO native price filter (e.g. one that ignores maxPrice, like Etsy) still gets a correct final result via SourcingService\'s own local, currency-aware filtering', async () => {
