@@ -855,6 +855,64 @@ describe('SourcingService.search', () => {
         expect(response.results).toHaveLength(1);
         expect(response.results[0].sourceUrl).toBe('https://www.vinted.fr/items/123-nike-air-max-90');
       });
+
+      // Deep Web Sourcing Engine regression — the exact second real
+      // production case reported: a Foot Locker category page result WITH
+      // a real productUrl (so the listing-page rule correctly leaves it
+      // candidate, per point 6 of this fix's own brief) but priced in USD
+      // with no reliable rate configured — this must be excluded on price
+      // grounds alone, independent of the (already-correct) page-type rule.
+      it('169.99 USD, target currency EUR, no reliable rate configured -> REJECT, even though productUrl is present and the page would otherwise stay candidate', async () => {
+        const result = fakeResult({
+          source: 'web',
+          sourceId: 'footlocker-nike-air-max-95-big-bubble',
+          sourceUrl: 'https://www.footlocker.com/category/sale/shoes/nike/air-max.html',
+          title: 'Nike Air Max 95 Big Bubble',
+          brand: 'Nike',
+          price: 169.99,
+          currency: 'USD',
+          pageType: 'UNKNOWN' as const,
+          productUrl: '/product/nike-air-max-95-big-bubble-mens/B6830602.html',
+        });
+        getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+        const response = await SourcingService.search({ query: 'Nike Air Max', condition: 'used', maxPrice: 50, currency: 'EUR' });
+
+        expect(response.results).toHaveLength(0);
+        expect(response.diagnostics.excludedByPriceBound).toBe(1);
+        // Confirms the listing-page rule genuinely did NOT fire here (the
+        // productUrl correctly keeps it out of that exclusion bucket) —
+        // price is the ONLY reason this is rejected, proving point 6 of
+        // the brief (don't touch the already-correct productUrl rule).
+        expect(response.diagnostics.excludedByUnresolvedListingPage).toBe(0);
+      });
+
+      it('40 USD with a reliable USD->EUR rate configured -> converted then compared to maxPrice 50 EUR -> ACCEPT', async () => {
+        const originalStaticRates = process.env.CURRENCY_STATIC_RATES;
+        process.env.CURRENCY_STATIC_RATES = JSON.stringify({ USD_EUR: 0.9 }); // 40 * 0.9 = 36 EUR
+        try {
+          const result = fakeResult({
+            source: 'web',
+            sourceId: 'footlocker-nike-air-max-cheap',
+            sourceUrl: 'https://www.footlocker.com/category/sale/shoes/nike/air-max.html',
+            title: 'Nike Air Max 90',
+            brand: 'Nike',
+            price: 40,
+            currency: 'USD',
+            pageType: 'UNKNOWN' as const,
+            productUrl: '/product/nike-air-max-90/A1234.html',
+          });
+          getAllProvidersMock.mockReturnValue([makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) })]);
+
+          const response = await SourcingService.search({ query: 'Nike Air Max', condition: 'used', maxPrice: 50, currency: 'EUR' });
+
+          expect(response.results).toHaveLength(1);
+          expect(response.results[0].normalizedPriceEur).toBeCloseTo(36, 5);
+        } finally {
+          if (originalStaticRates === undefined) delete process.env.CURRENCY_STATIC_RATES;
+          else process.env.CURRENCY_STATIC_RATES = originalStaticRates;
+        }
+      });
     });
 
     it('provider capability filtering: a provider with NO native price filter (e.g. one that ignores maxPrice, like Etsy) still gets a correct final result via SourcingService\'s own local, currency-aware filtering', async () => {
