@@ -54,6 +54,7 @@ import { createLogger } from '@/lib/logger';
 import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
+  RejectedSample,
   SourcingProvider,
   SourcingProviderCapability,
   SourcingProviderErrorInfo,
@@ -199,6 +200,82 @@ function buildOfferSourceId(source: string, sourceUrl: string, offer: ExtractedW
 // unambiguous accessory-only phrase, never a product name.
 const ACCESSORY_ONLY_PATTERN = /\b(extra\s+)?laces?\s+(only|set)\b|\blace\s+set\b|\binsoles?\s+only\b|\bbox\s+only\b|\bsoles?\s+only\b|\bstrap\s+only\b|\bshoelaces?\s+only\b|\bkeychain\b|\bsticker\b/i;
 
+/**
+ * Opportunity Classification fix (demographic filter) — deliberately
+ * narrow: whole-word matches only for the spelled-out vocabulary the
+ * mission named (toddler/infant/baby/kids/children/boys/girls/preschool/
+ * "grade school"), never a substring match that could false-positive on
+ * an unrelated word. "GS"/"PS"/"TD" are NOT matched as bare whole words —
+ * "PS" alone would false-positive on real, unrelated listings (e.g. a
+ * "Nike x PlayStation" collab literally abbreviated "PS", or "PS5"); the
+ * real, near-universal sneaker-marketplace convention for these
+ * abbreviations is parenthesized ("Nike Dunk Low (GS)"), which is what
+ * KIDS_SIZE_SUFFIX_PATTERN requires — a documented, deliberate precision
+ * choice over recall (see this engine's own audit report).
+ *
+ * Web Sourcing smoke-test fix (section 1) — French vocabulary added
+ * alongside the existing English one. The provider must not depend
+ * entirely on the Agent having already translated a kids/toddler-intent
+ * query to English before calling search_products: a reseller's own
+ * French query ("Nike Air Force 1 enfant") must be recognized exactly
+ * like its English equivalent, both when deciding to EXCLUDE a kids
+ * variant from an adult search and when deciding NOT to (an explicit
+ * French kids-intent query). Exactly the vocabulary requested, nothing
+ * broader — "ado"/"junior" are real, narrow French words for this
+ * segment, not generic enough to risk false-positiving on an unrelated
+ * listing.
+ *
+ * Boundary note: plain `\b` treats an accented letter (é, ç, ...) as a
+ * NON-word character (JS's `\b` is ASCII-only without a Unicode mode that
+ * still supports this) — `\bbébé\b` silently fails to match "Bébé" at a
+ * string/punctuation edge, which would have made half this French
+ * vocabulary never actually match. WORD_BOUNDARY_BEFORE/AFTER below
+ * reimplement the same "word vs non-word" test `\b` does, just extended
+ * to include the Latin-1 accented letter range, so every word in this
+ * list (English or French) gets the identical, real boundary guarantee.
+ */
+const WORD_CHARACTER_CLASS = 'a-zA-Z0-9_À-ÖØ-öø-ÿ';
+const WORD_BOUNDARY_BEFORE = `(?<![${WORD_CHARACTER_CLASS}])`;
+const WORD_BOUNDARY_AFTER = `(?![${WORD_CHARACTER_CLASS}])`;
+
+const KIDS_SEGMENT_WORDS =
+  'toddler|infants?|babies|baby|kids?|children|boys?|girls?|preschool|grade\\s*school|enfants?|bébé|bebe|nourrisson|fille|garçon|garcon|junior|ado|adolescente?|jeunesse';
+const KIDS_SEGMENT_PATTERN = new RegExp(`${WORD_BOUNDARY_BEFORE}(${KIDS_SEGMENT_WORDS})${WORD_BOUNDARY_AFTER}`, 'i');
+const KIDS_SIZE_SUFFIX_PATTERN = /\((?:gs|ps|td)\)/i;
+
+function textNamesKidsSegment(text: string): boolean {
+  return KIDS_SEGMENT_PATTERN.test(text) || KIDS_SIZE_SUFFIX_PATTERN.test(text);
+}
+
+/**
+ * Web Sourcing smoke-test fix (section 1) — a demographic-intent word
+ * (e.g. "enfant", "kids") is a SEGMENT signal, never a product-identifying
+ * keyword a listing's own title would ever literally repeat ("Nike Air
+ * Force 1 (GS)" never spells out "kids"/"enfant"). Stripped out before
+ * isProductRelevant's token-overlap check builds its required-token set,
+ * so putting such a word directly in `query.query` (a reseller's own free
+ * text, e.g. "Nike Air Force 1 pour enfant") never blocks an otherwise
+ * matching kids listing on an unrelated, impossible-to-satisfy token.
+ * Never strips a real brand/model word — only the fixed, narrow
+ * KIDS_SEGMENT_WORDS vocabulary above.
+ */
+function stripKidsSegmentWords(text: string): string {
+  return text.replace(new RegExp(`${WORD_BOUNDARY_BEFORE}(${KIDS_SEGMENT_WORDS})${WORD_BOUNDARY_AFTER}`, 'gi'), ' ');
+}
+
+/**
+ * True only when the RESELLER'S OWN query already names the kids/toddler/
+ * infant segment — in that case the demographic filter never applies at
+ * all (an explicit kids search must see kids results). Checked against
+ * the same structured fields isProductRelevant itself uses (brand + model
+ * + query + category — category included here since a reseller is more
+ * likely to name "kids" there than in `query` itself).
+ */
+export function queryRequestsKidsSegment(query: NormalizedSearchQuery): boolean {
+  const queryText = [query.brand, query.model, query.query, query.category].filter(Boolean).join(' ');
+  return textNamesKidsSegment(queryText);
+}
+
 const RELEVANCE_STOPWORDS = new Set(['the', 'a', 'an', 'and', 'for', 'with', 'of', 'in', 'on']);
 
 /** Lowercases, splits on non-alphanumeric, drops stopwords and single characters — deterministic, no inference. */
@@ -242,13 +319,49 @@ export function isProductRelevant(offer: ExtractedWebOffer, query: NormalizedSea
     return false;
   }
 
-  const requiredTokens = tokenize([query.brand, query.model, query.query].filter(Boolean).join(' '));
+  // Opportunity Classification fix (demographic filter) — a kids/toddler/
+  // infant variant is a genuinely DIFFERENT product than the adult one
+  // searched for, even though it shares every brand/model token (a "Nike
+  // Air Force 1 (GS)" contains "nike"/"air"/"force"/"1" just like the
+  // adult version) — never caught by the token-overlap check below, so
+  // checked explicitly here. Skipped entirely when the reseller's OWN
+  // query already names this segment.
+  if (textNamesKidsSegment(offerText) && !queryRequestsKidsSegment(query)) {
+    return false;
+  }
+
+  const requiredTokens = tokenize(stripKidsSegmentWords([query.brand, query.model, query.query].filter(Boolean).join(' ')));
   if (requiredTokens.length === 0) {
     return true;
   }
 
   const offerTokens = new Set(tokenize(offerText));
   return requiredTokens.every((token) => offerTokens.has(token));
+}
+
+/**
+ * Re-derives WHY isProductRelevant returned false, for a human-readable
+ * RejectedSample.reason — never changes isProductRelevant's own boolean
+ * contract (kept stable for its existing tests), just explains its
+ * verdict after the fact. Returns null when the offer IS relevant (should
+ * never be called in that case, but never throws if it is).
+ */
+function explainIrrelevance(offer: ExtractedWebOffer, query: NormalizedSearchQuery): string | null {
+  const offerText = [offer.title, offer.productName, offer.brand, offer.model].filter(Boolean).join(' ');
+
+  if (ACCESSORY_ONLY_PATTERN.test(offerText)) {
+    return 'This listing is for an accessory/component only (e.g. laces, box, insoles), not the item itself.';
+  }
+  if (textNamesKidsSegment(offerText) && !queryRequestsKidsSegment(query)) {
+    return 'This listing is for a kids/toddler/infant variant, excluded from an adult-intent search.';
+  }
+  const requiredTokens = tokenize(stripKidsSegmentWords([query.brand, query.model, query.query].filter(Boolean).join(' ')));
+  const offerTokens = new Set(tokenize(offerText));
+  const missing = requiredTokens.filter((token) => !offerTokens.has(token));
+  if (missing.length > 0) {
+    return `This listing's title does not contain the requested term(s): ${missing.join(', ')}.`;
+  }
+  return null;
 }
 
 /**
@@ -274,21 +387,48 @@ export function isProductRelevant(offer: ExtractedWebOffer, query: NormalizedSea
  * already-returned offer's OWN fields as a self-contained unit, it never
  * re-pairs or re-derives anything across offers itself.
  */
+interface NormalizationOutcome {
+  results: NormalizedSourcingResult[];
+  /** Opportunity Classification fix — real, counted/sampled rejections from THIS one page, merged by searchProducts across every pass/hit. */
+  noConfidentPriceCount: number;
+  irrelevantCount: number;
+  rejectedSamples: RejectedSample[];
+}
+
 function toNormalizedResults(
   raw: WebSearchResult,
   extracted: ExtractedWebPageOffers,
   plannedQuery: PlannedQuery,
   query: NormalizedSearchQuery
-): NormalizedSourcingResult[] {
+): NormalizationOutcome {
+  const rejectedSamples: RejectedSample[] = [];
+
+  const noPriceOffers = extracted.offers.filter((offer) => offer.price === null || offer.currency === null);
+  for (const offer of noPriceOffers) {
+    rejectedSamples.push({
+      title: offer.title ?? offer.productName ?? raw.title,
+      url: raw.url,
+      reason: 'No confident price and currency could be extracted for this offer.',
+    });
+  }
+
   const validOffers = extracted.offers.filter((offer) => offer.price !== null && offer.currency !== null);
-  const relevantOffers = validOffers.filter((offer) => {
-    if (isProductRelevant(offer, query)) return true;
+  const relevantOffers: ExtractedWebOffer[] = [];
+  for (const offer of validOffers) {
+    if (isProductRelevant(offer, query)) {
+      relevantOffers.push(offer);
+      continue;
+    }
     logger.warn('Dropped one extracted offer: not relevant to the requested product', {
       url: raw.url,
       offerTitle: offer.title ?? offer.productName ?? undefined,
     });
-    return false;
-  });
+    rejectedSamples.push({
+      title: offer.title ?? offer.productName ?? raw.title,
+      url: raw.url,
+      reason: explainIrrelevance(offer, query) ?? 'This listing does not match the requested product.',
+    });
+  }
   // extracted.pageType is always a real value from the real
   // WebResultExtractionService (defaulted to 'UNKNOWN' by its own schema
   // when the model didn't classify it) — the `?? 'UNKNOWN'` fallback here
@@ -305,7 +445,7 @@ function toNormalizedResults(
   // ambiguous about a single offer's own source link.
   const sharedSourcePage = relevantOffers.length > 1;
 
-  return relevantOffers.map((offer) => ({
+  const results: NormalizedSourcingResult[] = relevantOffers.map((offer) => ({
     source: 'web',
     sourceId: buildOfferSourceId('web', raw.url, offer),
     sharedSourcePage,
@@ -340,6 +480,12 @@ function toNormalizedResults(
     productUrl: offer.productUrl ?? undefined,
     material: offer.material ?? undefined,
     size: offer.size ?? undefined,
+    // Opportunity Classification fix — extracted by WebResultExtractionService
+    // since before this field existed on NormalizedSourcingResult, but
+    // previously discarded right here. Exactly the source's own words,
+    // never normalized/translated (comparison normalization lives
+    // entirely in OpportunityRankingService.normalizeColorTokens).
+    color: offer.color ?? undefined,
     availability: offer.availability ?? undefined,
     pageType,
     foundByQuery: plannedQuery.queryText,
@@ -351,6 +497,8 @@ function toNormalizedResults(
     // actually detects (see that function's own comment).
     verificationStatus: 'unverified',
   }));
+
+  return { results, noConfidentPriceCount: noPriceOffers.length, irrelevantCount: validOffers.length - relevantOffers.length, rejectedSamples };
 }
 
 export class WebSourcingProvider implements SourcingProvider {
@@ -399,6 +547,15 @@ export class WebSourcingProvider implements SourcingProvider {
     const seenUrls = new Set<string>();
     let validOfferCount = 0;
     let remainingExtractionBudget = MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH;
+    // Opportunity Classification fix — real, counted/sampled rejections,
+    // merged by SourcingService into its own SourcingSearchDiagnostics.
+    // rejectedSamples bounded here too (not just in SourcingService) so
+    // one pathological page/search can never grow this unboundedly before
+    // the final, global bound is even applied.
+    let noConfidentPriceCount = 0;
+    let irrelevantCount = 0;
+    const rejectedSamples: RejectedSample[] = [];
+    const MAX_REJECTED_SAMPLES_PER_PROVIDER = 20;
 
     for (const plannedQuery of passes) {
       // Recovery only ever runs as a last resort — never when an earlier
@@ -460,12 +617,22 @@ export class WebSourcingProvider implements SourcingProvider {
           continue;
         }
         const normalized = toNormalizedResults(raw, outcome.data, plannedQuery, query);
-        results.push(...normalized);
-        validOfferCount += normalized.length;
+        results.push(...normalized.results);
+        validOfferCount += normalized.results.length;
+        noConfidentPriceCount += normalized.noConfidentPriceCount;
+        irrelevantCount += normalized.irrelevantCount;
+        if (rejectedSamples.length < MAX_REJECTED_SAMPLES_PER_PROVIDER) {
+          rejectedSamples.push(...normalized.rejectedSamples.slice(0, MAX_REJECTED_SAMPLES_PER_PROVIDER - rejectedSamples.length));
+        }
       }
     }
 
-    return { results, error: errors[0] };
+    return {
+      results,
+      error: errors[0],
+      rejectedCounts: { irrelevantProduct: irrelevantCount, noConfidentPrice: noConfidentPriceCount },
+      rejectedSamples,
+    };
   }
 
   async getProductDetails(_sourceUrl: string): Promise<NormalizedSourcingResult | null> {

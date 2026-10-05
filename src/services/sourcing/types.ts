@@ -228,6 +228,19 @@ export interface NormalizedSourcingResult {
    * avoid ever merging two genuinely different sizes.
    */
   size?: string;
+  /**
+   * Opportunity Classification fix — ONLY when explicitly stated in the
+   * source text for this specific offer (WebSourcingProvider, from
+   * ExtractedWebOffer.color — extracted by WebResultExtractionService
+   * since before this field existed, but previously discarded before
+   * ever reaching this type; see OpportunityRankingService.compareColor
+   * for how it's compared against NormalizedSearchQuery.color). No other
+   * current provider reports a color on a RESULT (eBay/Etsy have no such
+   * field). Never normalized/translated here — exactly the source's own
+   * words (e.g. "Black/White"), comparison logic lives entirely in
+   * OpportunityRankingService, never in this type.
+   */
+  color?: string;
   seller?: {
     name?: string;
     feedbackScore?: number;
@@ -461,6 +474,38 @@ export interface NormalizedSourcingResult {
    * corroborated.
    */
   verificationStatus?: 'verified' | 'partially_verified' | 'unverified' | 'conflicting';
+  /**
+   * Opportunity Classification — computed by
+   * OpportunityRankingService.classifyOpportunity (see that file's own
+   * `OpportunityClassification` type), ONLY ever set on a result that
+   * survived every exclusion gate in SourcingService.search. A result
+   * SourcingService rejects outright (irrelevant product, incompatible
+   * color, unresolved listing page, confidently out of price range, ...)
+   * NEVER becomes a NormalizedSourcingResult with classification:
+   * 'REJECTED' — it is simply not in `results[]` at all (see
+   * SourcingSearchDiagnostics.rejectedSamples for how a rejection is
+   * still made visible, in aggregate, without ever appearing as a
+   * result). This field is therefore always 'VERIFIED_OPPORTUNITY' or
+   * 'WEB_LEAD' whenever present, never 'REJECTED' — `source !== 'web'` is
+   * NOT by itself sufficient for 'VERIFIED_OPPORTUNITY' (an eBay/Etsy
+   * result with qualityTier !== 'HIGH', a price conflict, or an
+   * unconfirmed requested color/size is just as much a 'WEB_LEAD' as a
+   * web result would be in the same situation).
+   */
+  classification?: 'VERIFIED_OPPORTUNITY' | 'WEB_LEAD';
+  /**
+   * Web Sourcing smoke-test fix (section 3) — a concise, real explanation
+   * of why `classification` is 'WEB_LEAD', derived ONLY from signals
+   * already computed for this exact result (see
+   * OpportunityRankingService.explainClassification) — never a new
+   * signal, never invented. Always undefined for 'VERIFIED_OPPORTUNITY'
+   * (nothing to explain) and for a result with no classification at all.
+   * Deliberately a short label, not a restatement of `warnings` (which
+   * already carry the full sentences) — this exists so the Agent/UI can
+   * show "why WEB_LEAD" in one place without re-deriving it from several
+   * warning strings.
+   */
+  classificationReason?: string;
 }
 
 export interface SourcingProviderErrorInfo {
@@ -470,9 +515,29 @@ export interface SourcingProviderErrorInfo {
   kind: 'timeout' | 'auth' | 'rate_limit' | 'upstream_error' | 'unknown';
 }
 
+/** One real, rejected candidate — never shown to the end user as a result, only ever surfaced via SourcingSearchDiagnostics.rejectedSamples for the Agent to explain a low/zero-result search. Bounded (see SourcingService's own MAX_REJECTED_SAMPLES). */
+export interface RejectedSample {
+  title: string;
+  url: string;
+  reason: string;
+}
+
 export interface SourcingProviderSearchOutcome {
   results: NormalizedSourcingResult[];
   error?: SourcingProviderErrorInfo;
+  /**
+   * Opportunity Classification fix — provider-level rejection diagnostics,
+   * for a candidate that was dropped BEFORE it could even become a
+   * NormalizedSourcingResult (so SourcingService's own per-result
+   * exclusion loop never sees it at all). Only WebSourcingProvider
+   * populates these today: eBay/Etsy never reject a candidate after the
+   * fact — an item either matches the API's own request or is never
+   * returned in the first place, so there is no real "rejected candidate"
+   * to report for them. Optional/omitted means "this provider has
+   * nothing of this kind to report", never "zero rejections happened".
+   */
+  rejectedCounts?: { irrelevantProduct?: number; noConfidentPrice?: number };
+  rejectedSamples?: RejectedSample[];
 }
 
 /**
@@ -580,6 +645,41 @@ export interface SourcingSearchDiagnostics {
   excludedByUnresolvedListingPage: number;
   /** Results dropped only by balanceByProvider's fairness cap once the combined set exceeded the requested `limit` — these were otherwise valid. */
   excludedByOverallLimit: number;
+  /**
+   * Opportunity Classification fix — candidates dropped because they are
+   * not really the requested product: WebSourcingProvider's own
+   * isProductRelevant (brand/model/keyword token mismatch, an
+   * accessory-only listing, or — new — a kids/toddler/infant variant
+   * excluded from an adult-intent search, see
+   * WebSourcingProvider.isDemographicMismatch) AND SourcingService's own
+   * color-incompatibility exclusion (see annotateResult's
+   * excludedByColor) — both are real "this is a different product than
+   * what was asked for" rejections, counted together. 0 for eBay/Etsy,
+   * which never reject a candidate after the fact.
+   */
+  excludedByIrrelevantProduct: number;
+  /**
+   * Opportunity Classification fix — web candidates whose page text
+   * never yielded a confident numeric price AND currency for any offer
+   * (see WebSourcingProvider.toNormalizedResults' own `validOffers`
+   * filter) — these were real pages the search engine found, simply
+   * never turned into an exploitable NormalizedSourcingResult. Always 0
+   * for eBay/Etsy (every item their structured API returns already has a
+   * real price).
+   */
+  excludedByNoConfidentPrice: number;
+  /**
+   * Opportunity Classification fix — a small, bounded sample of REAL
+   * rejected candidates (never fabricated, never the full list), so the
+   * Agent can explain a low/zero-result search precisely instead of just
+   * citing the counts above. Each entry's `reason` is a real, specific
+   * sentence (never generic). Capped at MAX_REJECTED_SAMPLES (20) total
+   * across every rejection reason combined — see SourcingService. NEVER
+   * meant for bulk display in the end-user UI (see search_products tool's
+   * own description) — it exists for diagnostics and for the Agent's own
+   * explanation, not as a second results list.
+   */
+  rejectedSamples: RejectedSample[];
 }
 
 /**

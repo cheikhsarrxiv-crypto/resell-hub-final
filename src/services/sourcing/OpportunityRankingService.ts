@@ -53,6 +53,100 @@ export interface ResultAnnotation {
    * leak through a EUR price cap whenever no FX provider was configured).
    */
   excludedByPrice: boolean;
+  /**
+   * Opportunity Classification fix — true only when a color was
+   * explicitly requested (NormalizedSearchQuery.color) AND this result's
+   * own reported color is confidently INCOMPATIBLE with it (see
+   * compareColor) — e.g. requesting "white" against a result reported as
+   * "black" (no overlap at all). An AMBIGUOUS case (e.g. "white" against
+   * "Black/White" — the requested color IS present, but so is another)
+   * is never excluded here, only downgraded to WEB_LEAD by
+   * classifyOpportunity — see this field's own name: only a confident
+   * incompatibility excludes, never an uncertain partial match.
+   */
+  excludedByColor: boolean;
+  /**
+   * 'not_requested' when NormalizedSearchQuery.color was never set — no
+   * color judgment is ever made in that case. 'unknown' means a color WAS
+   * requested but this result's own source never reported one. See
+   * compareColor for 'match'/'incompatible'/'ambiguous'.
+   */
+  colorOutcome: ColorMatchOutcome | 'unknown' | 'not_requested';
+  /** 'not_requested' when NormalizedSearchQuery.size was never set. 'match'/'different'/'absent' never excludes a result — see classifyOpportunity for how this instead gates VERIFIED_OPPORTUNITY vs WEB_LEAD. */
+  sizeOutcome: 'match' | 'different' | 'absent' | 'not_requested';
+}
+
+/**
+ * Opportunity Classification fix — the real, structured outcome of
+ * comparing a REQUESTED color against a result's own REPORTED color
+ * (never a guess, never applied unless both are actually present):
+ * - 'match': every color word the source reports is also requested (a
+ *   clean, unambiguous match — e.g. "white" vs "white").
+ * - 'incompatible': NONE of the requested color words appear in the
+ *   source's reported color at all (e.g. "white" vs "black") — a
+ *   confident mismatch.
+ * - 'ambiguous': SOME but not all overlap — the source reports the
+ *   requested color AND at least one other (e.g. "white" vs
+ *   "Black/White" or "Multi/White") — genuinely a partial match, never
+ *   silently treated as a full confirmation.
+ */
+export type ColorMatchOutcome = 'match' | 'incompatible' | 'ambiguous';
+
+/**
+ * Splits a free-text color string into lowercase word tokens — the ONLY
+ * normalization performed (no synonym table, no translation, never a
+ * guess at a color this text doesn't literally contain). "Black/White"
+ * -> {black, white}; "Triple White" -> {triple, white}; "Off-White" ->
+ * {off, white} (a real, documented limitation: "off-white" is treated as
+ * containing the token "white", since this is a literal word split, not
+ * a shade-aware comparison — see this engine's own audit report).
+ */
+export function normalizeColorTokens(raw: string): Set<string> {
+  return new Set(
+    raw
+      .toLowerCase()
+      .split(/[\s/,&+-]+|\band\b/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0)
+  );
+}
+
+/**
+ * Real, deterministic comparison — see ColorMatchOutcome's own comment
+ * for exactly what each outcome means. Only ever called when BOTH a
+ * requested and a reported color are non-empty strings; the caller
+ * (annotateResult) handles the "color not requested" / "color unknown"
+ * cases itself, since those are not really a comparison outcome at all.
+ */
+export function compareColor(requestedColor: string, reportedColor: string): ColorMatchOutcome {
+  const requested = normalizeColorTokens(requestedColor);
+  const reported = normalizeColorTokens(reportedColor);
+
+  const overlap = [...reported].some((token) => requested.has(token));
+  if (!overlap) return 'incompatible';
+
+  const reportedExtras = [...reported].filter((token) => !requested.has(token));
+  return reportedExtras.length === 0 ? 'match' : 'ambiguous';
+}
+
+/**
+ * Strips only a KNOWN region/unit label word (eu/uk/us/usa/fr) and
+ * non-alphanumeric punctuation, normalizing a comma decimal to a dot —
+ * never a real EU/US/UK size-system conversion (this engine has no
+ * verified conversion table and must never invent one). "43 EU" and "EU
+ * 43" both normalize to "43", so they compare equal; "43" (EU, implied)
+ * and "9 US" do NOT normalize to the same string (different numbers), so
+ * they are correctly reported as 'different' — never silently assumed to
+ * be the same real size, and never silently assumed to differ either
+ * when only a label, not a number, differs.
+ */
+export function normalizeSizeForComparison(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/\b(eu|eur|uk|us|usa|fr)\b/g, '')
+    .replace(/,/g, '.')
+    .replace(/[^a-z0-9.]/g, '')
+    .trim();
 }
 
 const UNKNOWN_COST_FACTOR_EXPLANATIONS: Record<string, string> = {
@@ -81,6 +175,9 @@ export function annotateResult(
   const matchReasons: string[] = [];
   const warnings: string[] = [];
   let excludedByPrice = false;
+  let excludedByColor = false;
+  let colorOutcome: ColorMatchOutcome | 'unknown' | 'not_requested' = 'not_requested';
+  let sizeOutcome: 'match' | 'different' | 'absent' | 'not_requested' = 'not_requested';
 
   // --- Price bounds (Phase 3 "robust price filtering", tightened by the
   // Deep Web Sourcing Engine fix — see ResultAnnotation.excludedByPrice's
@@ -111,6 +208,48 @@ export function annotateResult(
   }
   if (query.model && title.includes(query.model.toLowerCase())) {
     matchReasons.push(`Requested model "${query.model}" found in the listing title`);
+  }
+
+  // --- Color (Opportunity Classification fix) — ONLY ever judged when the
+  // caller actually requested a color; 'unknown' (distinct from
+  // ColorMatchOutcome's 'match'/'incompatible'/'ambiguous', which only
+  // describe a REAL comparison of two present values) covers the source
+  // simply not reporting a color at all — never a guess in either
+  // direction.
+  if (query.color) {
+    if (result.color) {
+      const outcome = compareColor(query.color, result.color);
+      colorOutcome = outcome;
+      if (outcome === 'match') {
+        matchReasons.push(`Requested color "${query.color}" confirmed by the source (reported as "${result.color}")`);
+      } else if (outcome === 'incompatible') {
+        excludedByColor = true;
+        warnings.push(`Requested color "${query.color}" does not match this listing's reported color ("${result.color}")`);
+      } else {
+        warnings.push(`Requested color "${query.color}" is only partially confirmed by this listing's reported color ("${result.color}") — treat as unconfirmed, not a clean match.`);
+      }
+    } else {
+      colorOutcome = 'unknown';
+      warnings.push('Requested color was not confirmed — color is not reported for this listing.');
+    }
+  }
+
+  // --- Size (Opportunity Classification fix) — never deduced; a mismatch
+  // is reported as a warning, NEVER auto-excluded (no verified EU/US/UK
+  // size-system conversion exists — see normalizeSizeForComparison).
+  if (query.size) {
+    if (result.size) {
+      const sizesMatch = normalizeSizeForComparison(query.size) === normalizeSizeForComparison(result.size) && normalizeSizeForComparison(query.size).length > 0;
+      sizeOutcome = sizesMatch ? 'match' : 'different';
+      if (sizesMatch) {
+        matchReasons.push(`Requested size "${query.size}" confirmed by the source (reported as "${result.size}")`);
+      } else {
+        warnings.push(`Reported size ("${result.size}") differs from the requested size ("${query.size}") — EU/US/UK size-system conversion was not verified, this may or may not be the same real size.`);
+      }
+    } else {
+      sizeOutcome = 'absent';
+      warnings.push('Size not confirmed by the source — size is not reported for this listing.');
+    }
   }
 
   // --- Condition (soft match — provider condition strings are not a confirmed shared vocabulary, e.g. eBay's 'USED_EXCELLENT') ---
@@ -175,7 +314,7 @@ export function annotateResult(
     warnings.push('Stock availability is not reported by this source.');
   }
 
-  return { matchReasons, warnings, excludedByPrice };
+  return { matchReasons, warnings, excludedByPrice, excludedByColor, colorOutcome, sizeOutcome };
 }
 
 const AUTHENTICITY_RANK: Record<NormalizedSourcingResult['authenticityStatus'], number> = {
@@ -440,6 +579,98 @@ export function detectPriceConflict(
   };
 }
 
+/**
+ * Opportunity Classification fix — the explicit tri-state the audit
+ * asked for. 'REJECTED' is part of this type for conceptual completeness
+ * (diagnostics/rejectedSamples reasoning, tests) but classifyOpportunity
+ * itself NEVER returns it — a candidate SourcingService rejects outright
+ * never reaches this function at all (see
+ * NormalizedSourcingResult.classification's own comment for exactly why).
+ */
+export type OpportunityClassification = 'VERIFIED_OPPORTUNITY' | 'WEB_LEAD' | 'REJECTED';
+
+/**
+ * Opportunity Classification fix (mission section 1) — computed ONLY from
+ * real signals already attached to this result/annotation; never an
+ * automatic pass for `source !== 'web'` (an eBay/Etsy result with
+ * qualityTier !== 'HIGH', a price conflict, or an unconfirmed requested
+ * color/size is downgraded exactly like a web result would be). Downgrades
+ * to WEB_LEAD, in order checked (first match wins — this is a gate, not a
+ * weighted score):
+ *   1. qualityTier !== 'HIGH' (see classifyResultQuality — already accounts
+ *      for availability/condition/seller/authenticity completeness AND the
+ *      unresolved-listing-page cap).
+ *   2. verificationStatus === 'conflicting' (a real, detected price
+ *      discrepancy between duplicate sources — see detectPriceConflict).
+ *   3. A color was requested and the outcome is 'ambiguous' or 'unknown'
+ *      (an INCOMPATIBLE color is never reached here at all — it was
+ *      already excluded before classification, see
+ *      ResultAnnotation.excludedByColor).
+ *   4. A size was requested and the outcome is 'different' or 'absent'
+ *      (never auto-rejected on size alone — see normalizeSizeForComparison's
+ *      own comment on why — but never silently presented as VERIFIED either).
+ * Returns 'VERIFIED_OPPORTUNITY' only when none of the above apply.
+ */
+export function classifyOpportunity(
+  result: NormalizedSourcingResult,
+  annotation: Pick<ResultAnnotation, 'colorOutcome' | 'sizeOutcome'>,
+  qualityTier: 'HIGH' | 'MEDIUM' | 'LOW'
+): Exclude<OpportunityClassification, 'REJECTED'> {
+  if (qualityTier !== 'HIGH') return 'WEB_LEAD';
+  if (result.verificationStatus === 'conflicting') return 'WEB_LEAD';
+  if (annotation.colorOutcome === 'ambiguous' || annotation.colorOutcome === 'unknown') return 'WEB_LEAD';
+  if (annotation.sizeOutcome === 'different' || annotation.sizeOutcome === 'absent') return 'WEB_LEAD';
+  return 'VERIFIED_OPPORTUNITY';
+}
+
+/**
+ * Web Sourcing smoke-test fix (section 3) — a concise, real explanation of
+ * why classifyOpportunity returned 'WEB_LEAD' for this exact result,
+ * mirroring that function's own gating conditions EXACTLY (same checks,
+ * same order) so the two can never disagree. Derived only from signals
+ * already real on `result`/`annotation` — never a new one, never
+ * invented. Returns undefined when there is nothing to explain (the
+ * result would classify as VERIFIED_OPPORTUNITY) — callers only need to
+ * invoke this when classification is actually 'WEB_LEAD'.
+ *
+ * Deliberately a short label per factor (e.g. "availability not
+ * confirmed"), not a restatement of the full warning sentences
+ * annotateResult already produces — this is a compact "why", warnings
+ * remain the detailed account.
+ */
+export function explainClassification(
+  result: NormalizedSourcingResult,
+  annotation: Pick<ResultAnnotation, 'colorOutcome' | 'sizeOutcome'>,
+  qualityTier: 'HIGH' | 'MEDIUM' | 'LOW'
+): string | undefined {
+  const reasons: string[] = [];
+
+  if (qualityTier !== 'HIGH') {
+    const missing: string[] = [];
+    if (result.availability === undefined) missing.push('availability not confirmed');
+    if (result.condition === undefined) missing.push('condition not confirmed');
+    const sellerKnown = result.seller !== undefined && (result.seller.feedbackScore !== undefined || result.seller.feedbackPercentage !== undefined);
+    const authenticityEvidence = result.authenticityStatus === 'verified' || result.authenticityStatus === 'claimed';
+    if (!sellerKnown && !authenticityEvidence) missing.push('seller/authenticity not confirmed');
+    reasons.push(missing.length > 0 ? `listing quality is ${qualityTier} (${missing.join(', ')})` : `listing quality is ${qualityTier}`);
+  }
+  if (result.verificationStatus === 'conflicting') {
+    reasons.push('a price conflict was detected between duplicate sources');
+  }
+  if (annotation.colorOutcome === 'ambiguous') {
+    reasons.push('requested color only partially confirmed');
+  } else if (annotation.colorOutcome === 'unknown') {
+    reasons.push('requested color not confirmed by the source');
+  }
+  if (annotation.sizeOutcome === 'different') {
+    reasons.push('reported size differs from the requested size');
+  } else if (annotation.sizeOutcome === 'absent') {
+    reasons.push('requested size not confirmed by the source');
+  }
+
+  return reasons.length > 0 ? reasons.join('; ') : undefined;
+}
+
 export const OpportunityRankingService = {
   annotateResult,
   compareByMatch,
@@ -448,6 +679,11 @@ export const OpportunityRankingService = {
   detectPriceConflict,
   isLikelyListingPageUrl,
   isUnresolvedListingPage,
+  normalizeColorTokens,
+  compareColor,
+  normalizeSizeForComparison,
+  classifyOpportunity,
+  explainClassification,
 };
 
 export default OpportunityRankingService;

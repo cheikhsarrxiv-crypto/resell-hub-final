@@ -157,6 +157,103 @@ describe('isProductRelevant (Deep Web Sourcing Engine fix)', () => {
   });
 });
 
+describe('isProductRelevant — demographic filter (Opportunity Classification fix)', () => {
+  const adultQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1' };
+
+  it('REJECT — adult search, offer is a kids (GS) variant', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS) Grade School' }), adultQuery)).toBe(false);
+  });
+
+  it('REJECT — adult search, offer is a toddler variant', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Toddler' }), adultQuery)).toBe(false);
+  });
+
+  it('REJECT — adult search, offer is an infant/baby variant', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Infant' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Baby' }), adultQuery)).toBe(false);
+  });
+
+  it('REJECT — adult search, offer named "kids" or "children"', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Kids' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: "Nike Air Force 1 Children's Shoe" }), adultQuery)).toBe(false);
+  });
+
+  it('REJECT — adult search, offer is a (PS)/(TD) preschool/toddler variant', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (PS)' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (TD)' }), adultQuery)).toBe(false);
+  });
+
+  it('ACCEPT — explicitly kids-intent query is never filtered out', () => {
+    // "kids" named via `category` (also checked by queryRequestsKidsSegment)
+    // rather than folded into `query.query` itself, so it never becomes a
+    // REQUIRED token the offer's own title would also have to contain —
+    // this test is about the demographic filter being skipped, not about
+    // the unrelated token-overlap check.
+    const kidsQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1', category: 'kids' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS) Grade School' }), kidsQuery)).toBe(true);
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Toddler' }), kidsQuery)).toBe(true);
+  });
+
+  it('never false-positives on an unrelated bare "PS"/"GS" substring (e.g. not parenthesized) — precision over recall by design', () => {
+    // "PS5"/a loose "GS" mention never gets the kids treatment unless it's the
+    // real, parenthesized sneaker-marketplace convention "(PS)"/"(GS)"/"(TD)".
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 PS5 Collab' }), adultQuery)).toBe(true);
+  });
+
+  it('ACCEPT — a plain adult listing with none of these words', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 White Men\'s' }), adultQuery)).toBe(true);
+  });
+});
+
+describe('isProductRelevant — demographic filter, French vocabulary (Web Sourcing smoke-test fix, section 1)', () => {
+  const adultQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1' };
+
+  it('REJECT — adult search, offer is a (GS) variant, regardless of query language', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), adultQuery)).toBe(false);
+  });
+
+  it('ACCEPT — category="kids" (English) + (GS) offer is never filtered out', () => {
+    const kidsQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1', category: 'kids' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), kidsQuery)).toBe(true);
+  });
+
+  it('ACCEPT — category="enfant" (French) + (GS) offer is never filtered out — the provider must not depend on the Agent having translated it', () => {
+    const enfantQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1', category: 'enfant' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), enfantQuery)).toBe(true);
+  });
+
+  it('ACCEPT — an explicit French kids-intent free-text query + (GS) offer is never filtered out', () => {
+    // Exactly the real-world phrasing from the smoke test that found this
+    // gap ("Nike Air Force 1 enfant") — a filler word like "pour" would
+    // itself become a required token no offer could ever literally
+    // contain (same class of issue as English "for"/"the", already
+    // handled for English by RELEVANCE_STOPWORDS; out of this fix's
+    // narrower scope to extend that stopword list to French).
+    const frenchQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1 enfant' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), frenchQuery)).toBe(true);
+  });
+
+  it('ACCEPT — an explicit English kids-intent free-text query + (GS) offer is never filtered out', () => {
+    const englishQuery: NormalizedSearchQuery = { query: 'Nike Air Force 1 for kids' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), englishQuery)).toBe(true);
+  });
+
+  it('REJECT — a plain adult query (no kids intent in any language) still rejects a (GS) variant', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 (GS)' }), adultQuery)).toBe(false);
+  });
+
+  it('REJECT — French demographic words on the offer itself, adult query', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Enfant' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Chaussure Nike Air Force 1 Bébé' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Nourrisson' }), adultQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 Junior' }), adultQuery)).toBe(false);
+  });
+
+  it('still never false-positives on an unrelated bare "PS5" — the French additions do not widen this', () => {
+    expect(isProductRelevant(offer({ title: 'Nike Air Force 1 PS5 Collab' }), adultQuery)).toBe(true);
+  });
+});
+
 describe('WebSourcingProvider.isConfigured', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -264,6 +361,57 @@ describe('WebSourcingProvider.searchProducts', () => {
 
     expect(outcome.results).toEqual([]);
     expect(outcome.error).toBeUndefined();
+  });
+
+  it('Opportunity Classification fix — offer.color is reported onto the result.color field, never discarded', async () => {
+    const rawHit = hit();
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([{ result: rawHit, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, color: 'Black/White' }) } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].color).toBe('Black/White');
+  });
+
+  it('a result with no reported color leaves color undefined, never a fabricated value', async () => {
+    const rawHit = hit();
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([{ result: rawHit, outcome: { status: 'ok', data: offers(FULL_OFFER) } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].color).toBeUndefined();
+  });
+
+  it('Opportunity Classification fix — aggregates real rejection counts/samples: no confident price', async () => {
+    const rawHit = hit();
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([
+      { result: rawHit, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, price: null, currency: null }) } },
+    ]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.rejectedCounts?.noConfidentPrice).toBe(1);
+    expect(outcome.rejectedCounts?.irrelevantProduct).toBe(0);
+    expect(outcome.rejectedSamples).toEqual([
+      expect.objectContaining({ title: 'Stone Island Jacket size L', url: rawHit.url, reason: expect.stringContaining('confident price') }),
+    ]);
+  });
+
+  it('Opportunity Classification fix — aggregates real rejection counts/samples: irrelevant product (incl. demographic)', async () => {
+    const rawHit = hit();
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([
+      { result: rawHit, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, title: 'Nike Air Force 1 (GS)' }) } },
+    ]);
+
+    const outcome = await provider.searchProducts({ query: 'Nike Air Force 1' });
+
+    expect(outcome.rejectedCounts?.irrelevantProduct).toBe(1);
+    expect(outcome.rejectedCounts?.noConfidentPrice).toBe(0);
+    expect(outcome.rejectedSamples?.[0]).toMatchObject({ title: 'Nike Air Force 1 (GS)', url: rawHit.url });
+    expect(outcome.rejectedSamples?.[0].reason).toMatch(/kids|toddler|infant/i);
   });
 
   it('authenticityStatus is "claimed" only when the page itself makes a claim, "unverified" otherwise — never "verified"', async () => {

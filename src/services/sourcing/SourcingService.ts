@@ -2,6 +2,7 @@ import { createLogger } from '@/lib/logger';
 import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
+  RejectedSample,
   SourcingSearchResponse,
   SourcingSearchDiagnostics,
 } from './types';
@@ -11,12 +12,17 @@ import { PricingService } from '@/services/pricing/PricingService';
 import {
   annotateResult,
   compareByMatch,
+  classifyOpportunity,
+  explainClassification,
   classifyResultQuality,
   computeOpportunityScore,
   detectPriceConflict,
   isUnresolvedListingPage,
   ResolvedPriceBounds,
 } from './OpportunityRankingService';
+
+/** Opportunity Classification fix — a hard cap shared by every rejection source merged here (provider-level + SourcingService's own), so one noisy search can never grow the response unboundedly. Never meant for bulk UI display — see RejectedSample's own comment. */
+const MAX_REJECTED_SAMPLES = 20;
 
 const logger = createLogger('sourcing-service');
 
@@ -169,13 +175,21 @@ function pushUnique(list: string[], value: string): string[] {
  * an entry that IS present still blocks it (as 'currency_conversion_unavailable').
  */
 async function attachLandedCost(result: NormalizedSourcingResult): Promise<NormalizedSourcingResult> {
-  if (result.normalizedPriceEur === undefined) {
-    return result;
-  }
-
-  let total = result.normalizedPriceEur;
-  let blocked = false;
+  // Web Sourcing smoke-test fix (section 2) — a failed price conversion
+  // (normalizedPriceEur undefined, e.g. no reliable USD->EUR rate
+  // available) used to return here immediately, which silently hid every
+  // OTHER real unknown cost factor (shipping, additional fees) that this
+  // exact same result might also have. Each is checked independently
+  // below and ALL real ones are reported together — never just whichever
+  // was discovered first, and never a fabricated rate/shipping cost to
+  // work around the missing conversion.
+  const priceKnown = result.normalizedPriceEur !== undefined;
+  let total = result.normalizedPriceEur ?? 0;
+  let blocked = !priceKnown;
   let unknownCostFactors = result.unknownCostFactors ?? [];
+  if (!priceKnown) {
+    unknownCostFactors = pushUnique(unknownCostFactors, 'currency_conversion_unavailable');
+  }
   // Phase 6 — exposed as their OWN fields, independent of whether the
   // combined estimatedKnownCostEur ends up blocked for an unrelated
   // reason (e.g. shipping known but a knownAdditionalCosts line fails to
@@ -195,7 +209,12 @@ async function attachLandedCost(result: NormalizedSourcingResult): Promise<Norma
         blocked = true;
       } else {
         shippingCostEur = conversion.amount;
-        total += conversion.amount;
+        // Only folds into `total` when the price itself is real — a
+        // shipping figure is still shown via its own shippingCostEur
+        // field above regardless (see that field's own comment), but a
+        // "total" starting from 0 instead of a real price would be a
+        // fabricated landed cost, never computed here.
+        if (priceKnown) total += conversion.amount;
       }
     }
 
@@ -210,7 +229,7 @@ async function attachLandedCost(result: NormalizedSourcingResult): Promise<Norma
           additionalFullyKnown = false;
         } else {
           additionalTotal += conversion.amount;
-          total += conversion.amount;
+          if (priceKnown) total += conversion.amount;
         }
       }
       if (additionalFullyKnown) knownAdditionalCostsEur = additionalTotal;
@@ -459,6 +478,9 @@ export class SourcingService {
       excludedByMinQuality: 0,
       excludedByUnresolvedListingPage: 0,
       excludedByOverallLimit: 0,
+      excludedByIrrelevantProduct: 0,
+      excludedByNoConfidentPrice: 0,
+      rejectedSamples: [],
     };
 
     if (configuredProviders.length === 0) {
@@ -483,6 +505,17 @@ export class SourcingService {
     const providersSearched: string[] = [];
     const providersFailed: string[] = [];
     const providerLatencyMs: Record<string, number> = {};
+    // Opportunity Classification fix — real counts/samples merged from
+    // every provider's own outcome (today, only WebSourcingProvider ever
+    // populates these — see SourcingProviderSearchOutcome's own comment),
+    // PLUS whatever SourcingService itself rejects below (color
+    // incompatibility, unresolved listing page, price bound, minQuality).
+    let excludedByIrrelevantProduct = 0;
+    let excludedByNoConfidentPrice = 0;
+    const rejectedSamples: RejectedSample[] = [];
+    const pushRejectedSample = (sample: RejectedSample) => {
+      if (rejectedSamples.length < MAX_REJECTED_SAMPLES) rejectedSamples.push(sample);
+    };
 
     // Concurrent, bounded to exactly the providers actually selected for
     // this search (never unbounded — the provider set itself is the only
@@ -501,6 +534,9 @@ export class SourcingService {
             providerErrors.push(outcome.error);
             providersFailed.push(provider.name);
           }
+          excludedByIrrelevantProduct += outcome.rejectedCounts?.irrelevantProduct ?? 0;
+          excludedByNoConfidentPrice += outcome.rejectedCounts?.noConfidentPrice ?? 0;
+          for (const sample of outcome.rejectedSamples ?? []) pushRejectedSample(sample);
         } catch (error) {
           providerLatencyMs[provider.name] = Date.now() - startedAt;
           // A provider is expected to catch its own errors (including a
@@ -534,9 +570,24 @@ export class SourcingService {
     let excludedByMinQuality = 0;
     let excludedByUnresolvedListingPage = 0;
     for (const result of withMargin) {
-      const { matchReasons, warnings: annotatedWarnings, excludedByPrice } = annotateResult(result, query, priceBounds);
+      const { matchReasons, warnings: annotatedWarnings, excludedByPrice, excludedByColor, colorOutcome, sizeOutcome } = annotateResult(result, query, priceBounds);
       if (excludedByPrice) {
         excludedByPriceBound++;
+        pushRejectedSample({ title: result.title, url: result.sourceUrl, reason: 'Price could not be confidently compared to the requested range, or was confidently outside it.' });
+        continue;
+      }
+
+      // Opportunity Classification fix — a color explicitly incompatible
+      // with the one requested (e.g. requesting "white" against a result
+      // reported as "black") is a real product mismatch, excluded exactly
+      // like excludedByPrice above — never merely downgraded, since an
+      // outright incompatible color is not "this opportunity has a
+      // caveat", it is "this is not the item you asked for". An AMBIGUOUS
+      // or UNKNOWN color is never excluded here — only downgraded to
+      // WEB_LEAD below, via classifyOpportunity.
+      if (excludedByColor) {
+        excludedByIrrelevantProduct++;
+        pushRejectedSample({ title: result.title, url: result.sourceUrl, reason: `Requested color "${query.color}" does not match this listing's reported color ("${result.color}").` });
         continue;
       }
 
@@ -546,6 +597,7 @@ export class SourcingService {
       // minQuality below) — see isUnresolvedListingPage's own comment.
       if (isUnresolvedListingPage(result)) {
         excludedByUnresolvedListingPage++;
+        pushRejectedSample({ title: result.title, url: result.sourceUrl, reason: 'This source page lists several items with no distinct link to this specific offer (category/search/collection page).' });
         continue;
       }
 
@@ -559,15 +611,29 @@ export class SourcingService {
 
       if (query.minQuality && qualityRank[qualityTier] < qualityRank[query.minQuality]) {
         excludedByMinQuality++;
+        pushRejectedSample({ title: result.title, url: result.sourceUrl, reason: `Listing quality tier ("${qualityTier}") is below the requested minimum ("${query.minQuality}").` });
         continue;
       }
+
+      // Opportunity Classification fix (mission section 1) — the explicit
+      // tri-state the audit asked for. Computed here, AFTER every
+      // exclusion gate above, so a result that reaches this point is, by
+      // construction, never 'REJECTED' — see classifyOpportunity's own
+      // comment for exactly which real signals gate VERIFIED_OPPORTUNITY
+      // vs WEB_LEAD (never an automatic pass for a non-'web' source).
+      const classification = classifyOpportunity(result, { colorOutcome, sizeOutcome }, qualityTier);
+      // Web Sourcing smoke-test fix (section 3) — only computed for
+      // WEB_LEAD (nothing to explain for VERIFIED_OPPORTUNITY); mirrors
+      // classifyOpportunity's own gating exactly, so the two never
+      // disagree.
+      const classificationReason = classification === 'WEB_LEAD' ? explainClassification(result, { colorOutcome, sizeOutcome }, qualityTier) : undefined;
 
       // Merge (never replace) — a pre-existing warning (today, only ever
       // the price-conflict warning deduplicate() may have set) is kept
       // alongside annotateResult's own freshly computed ones, never
       // silently dropped.
       const warnings = [...(result.warnings ?? []), ...annotatedWarnings];
-      kept.push({ ...result, matchReasons, warnings, qualityTier, opportunityScore, scoreFactors });
+      kept.push({ ...result, matchReasons, warnings, qualityTier, opportunityScore, scoreFactors, classification, classificationReason });
     }
 
     const overallLimit = query.limit ?? DEFAULT_OVERALL_LIMIT;
@@ -581,6 +647,9 @@ export class SourcingService {
       excludedByMinQuality,
       excludedByUnresolvedListingPage,
       excludedByOverallLimit: kept.length - balanced.length,
+      excludedByIrrelevantProduct,
+      excludedByNoConfidentPrice,
+      rejectedSamples,
     };
 
     // Deep Web Sourcing Engine (mission section 19) — one structured

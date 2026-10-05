@@ -100,6 +100,12 @@ describe('SourcingService.search', () => {
         qualityTier: 'LOW',
         opportunityScore: 0,
         scoreFactors: ['Authenticity claimed by the seller (not verified) (+5)', '1 unresolved cost factor(s) (-5)'],
+        // Opportunity Classification fix — qualityTier 'LOW' alone already
+        // gates this to WEB_LEAD, never an automatic VERIFIED_OPPORTUNITY
+        // just because source !== 'web'.
+        classification: 'WEB_LEAD',
+        // Web Sourcing smoke-test fix (section 3) — explicit, derived reason.
+        classificationReason: 'listing quality is LOW (availability not confirmed, condition not confirmed)',
       },
     ]);
     expect(response.providerErrors).toEqual([]);
@@ -525,6 +531,9 @@ describe('SourcingService.search', () => {
         excludedByMinQuality: 0,
         excludedByUnresolvedListingPage: 0,
         excludedByOverallLimit: 0,
+        excludedByIrrelevantProduct: 0,
+        excludedByNoConfidentPrice: 0,
+        rejectedSamples: [],
       });
     });
 
@@ -540,6 +549,9 @@ describe('SourcingService.search', () => {
         excludedByMinQuality: 0,
         excludedByUnresolvedListingPage: 0,
         excludedByOverallLimit: 0,
+        excludedByIrrelevantProduct: 0,
+        excludedByNoConfidentPrice: 0,
+        rejectedSamples: [],
       });
     });
 
@@ -1193,5 +1205,232 @@ describe('SourcingService.search', () => {
     it('SourcingService.search takes no workspaceId at all — sourcing is global, never per-tenant data', () => {
       expect(SourcingService.search.length).toBe(1); // (query) only
     });
+  });
+});
+
+describe('SourcingService.search — Opportunity Classification fix', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('attaches classification VERIFIED_OPPORTUNITY to a kept result that meets every signal (quality HIGH, no unresolved color/size)', async () => {
+    const result = fakeResult({
+      availability: 'IN_STOCK',
+      condition: 'used',
+      seller: { name: 'shop', feedbackScore: 10 },
+      authenticityStatus: 'verified',
+      authenticitySource: 'eBay Authenticity Guarantee',
+    });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].qualityTier).toBe('HIGH');
+    expect(response.results[0].classification).toBe('VERIFIED_OPPORTUNITY');
+  });
+
+  it('attaches classification WEB_LEAD when qualityTier is not HIGH — never an automatic VERIFIED_OPPORTUNITY for a non-web source', async () => {
+    const result = fakeResult(); // LOW quality by construction (no availability/condition/seller/authenticity evidence)
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].classification).toBe('WEB_LEAD');
+  });
+
+  it('a color explicitly incompatible with the request is REJECTED — never present in results[], counted in excludedByIrrelevantProduct, sampled in rejectedSamples', async () => {
+    const result = fakeResult({ color: 'Black' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white' });
+
+    expect(response.results).toEqual([]);
+    expect(response.diagnostics.excludedByIrrelevantProduct).toBe(1);
+    expect(response.diagnostics.rejectedSamples).toEqual([
+      expect.objectContaining({ title: 'Item', url: 'https://x', reason: expect.stringContaining('does not match') }),
+    ]);
+  });
+
+  it('an ambiguous color (Black/White searching white) is KEPT as WEB_LEAD, never rejected and never a confirmed matchReason', async () => {
+    const result = fakeResult({ color: 'Black/White' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].classification).toBe('WEB_LEAD');
+    expect(response.diagnostics.excludedByIrrelevantProduct).toBe(0);
+  });
+
+  it('merges provider-level rejectedCounts/rejectedSamples (e.g. from WebSourcingProvider) into its own diagnostics', async () => {
+    const web = makeFakeProvider('web', {
+      searchProducts: vi.fn().mockResolvedValue({
+        results: [],
+        rejectedCounts: { irrelevantProduct: 2, noConfidentPrice: 3 },
+        rejectedSamples: [{ title: 'Kids variant', url: 'https://y/1', reason: 'kids segment excluded' }],
+      }),
+    });
+    getAllProvidersMock.mockReturnValue([web]);
+
+    const response = await SourcingService.search({ query: 'Nike Air Force 1' });
+
+    expect(response.diagnostics.excludedByIrrelevantProduct).toBe(2);
+    expect(response.diagnostics.excludedByNoConfidentPrice).toBe(3);
+    expect(response.diagnostics.rejectedSamples).toEqual([{ title: 'Kids variant', url: 'https://y/1', reason: 'kids segment excluded' }]);
+  });
+
+  it('rejectedSamples is bounded to 20 total, across every rejection source combined', async () => {
+    const manySamples = Array.from({ length: 15 }, (_, i) => ({ title: `t${i}`, url: `https://y/${i}`, reason: 'r' }));
+    const web = makeFakeProvider('web', {
+      searchProducts: vi.fn().mockResolvedValue({ results: [], rejectedCounts: {}, rejectedSamples: manySamples }),
+    });
+    // 10 more results, each individually color-rejected by SourcingService itself (on top of the provider's own 15 samples).
+    const extraRejected = Array.from({ length: 10 }, (_, i) => fakeResult({ sourceUrl: `https://z/${i}`, color: 'black' }));
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: extraRejected }) });
+    getAllProvidersMock.mockReturnValue([web, ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white' });
+
+    expect(response.diagnostics.rejectedSamples.length).toBe(20);
+  });
+});
+
+describe('SourcingService.search — attachLandedCost (Web Sourcing smoke-test fix, section 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('USD price with no reliable FX rate AND no reported shipping -> BOTH unknownCostFactors are reported, never just one', async () => {
+    const result = fakeResult({ price: 700, currency: 'USD' }); // no shippingCost at all
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    const r = response.results[0];
+    expect(r.normalizedPriceEur).toBeUndefined();
+    expect(r.estimatedKnownCostEur).toBeUndefined();
+    expect(r.unknownCostFactors).toEqual(expect.arrayContaining(['currency_conversion_unavailable', 'shipping_unknown']));
+    expect(r.unknownCostFactors).toHaveLength(2);
+    expect(r.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('could not be converted to EUR (no reliable exchange rate available)'),
+        expect.stringContaining("this listing's shipping cost is not reported"),
+      ])
+    );
+  });
+
+  it('USD price with no reliable FX rate but a REPORTED shipping cost -> only currency_conversion_unavailable, shippingCostEur still unresolved (no rate for it either in this test)', async () => {
+    const result = fakeResult({ price: 700, currency: 'USD', shippingCost: 20, shippingCostCurrency: 'USD' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    const r = response.results[0];
+    expect(r.estimatedKnownCostEur).toBeUndefined();
+    // Both the price AND the shipping cost fail to convert (same missing
+    // USD->EUR rate) — pushUnique means the factor appears once, not twice.
+    expect(r.unknownCostFactors).toEqual(['currency_conversion_unavailable']);
+  });
+
+  it('EUR price with no reported shipping still works exactly as before (non-regression)', async () => {
+    const result = fakeResult({ price: 100, currency: 'EUR' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    const r = response.results[0];
+    expect(r.normalizedPriceEur).toBe(100);
+    expect(r.estimatedKnownCostEur).toBeUndefined();
+    expect(r.unknownCostFactors).toEqual(['shipping_unknown']);
+  });
+
+  it('EUR price WITH a reported shipping cost -> estimatedKnownCostEur fully computed (non-regression, the fully-resolved path)', async () => {
+    const result = fakeResult({ price: 100, currency: 'EUR', shippingCost: 10, shippingCostCurrency: 'EUR' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    const r = response.results[0];
+    expect(r.estimatedKnownCostEur).toBe(110);
+    expect(r.unknownCostFactors).toBeUndefined();
+  });
+});
+
+describe('SourcingService.search — classificationReason (Web Sourcing smoke-test fix, section 3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('qualityTier MEDIUM -> WEB_LEAD with an explicit reason naming the missing signal(s)', async () => {
+    const result = fakeResult({ availability: 'IN_STOCK' }); // availability known, condition/seller/authenticity evidence not -> MEDIUM
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].qualityTier).toBe('MEDIUM');
+    expect(response.results[0].classification).toBe('WEB_LEAD');
+    expect(response.results[0].classificationReason).toMatch(/listing quality is MEDIUM/);
+    expect(response.results[0].classificationReason).toMatch(/condition not confirmed/);
+  });
+
+  it('ambiguous requested color -> WEB_LEAD with a color-specific reason', async () => {
+    const result = fakeResult({ color: 'Black/White', availability: 'IN_STOCK', condition: 'used', seller: { name: 's', feedbackScore: 5 } }); // HIGH quality otherwise
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white' });
+
+    expect(response.results[0].qualityTier).toBe('HIGH');
+    expect(response.results[0].classification).toBe('WEB_LEAD');
+    expect(response.results[0].classificationReason).toMatch(/color only partially confirmed/);
+    expect(response.results[0].classificationReason).not.toMatch(/listing quality/); // quality was HIGH, not the reason here
+  });
+
+  it('requested size absent/different -> WEB_LEAD with a size-specific reason', async () => {
+    const absentResult = fakeResult({ availability: 'IN_STOCK', condition: 'used', seller: { name: 's', feedbackScore: 5 } });
+    const ebay1 = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [absentResult] }) });
+    getAllProvidersMock.mockReturnValue([ebay1]);
+    const r1 = await SourcingService.search({ query: 'x', size: '42' });
+    expect(r1.results[0].classificationReason).toMatch(/requested size not confirmed/);
+
+    vi.clearAllMocks();
+    const differentResult = fakeResult({ size: '43', availability: 'IN_STOCK', condition: 'used', seller: { name: 's', feedbackScore: 5 } });
+    const ebay2 = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [differentResult] }) });
+    getAllProvidersMock.mockReturnValue([ebay2]);
+    const r2 = await SourcingService.search({ query: 'x', size: '42' });
+    expect(r2.results[0].classificationReason).toMatch(/reported size differs/);
+  });
+
+  it('HIGH quality with every requested signal confirmed -> VERIFIED_OPPORTUNITY, classificationReason undefined (nothing to explain)', async () => {
+    const result = fakeResult({ color: 'White', size: '42', availability: 'IN_STOCK', condition: 'used', seller: { name: 's', feedbackScore: 5 } });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white', size: '42' });
+
+    expect(response.results[0].qualityTier).toBe('HIGH');
+    expect(response.results[0].classification).toBe('VERIFIED_OPPORTUNITY');
+    expect(response.results[0].classificationReason).toBeUndefined();
+  });
+
+  it('a REJECTED candidate (incompatible color) never appears in results[] at all — classification/classificationReason are moot for it', async () => {
+    const result = fakeResult({ color: 'Black' });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [result] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x', color: 'white' });
+
+    expect(response.results).toEqual([]);
+    expect(response.results.some((r: any) => r.classification === 'REJECTED')).toBe(false);
   });
 });

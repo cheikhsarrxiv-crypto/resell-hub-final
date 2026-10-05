@@ -100,6 +100,19 @@ export class ListingGenerationService {
       authenticityStatus: result.authenticityStatus,
       authenticitySource: result.authenticitySource,
       sellerName: result.seller?.name,
+      // Opportunity Classification fix (Web Sourcing audit) — previously
+      // dropped here even when the search result genuinely reported them
+      // (NormalizedSourcingResult has carried `size`/`material` since the
+      // Deep Web Sourcing Engine, and `color`/`qualityTier`/`classification`
+      // since this fix) — never invented when absent on the result.
+      size: result.size,
+      color: result.color,
+      material: result.material,
+      availability: result.availability,
+      productUrl: result.productUrl,
+      pageType: result.pageType,
+      qualityTier: result.qualityTier,
+      classification: result.classification,
     };
 
     // Computed ONLY when the caller gave a target margin AND no direct
@@ -116,6 +129,13 @@ export class ListingGenerationService {
     const generatedFieldKeys: ListingDraftFieldKey[] = ['title', 'description', 'currency', 'quantity'];
     if (result.condition) generatedFieldKeys.push('condition');
     if (proposedPrice !== undefined) generatedFieldKeys.push('price');
+    // Opportunity Classification fix — pre-fill the editable field ONLY
+    // when the source itself confidently reported it (same "never invent"
+    // rule as `condition` above); absent on the result, the field stays
+    // undefined and editable exactly as before this fix.
+    if (result.size) generatedFieldKeys.push('size');
+    if (result.color) generatedFieldKeys.push('color');
+    if (result.material) generatedFieldKeys.push('material');
 
     return {
       source,
@@ -135,6 +155,9 @@ export class ListingGenerationService {
         // never a stand-in for genuinely unknown data.
         quantity: 1,
         condition: result.condition,
+        size: result.size,
+        color: result.color,
+        material: result.material,
       },
       generatedFieldKeys,
       editedFieldKeys: [],

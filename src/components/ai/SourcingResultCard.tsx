@@ -55,6 +55,30 @@ const AUTHENTICITY_CLASSES: Record<NormalizedSourcingResult['authenticityStatus'
   unknown: 'bg-white/[0.06] text-gray-400 border-white/10',
 };
 
+/**
+ * Opportunity Classification fix (Web Sourcing audit, section 7) —
+ * REJECTED is intentionally absent from this map: a rejected candidate
+ * never becomes a NormalizedSourcingResult at all (see
+ * NormalizedSourcingResult.classification's own comment), so it can
+ * never reach this component to render as a result. Only
+ * VERIFIED_OPPORTUNITY/WEB_LEAD are ever real values here.
+ */
+const CLASSIFICATION_LABEL: Record<'VERIFIED_OPPORTUNITY' | 'WEB_LEAD', string> = {
+  VERIFIED_OPPORTUNITY: 'Opportunité vérifiée',
+  WEB_LEAD: 'Piste web — à vérifier',
+};
+
+const CLASSIFICATION_CLASSES: Record<'VERIFIED_OPPORTUNITY' | 'WEB_LEAD', string> = {
+  VERIFIED_OPPORTUNITY: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  WEB_LEAD: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+};
+
+const QUALITY_TIER_LABEL: Record<'HIGH' | 'MEDIUM' | 'LOW', string> = {
+  HIGH: 'Qualité de source élevée',
+  MEDIUM: 'Qualité de source moyenne',
+  LOW: 'Qualité de source faible',
+};
+
 export function SourcingResultCard({ result, onCreateProduct, onSelect }: SourcingResultCardProps) {
   const image = result.images[0];
   const showNormalizedPrice = result.normalizedPriceEur !== undefined && result.currency.toUpperCase() !== 'EUR';
@@ -165,6 +189,21 @@ export function SourcingResultCard({ result, onCreateProduct, onSelect }: Sourci
                 {result.seller.feedbackPercentage !== undefined ? ` (${result.seller.feedbackPercentage}% avis positifs)` : ''}
               </span>
             </>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {result.classification && (
+            <span
+              className={`inline-flex w-fit items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${CLASSIFICATION_CLASSES[result.classification]}`}
+            >
+              {CLASSIFICATION_LABEL[result.classification]}
+            </span>
+          )}
+          {result.qualityTier && (
+            <span className="inline-flex w-fit items-center px-2 py-0.5 rounded-full text-[11px] font-medium border bg-white/[0.06] text-gray-400 border-white/10">
+              {QUALITY_TIER_LABEL[result.qualityTier]}
+            </span>
           )}
         </div>
 

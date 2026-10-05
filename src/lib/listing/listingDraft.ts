@@ -49,6 +49,31 @@ export interface ListingDraftSource {
   authenticityStatus: AuthenticityStatus;
   authenticitySource?: string;
   sellerName?: string;
+  /**
+   * Opportunity Classification fix (Web Sourcing audit) — read-only
+   * traceability of what the source ACTUALLY reported, copied verbatim
+   * from NormalizedSourcingResult whenever present, never a guess when
+   * absent. `size`/`color`/`material` are ALSO pre-filled onto
+   * ListingDraftFields when known (see buildDraftFromSourcingResult) —
+   * these copies on `source` exist so the reseller can always see what
+   * the source itself said, even after editing the field value.
+   */
+  size?: string;
+  color?: string;
+  material?: string;
+  availability?: string;
+  productUrl?: string;
+  pageType?: 'PRODUCT_PAGE' | 'CATEGORY_PAGE' | 'SEARCH_PAGE' | 'COLLECTION_PAGE' | 'UNKNOWN';
+  qualityTier?: 'HIGH' | 'MEDIUM' | 'LOW';
+  /**
+   * Opportunity Classification fix — echoes the search result's own
+   * classification at the moment this draft was built (never
+   * 'REJECTED' — a rejected candidate never becomes a sourcing result at
+   * all, so it can never reach this point either). See
+   * validateDraftForEbay/validateDraftForEtsy for how this gates an
+   * explicit, non-blocking warning at publish-validation time.
+   */
+  classification?: 'VERIFIED_OPPORTUNITY' | 'WEB_LEAD';
 }
 
 /**
@@ -57,9 +82,16 @@ export interface ListingDraftSource {
  * defaulted to the source's cost (that would misrepresent a cost as a
  * revenue proposal) or to 0; until a real proposal exists, it's simply
  * absent, and the validator reports it as a genuine missing field.
- * `size`/`material`/`color` have no source equivalent at all today (see
- * NormalizedSourcingResult — the sourcing layer doesn't provide them), so
- * they can ONLY ever come from an explicit user edit, never generation.
+ * `size`/`material`/`color`: for a declared (free-creation) draft, these
+ * can ONLY ever come from an explicit user edit, never generation — the
+ * reseller is the only source. For a SOURCED draft, these are now
+ * pre-filled from the source's own real, reported value when one exists
+ * (see buildDraftFromSourcingResult and ListingDraftSource's own matching
+ * fields for traceability) — this was a stale limitation (the Deep Web
+ * Sourcing Engine added `size`/`material`/`color` to
+ * NormalizedSourcingResult, but this generation step was never updated to
+ * use them); absent from the source, they remain editable-only exactly as
+ * before.
  */
 export interface ListingDraftFields {
   title: string;
@@ -237,6 +269,28 @@ function authenticityWarning(source: ListingDraftSource): string | null {
 }
 
 /**
+ * Opportunity Classification fix (Web Sourcing audit, section 6) — a
+ * NON-BLOCKING warning distinguishing "techniquement publiable" from
+ * "source insuffisamment vérifiée". Never affects `ready`/`missingFields`
+ * — a WEB_LEAD or non-HIGH-quality source is never, by itself, a reason
+ * to block publication; only a genuinely missing REQUIRED field does
+ * that (see the errors/missingFields checks elsewhere in each
+ * validator). Absent entirely for a draft whose source was never
+ * classified (e.g. built before this fix existed, or from a provider
+ * that doesn't set it).
+ */
+function sourceVerificationWarning(source: ListingDraftSource | undefined): string | null {
+  if (!source) return null;
+  if (source.classification === 'WEB_LEAD') {
+    return 'Cette annonce provient d\'une piste web (WEB_LEAD) — certaines informations (couleur, taille, qualité de la source) ne sont pas entièrement confirmées. L\'annonce reste techniquement publiable ; vérifiez ces points avant de la présenter comme fiable à 100%.';
+  }
+  if (source.qualityTier && source.qualityTier !== 'HIGH') {
+    return `La source de cette annonce a un niveau de confiance "${source.qualityTier}" (pas "HIGH") — certaines informations peuvent être incomplètes. L'annonce reste techniquement publiable ; vérifiez les informations manquantes avant de la présenter comme fiable à 100%.`;
+  }
+  return null;
+}
+
+/**
  * Phase 12C-Prep — updated for EbayAdapter's real, now-fixed requirements
  * (see EbayAdapter.validateListingInputForPublish): title/price/quantity/
  * currency/condition/ebayCategoryId/ebayMarketplaceId are all genuinely
@@ -284,6 +338,8 @@ export function validateEbayDraft(draft: ListingDraft): MarketplaceListingValida
 
   const authWarning = authenticityWarning(draft.source);
   if (authWarning) warnings.push(authWarning);
+  const verificationWarning = sourceVerificationWarning(draft.source);
+  if (verificationWarning) warnings.push(verificationWarning);
 
   if (!draft.fields.size) {
     warnings.push('No size set — the source did not report one; add it manually if relevant.');
@@ -403,6 +459,8 @@ export function validateEtsyDraft(draft: ListingDraft): MarketplaceListingValida
 
   const authWarning = authenticityWarning(draft.source);
   if (authWarning) warnings.push(authWarning);
+  const verificationWarning = sourceVerificationWarning(draft.source);
+  if (verificationWarning) warnings.push(verificationWarning);
 
   return { marketplace: 'etsy', ready: errors.length === 0, errors, warnings, missingFields };
 }

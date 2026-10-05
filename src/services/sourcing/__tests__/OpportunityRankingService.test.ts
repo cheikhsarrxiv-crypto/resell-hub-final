@@ -7,11 +7,16 @@ import { describe, it, expect } from 'vitest';
 import {
   annotateResult,
   compareByMatch,
+  classifyOpportunity,
   classifyResultQuality,
+  compareColor,
   computeOpportunityScore,
   detectPriceConflict,
+  explainClassification,
   isLikelyListingPageUrl,
   isUnresolvedListingPage,
+  normalizeColorTokens,
+  normalizeSizeForComparison,
 } from '@/services/sourcing/OpportunityRankingService';
 import { NormalizedSourcingResult, NormalizedSearchQuery } from '@/services/sourcing/types';
 
@@ -517,5 +522,265 @@ describe('isUnresolvedListingPage (Deep Web Sourcing Engine fix)', () => {
   it('pageType UNKNOWN with a URL that does NOT look like a listing page -> kept (genuinely ambiguous, never dropped on a guess)', () => {
     const result = makeResult({ sourceUrl: 'https://www.vinted.fr/items/123-nike-air-max-90', pageType: 'UNKNOWN', productUrl: undefined });
     expect(isUnresolvedListingPage(result)).toBe(false);
+  });
+});
+
+describe('normalizeColorTokens', () => {
+  it('splits a compound color into lowercase tokens', () => {
+    expect(normalizeColorTokens('Black/White')).toEqual(new Set(['black', 'white']));
+  });
+
+  it('splits on spaces, commas, "and", and hyphens', () => {
+    expect(normalizeColorTokens('Multi/White')).toEqual(new Set(['multi', 'white']));
+    expect(normalizeColorTokens('Red and Black')).toEqual(new Set(['red', 'black']));
+    expect(normalizeColorTokens('Triple White')).toEqual(new Set(['triple', 'white']));
+  });
+});
+
+describe('compareColor — Opportunity Classification fix', () => {
+  it('match — identical single color', () => {
+    expect(compareColor('white', 'white')).toBe('match');
+  });
+
+  it('match — case-insensitive', () => {
+    expect(compareColor('White', 'WHITE')).toBe('match');
+  });
+
+  it('incompatible — no overlap at all (requested white, reported black)', () => {
+    expect(compareColor('white', 'black')).toBe('incompatible');
+  });
+
+  it('ambiguous — requested color present but reported color also names another (Black/White searching white)', () => {
+    expect(compareColor('white', 'Black/White')).toBe('ambiguous');
+  });
+
+  it('ambiguous — Multi/White searching white (the audit\'s own example)', () => {
+    expect(compareColor('white', 'Multi/White')).toBe('ambiguous');
+  });
+
+  it('never treats White/Black and Black/White as automatically identical to a single-color request — both are ambiguous against "white"', () => {
+    expect(compareColor('white', 'White/Black')).toBe('ambiguous');
+    expect(compareColor('white', 'Black/White')).toBe('ambiguous');
+  });
+
+  it('match — a compound requested color matching a compound reported color exactly (order-independent, same token set)', () => {
+    expect(compareColor('Black/White', 'White/Black')).toBe('match');
+  });
+});
+
+describe('normalizeSizeForComparison', () => {
+  it('strips a known region label word, not a real EU/US/UK conversion', () => {
+    expect(normalizeSizeForComparison('43 EU')).toBe('43');
+    expect(normalizeSizeForComparison('EU 43')).toBe('43');
+    expect(normalizeSizeForComparison('43')).toBe('43');
+  });
+
+  it('different numbers never normalize to the same string, even with labels stripped (no real unit conversion is performed)', () => {
+    expect(normalizeSizeForComparison('43 EU')).not.toBe(normalizeSizeForComparison('9 US'));
+  });
+
+  it('normalizes a comma decimal to a dot', () => {
+    expect(normalizeSizeForComparison('43,5')).toBe('43.5');
+  });
+});
+
+describe('annotateResult — color (Opportunity Classification fix)', () => {
+  it('color not requested at all -> colorOutcome "not_requested", no color matchReason/warning', () => {
+    const result = makeResult({ color: 'Black' });
+    const { colorOutcome, excludedByColor, matchReasons, warnings } = annotateResult(result, { query: 'x' }, noBounds);
+    expect(colorOutcome).toBe('not_requested');
+    expect(excludedByColor).toBe(false);
+    expect(matchReasons.some((r) => /color/i.test(r))).toBe(false);
+    expect(warnings.some((w) => /color/i.test(w))).toBe(false);
+  });
+
+  it('requested color confirmed -> matchReason, never excluded', () => {
+    const result = makeResult({ color: 'White' });
+    const { colorOutcome, excludedByColor, matchReasons } = annotateResult(result, { query: 'x', color: 'white' }, noBounds);
+    expect(colorOutcome).toBe('match');
+    expect(excludedByColor).toBe(false);
+    expect(matchReasons.some((r) => /Requested color "white" confirmed/.test(r))).toBe(true);
+  });
+
+  it('requested color incompatible -> excludedByColor true, never a silent keep', () => {
+    const result = makeResult({ color: 'Black' });
+    const { colorOutcome, excludedByColor } = annotateResult(result, { query: 'x', color: 'white' }, noBounds);
+    expect(colorOutcome).toBe('incompatible');
+    expect(excludedByColor).toBe(true);
+  });
+
+  it('requested color ambiguous (Black/White searching white) -> never excluded, warning instead, never a confirmed matchReason', () => {
+    const result = makeResult({ color: 'Black/White' });
+    const { colorOutcome, excludedByColor, matchReasons, warnings } = annotateResult(result, { query: 'x', color: 'white' }, noBounds);
+    expect(colorOutcome).toBe('ambiguous');
+    expect(excludedByColor).toBe(false);
+    expect(matchReasons.some((r) => /color/i.test(r))).toBe(false);
+    expect(warnings.some((w) => /only partially confirmed/i.test(w))).toBe(true);
+  });
+
+  it('requested color unknown (source does not report one) -> warning, never excluded, never a fabricated match', () => {
+    const result = makeResult({ color: undefined });
+    const { colorOutcome, excludedByColor, warnings } = annotateResult(result, { query: 'x', color: 'white' }, noBounds);
+    expect(colorOutcome).toBe('unknown');
+    expect(excludedByColor).toBe(false);
+    expect(warnings.some((w) => /color was not confirmed/i.test(w))).toBe(true);
+  });
+});
+
+describe('annotateResult — size (Opportunity Classification fix)', () => {
+  it('size not requested -> sizeOutcome "not_requested", no size matchReason/warning', () => {
+    const result = makeResult({ size: '43' });
+    const { sizeOutcome, matchReasons, warnings } = annotateResult(result, { query: 'x' }, noBounds);
+    expect(sizeOutcome).toBe('not_requested');
+    expect(matchReasons.some((r) => /size/i.test(r))).toBe(false);
+    expect(warnings.some((w) => /size/i.test(w))).toBe(false);
+  });
+
+  it('requested size confirmed -> matchReason, label stripped not a real unit conversion', () => {
+    const result = makeResult({ size: '43 EU' });
+    const { sizeOutcome, matchReasons } = annotateResult(result, { query: 'x', size: '43' }, noBounds);
+    expect(sizeOutcome).toBe('match');
+    expect(matchReasons.some((r) => /Requested size "43" confirmed/.test(r))).toBe(true);
+  });
+
+  it('requested size different -> warning, NEVER excluded (no verified EU/US/UK conversion)', () => {
+    const result = makeResult({ size: '42' });
+    const { sizeOutcome, warnings, excludedByColor } = annotateResult(result, { query: 'x', size: '43' }, noBounds);
+    expect(sizeOutcome).toBe('different');
+    expect(warnings.some((w) => /differs from the requested size/i.test(w))).toBe(true);
+    expect(excludedByColor).toBe(false); // size never gates excludedByColor/any exclusion flag
+  });
+
+  it('requested size absent from the source -> "Size not confirmed by the source" warning', () => {
+    const result = makeResult({ size: undefined });
+    const { sizeOutcome, warnings } = annotateResult(result, { query: 'x', size: '43' }, noBounds);
+    expect(sizeOutcome).toBe('absent');
+    expect(warnings.some((w) => /Size not confirmed by the source/.test(w))).toBe(true);
+  });
+
+  it('never deduces a size from unrelated text — a result whose title mentions "women\'s"/"white" is never treated as size-confirmed', () => {
+    const result = makeResult({ title: "Nike Air Force 1 White Women's", size: undefined, color: 'White' });
+    const { sizeOutcome, matchReasons } = annotateResult(result, { query: 'Nike Air Force 1', color: 'white', size: '43' }, noBounds);
+    expect(sizeOutcome).toBe('absent');
+    expect(matchReasons.some((r) => /size/i.test(r))).toBe(false);
+  });
+});
+
+describe('classifyOpportunity — Opportunity Classification fix (mission section 1)', () => {
+  const notRequested = { colorOutcome: 'not_requested' as const, sizeOutcome: 'not_requested' as const };
+
+  it('never an automatic VERIFIED_OPPORTUNITY just because source !== "web"', () => {
+    const ebayResult = makeResult({ source: 'ebay' });
+    expect(classifyOpportunity(ebayResult, notRequested, 'MEDIUM')).toBe('WEB_LEAD');
+  });
+
+  it('VERIFIED_OPPORTUNITY requires qualityTier HIGH and no unresolved critical attribute', () => {
+    const result = makeResult({ source: 'web' });
+    expect(classifyOpportunity(result, notRequested, 'HIGH')).toBe('VERIFIED_OPPORTUNITY');
+  });
+
+  it('qualityTier !== HIGH -> WEB_LEAD, even for an eBay/Etsy result', () => {
+    const result = makeResult({ source: 'etsy' });
+    expect(classifyOpportunity(result, notRequested, 'LOW')).toBe('WEB_LEAD');
+  });
+
+  it('a detected price conflict (verificationStatus conflicting) -> WEB_LEAD even at quality HIGH', () => {
+    const result = makeResult({ verificationStatus: 'conflicting' });
+    expect(classifyOpportunity(result, notRequested, 'HIGH')).toBe('WEB_LEAD');
+  });
+
+  it('ambiguous or unknown requested color -> WEB_LEAD even at quality HIGH', () => {
+    const result = makeResult();
+    expect(classifyOpportunity(result, { colorOutcome: 'ambiguous', sizeOutcome: 'not_requested' }, 'HIGH')).toBe('WEB_LEAD');
+    expect(classifyOpportunity(result, { colorOutcome: 'unknown', sizeOutcome: 'not_requested' }, 'HIGH')).toBe('WEB_LEAD');
+  });
+
+  it('a confirmed color match never blocks VERIFIED_OPPORTUNITY on its own', () => {
+    const result = makeResult();
+    expect(classifyOpportunity(result, { colorOutcome: 'match', sizeOutcome: 'not_requested' }, 'HIGH')).toBe('VERIFIED_OPPORTUNITY');
+  });
+
+  it('requested size different or absent -> WEB_LEAD even at quality HIGH', () => {
+    const result = makeResult();
+    expect(classifyOpportunity(result, { colorOutcome: 'not_requested', sizeOutcome: 'different' }, 'HIGH')).toBe('WEB_LEAD');
+    expect(classifyOpportunity(result, { colorOutcome: 'not_requested', sizeOutcome: 'absent' }, 'HIGH')).toBe('WEB_LEAD');
+  });
+
+  it('a confirmed size match never blocks VERIFIED_OPPORTUNITY on its own', () => {
+    const result = makeResult();
+    expect(classifyOpportunity(result, { colorOutcome: 'not_requested', sizeOutcome: 'match' }, 'HIGH')).toBe('VERIFIED_OPPORTUNITY');
+  });
+});
+
+describe('explainClassification — Web Sourcing smoke-test fix (section 3)', () => {
+  const notRequested = { colorOutcome: 'not_requested' as const, sizeOutcome: 'not_requested' as const };
+
+  it('undefined when the result would classify as VERIFIED_OPPORTUNITY — nothing to explain', () => {
+    const result = makeResult();
+    expect(explainClassification(result, notRequested, 'HIGH')).toBeUndefined();
+  });
+
+  it('names the specific missing signal(s) behind a non-HIGH qualityTier', () => {
+    // makeResult() defaults authenticityStatus to 'claimed' (real evidence
+    // on its own) — overridden here so NONE of availability/condition/
+    // seller/authenticity evidence is present, to exercise every clause.
+    const result = makeResult({ authenticityStatus: 'unverified' });
+    const reason = explainClassification(result, notRequested, 'LOW');
+    expect(reason).toMatch(/listing quality is LOW/);
+    expect(reason).toMatch(/availability not confirmed/);
+    expect(reason).toMatch(/condition not confirmed/);
+    expect(reason).toMatch(/seller\/authenticity not confirmed/);
+  });
+
+  it('a detected price conflict is named explicitly', () => {
+    const result = makeResult({ verificationStatus: 'conflicting' });
+    expect(explainClassification(result, notRequested, 'HIGH')).toMatch(/price conflict was detected/);
+  });
+
+  it('ambiguous color is named explicitly, distinct from unknown color', () => {
+    const result = makeResult();
+    expect(explainClassification(result, { colorOutcome: 'ambiguous', sizeOutcome: 'not_requested' }, 'HIGH')).toMatch(/color only partially confirmed/);
+    expect(explainClassification(result, { colorOutcome: 'unknown', sizeOutcome: 'not_requested' }, 'HIGH')).toMatch(/color not confirmed by the source/);
+  });
+
+  it('different size vs. absent size are named with distinct reasons', () => {
+    const result = makeResult();
+    expect(explainClassification(result, { colorOutcome: 'not_requested', sizeOutcome: 'different' }, 'HIGH')).toMatch(/size differs/);
+    expect(explainClassification(result, { colorOutcome: 'not_requested', sizeOutcome: 'absent' }, 'HIGH')).toMatch(/size not confirmed/);
+  });
+
+  it('combines multiple real factors in one reason when several apply at once', () => {
+    const result = makeResult({ verificationStatus: 'conflicting' });
+    const reason = explainClassification(result, { colorOutcome: 'ambiguous', sizeOutcome: 'absent' }, 'MEDIUM');
+    expect(reason).toMatch(/listing quality is MEDIUM/);
+    expect(reason).toMatch(/price conflict/);
+    expect(reason).toMatch(/color only partially confirmed/);
+    expect(reason).toMatch(/size not confirmed/);
+  });
+
+  it('never duplicates the full warning sentences — stays a concise label', () => {
+    const result = makeResult();
+    const reason = explainClassification(result, { colorOutcome: 'ambiguous', sizeOutcome: 'not_requested' }, 'HIGH');
+    expect(reason!.length).toBeLessThan(80);
+  });
+
+  it('always agrees with classifyOpportunity: a reason is produced if and only if classification is WEB_LEAD', () => {
+    const cases: Array<[any, 'HIGH' | 'MEDIUM' | 'LOW']> = [
+      [notRequested, 'HIGH'],
+      [notRequested, 'MEDIUM'],
+      [{ colorOutcome: 'match', sizeOutcome: 'match' }, 'HIGH'],
+      [{ colorOutcome: 'ambiguous', sizeOutcome: 'not_requested' }, 'HIGH'],
+      [{ colorOutcome: 'not_requested', sizeOutcome: 'different' }, 'HIGH'],
+    ];
+    const result = makeResult();
+    for (const [annotation, qualityTier] of cases) {
+      const classification = classifyOpportunity(result, annotation, qualityTier);
+      const reason = explainClassification(result, annotation, qualityTier);
+      if (classification === 'WEB_LEAD') {
+        expect(reason).toBeDefined();
+      } else {
+        expect(reason).toBeUndefined();
+      }
+    }
   });
 });

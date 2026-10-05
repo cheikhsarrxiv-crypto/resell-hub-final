@@ -32,11 +32,36 @@ describe('ListingGenerationService.buildDraftFromSourcingResult — factual data
     expect(draft.source.images).toEqual(['https://img.ebay.com/main.jpg']);
   });
 
-  it('never invents size/material/color — NormalizedSourcingResult has none, and the draft has no such factual field', () => {
+  it('never invents size/material/color when the source does not report them', () => {
     const draft = ListingGenerationService.buildDraftFromSourcingResult(baseResult());
     expect(draft.fields.size).toBeUndefined();
-    expect('material' in draft.fields).toBe(false);
-    expect('color' in draft.fields).toBe(false);
+    expect(draft.fields.material).toBeUndefined();
+    expect(draft.fields.color).toBeUndefined();
+    expect(draft.source.size).toBeUndefined();
+    expect(draft.source.material).toBeUndefined();
+    expect(draft.source.color).toBeUndefined();
+  });
+
+  it('Opportunity Classification fix — pre-fills size/material/color (and marks them generated) when the source DOES confidently report them, never fabricated when absent', () => {
+    const draft = ListingGenerationService.buildDraftFromSourcingResult(
+      baseResult({ size: '43', material: 'leather', color: 'White', availability: 'IN_STOCK', productUrl: 'https://x/offer/1', pageType: 'PRODUCT_PAGE', qualityTier: 'HIGH', classification: 'VERIFIED_OPPORTUNITY' })
+    );
+
+    expect(draft.fields.size).toBe('43');
+    expect(draft.fields.material).toBe('leather');
+    expect(draft.fields.color).toBe('White');
+    expect(draft.generatedFieldKeys).toEqual(expect.arrayContaining(['size', 'material', 'color']));
+
+    // Traceability copies on `source` — never invented, exactly what the
+    // search result itself reported.
+    expect(draft.source.size).toBe('43');
+    expect(draft.source.material).toBe('leather');
+    expect(draft.source.color).toBe('White');
+    expect(draft.source.availability).toBe('IN_STOCK');
+    expect(draft.source.productUrl).toBe('https://x/offer/1');
+    expect(draft.source.pageType).toBe('PRODUCT_PAGE');
+    expect(draft.source.qualityTier).toBe('HIGH');
+    expect(draft.source.classification).toBe('VERIFIED_OPPORTUNITY');
   });
 
   it('condition is copied from the source, never invented when absent', () => {
