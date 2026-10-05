@@ -1,89 +1,212 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { SubscriptionService } from './SubscriptionService';
+import { NotificationService } from './NotificationService';
+import { getFulfillmentProvider } from './fulfillment/registry';
+import type { CreateFulfillmentOrderInput } from './fulfillment/FulfillmentProvider';
+
+type OrderWithItemsForFulfillment = Prisma.OrderGetPayload<{
+  include: { items: { include: { product: true } } };
+}>;
 
 export class FulfillmentService {
   /**
-   * Send order to fulfillment partner
+   * Shared first half of both sendToFulfillment and
+   * sendToFulfillmentViaProvider — the plan gate, order lookup, duplicate
+   * check, partner lookup, FulfillmentOrder creation, and Order status
+   * flip, BYTE-FOR-BYTE the same logic that lived directly inside
+   * sendToFulfillment before Phase C. Factored out so neither public
+   * method duplicates it.
    */
-  static async sendToFulfillment(
-    orderId: string,
-    workspaceId: string,
-    partnerId: string
+  private static async createFulfillmentOrderRecord(orderId: string, workspaceId: string, partnerId: string) {
+    // Fulfillment is a paid-plan feature (Pro/Business) — gate the
+    // actual creation point server-side, not just its UI visibility.
+    if (!(await SubscriptionService.hasFeature(workspaceId, 'fulfillmentEnabled'))) {
+      throw new Error('Fulfillment is not included in your current plan');
+    }
+
+    // Get order with details
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, workspaceId },
+      include: {
+        items: { include: { product: true } },
+        listing: { include: { connection: { include: { marketplace: true } } } },
+      },
+    });
+
+    if (!order) {
+      throw new Error('Order not found');
+    }
+
+    // Check if fulfillment order already exists
+    const existing = await prisma.fulfillmentOrder.findFirst({
+      where: { orderId },
+    });
+
+    if (existing) {
+      throw new Error('Fulfillment order already created');
+    }
+
+    // Get partner
+    const partner = await prisma.fulfillmentPartner.findUnique({
+      where: { id: partnerId },
+    });
+
+    if (!partner) {
+      throw new Error('Fulfillment partner not found');
+    }
+
+    // Calculate costs
+    const totalCost = partner.costPerOrder + (order.items.length * 0.5);
+    const profit = order.estimatedProfit - totalCost;
+
+    // Create fulfillment order
+    const fulfillmentOrder = await prisma.fulfillmentOrder.create({
+      data: {
+        workspaceId,
+        orderId,
+        partnerId,
+        status: 'pending',
+        quantity: order.items.reduce((sum: any, item: any) => sum + item.quantity, 0),
+        totalCost,
+        revenue: order.totalPrice,
+        profit,
+        externalOrderId: `FUL-${Date.now()}`,
+      },
+      include: {
+        partner: true,
+      },
+    });
+
+    // Update order status
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        fulfillmentType: 'automatic',
+        status: 'processing',
+      },
+    });
+
+    return { fulfillmentOrder, partner, order };
+  }
+
+  /**
+   * Shared dispatch to a real FulfillmentProvider, used by both
+   * sendToFulfillment (when partner.providerId is configured) and
+   * sendToFulfillmentViaProvider (with an explicitly-passed providerId
+   * that overrides whatever is or isn't configured on the partner row).
+   *
+   * FAILURE HANDLING (Phase C / Q4): a provider failure NEVER leaves the
+   * silent, inconsistent pair Order.status="processing" +
+   * FulfillmentOrder.status="pending". Both are updated to the already-
+   * existing, documented failure values (FulfillmentOrder.status="failed",
+   * Order.status="error" — both already part of each model's own
+   * pre-existing status vocabulary, see their Prisma comments; neither is
+   * invented here) BEFORE the real error is rethrown unmodified to the
+   * caller. No automatic retry (explicitly out of scope for V1) — a
+   * human/future-reconciliation action is required to move past "failed".
+   */
+  private static async dispatchToProvider(
+    fulfillmentOrder: { id: string; orderId: string; workspaceId: string },
+    order: OrderWithItemsForFulfillment,
+    providerId: string
   ) {
+    const providerInput: CreateFulfillmentOrderInput = {
+      workspaceId: fulfillmentOrder.workspaceId,
+      orderId: fulfillmentOrder.orderId,
+      items: order.items.map((item) => ({
+        productId: item.productId,
+        sku: item.product.sku,
+        title: item.title,
+        quantity: item.quantity,
+      })),
+      shippingAddress: {
+        line1: order.shippingAddress,
+        line2: order.shippingAddress2 ?? undefined,
+        city: order.shippingCity,
+        state: order.shippingState ?? undefined,
+        postalCode: order.shippingPostalCode,
+        country: order.shippingCountry,
+        phone: order.shippingPhone ?? undefined,
+        email: order.shippingEmail ?? undefined,
+      },
+      // shippingRequirements intentionally omitted — no real,
+      // non-fabricated source exists for it anywhere in ADKSY today; see
+      // docs/fulfillment/ARCHITECTURE.md.
+    };
+
+    const provider = getFulfillmentProvider(providerId);
+
     try {
-      // Fulfillment is a paid-plan feature (Pro/Business) — gate the
-      // actual creation point server-side, not just its UI visibility.
-      if (!(await SubscriptionService.hasFeature(workspaceId, 'fulfillmentEnabled'))) {
-        throw new Error('Fulfillment is not included in your current plan');
-      }
-
-      // Get order with details
-      const order = await prisma.order.findFirst({
-        where: { id: orderId, workspaceId },
-        include: {
-          items: { include: { product: true } },
-          listing: { include: { connection: { include: { marketplace: true } } } },
-        },
+      const providerStatus = await provider.createFulfillmentOrder(providerInput);
+      return prisma.fulfillmentOrder.update({
+        where: { id: fulfillmentOrder.id },
+        data: { externalOrderId: providerStatus.externalOrderId, status: providerStatus.status },
+        include: { partner: true },
       });
-
-      if (!order) {
-        throw new Error('Order not found');
-      }
-
-      // Check if fulfillment order already exists
-      const existing = await prisma.fulfillmentOrder.findFirst({
-        where: { orderId },
-      });
-
-      if (existing) {
-        throw new Error('Fulfillment order already created');
-      }
-
-      // Get partner
-      const partner = await prisma.fulfillmentPartner.findUnique({
-        where: { id: partnerId },
-      });
-
-      if (!partner) {
-        throw new Error('Fulfillment partner not found');
-      }
-
-      // Calculate costs
-      const totalCost = partner.costPerOrder + (order.items.length * 0.5);
-      const profit = order.estimatedProfit - totalCost;
-
-      // Create fulfillment order
-      const fulfillmentOrder = await prisma.fulfillmentOrder.create({
-        data: {
-          workspaceId,
-          orderId,
-          partnerId,
-          status: 'pending',
-          quantity: order.items.reduce((sum: any, item: any) => sum + item.quantity, 0),
-          totalCost,
-          revenue: order.totalPrice,
-          profit,
-          externalOrderId: `FUL-${Date.now()}`,
-        },
-        include: {
-          partner: true,
-        },
-      });
-
-      // Update order status
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          fulfillmentType: 'automatic',
-          status: 'processing',
-        },
-      });
-
-      return fulfillmentOrder;
     } catch (error) {
+      // Best-effort cleanup writes — each wrapped so a logging/notification
+      // failure here can never mask or replace the real provider error
+      // that's about to be rethrown below.
+      await prisma.fulfillmentOrder
+        .update({ where: { id: fulfillmentOrder.id }, data: { status: 'failed' } })
+        .catch((updateError) => console.error('[FulfillmentService] Failed to mark FulfillmentOrder as failed after provider error:', updateError));
+
+      await prisma.order
+        .update({ where: { id: fulfillmentOrder.orderId }, data: { status: 'error' } })
+        .catch((updateError) => console.error('[FulfillmentService] Failed to mark Order as error after provider failure:', updateError));
+
+      // NotificationService.createNotification never throws (it catches
+      // its own errors internally) — not wrapped further here.
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await NotificationService.notifyFulfillmentError(
+        fulfillmentOrder.workspaceId,
+        fulfillmentOrder.orderId,
+        errorMessage,
+        order.customerEmail
+      );
+
       throw error;
     }
+  }
+
+  /**
+   * Send order to fulfillment partner — the real, main entry point.
+   * PUBLIC SIGNATURE UNCHANGED (Phase C requirement): sendToFulfillment(
+   * orderId, workspaceId, partnerId). Every existing caller (send_to_fulfillment
+   * the AI tool, POST /api/fulfillment/send, the dashboard) keeps working
+   * identically.
+   *
+   * Behavior:
+   * - partner.providerId === null (every partner that exists today,
+   *   including the seeded "ShipMock France") -> historical behavior,
+   *   STRICTLY UNCHANGED: returns the freshly-created FulfillmentOrder,
+   *   no provider ever called.
+   * - partner.providerId set -> also dispatches to that real
+   *   FulfillmentProvider via the shared dispatchToProvider above.
+   */
+  static async sendToFulfillment(orderId: string, workspaceId: string, partnerId: string) {
+    const { fulfillmentOrder, partner, order } = await this.createFulfillmentOrderRecord(orderId, workspaceId, partnerId);
+
+    if (!partner.providerId) {
+      return fulfillmentOrder;
+    }
+
+    return this.dispatchToProvider(fulfillmentOrder, order, partner.providerId);
+  }
+
+  /**
+   * Explicit-override entry point: dispatches to the given providerId
+   * regardless of whatever is (or isn't) configured on the partner row —
+   * useful to exercise/test the provider path for a partner that has no
+   * providerId configured yet. Shares its creation and dispatch logic
+   * with sendToFulfillment above (no duplication); never calls
+   * sendToFulfillment internally (which would risk dispatching to a
+   * provider TWICE if the partner also has its own providerId set).
+   */
+  static async sendToFulfillmentViaProvider(orderId: string, workspaceId: string, partnerId: string, providerId: string) {
+    const { fulfillmentOrder, order } = await this.createFulfillmentOrderRecord(orderId, workspaceId, partnerId);
+    return this.dispatchToProvider(fulfillmentOrder, order, providerId);
   }
 
   /**

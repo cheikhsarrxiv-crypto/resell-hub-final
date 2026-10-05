@@ -571,6 +571,18 @@ model FulfillmentPartner {
   webhookUrl String?
   status     String  @default("active")
 
+  // Fulfillment Integration Foundation V1 (Phase C) — which
+  // FulfillmentProvider (see src/services/fulfillment/registry.ts, e.g.
+  // "mock") this partner's real integration is wired to. Nullable, no
+  // default: every partner row that exists today (including the seeded
+  // "ShipMock France") has NULL here, and that stays a perfectly valid,
+  // ordinary state — FulfillmentService.sendToFulfillment's historical,
+  // provider-less behavior is preserved EXACTLY for any partner with
+  // providerId=null. Only a partner explicitly given a real value here
+  // (never inferred from its name) is ever dispatched to a real
+  // FulfillmentProvider. Never a required field, never backfilled.
+  providerId String?
+
   processingTime Int @default(24) // hours
   deliveryTime   Int @default(48) // hours
 
