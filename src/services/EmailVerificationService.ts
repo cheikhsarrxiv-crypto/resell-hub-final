@@ -13,6 +13,8 @@ interface VerificationTokenResult {
   success: boolean;
   message: string;
   token?: string;
+  /** Audit fix — set only when success is false because the email failed to send (e.g. 'EMAIL_PROVIDER_NOT_CONFIGURED'). Never a secret/internal detail — see EmailService.send's own stable error codes/messages. */
+  error?: string;
 }
 
 interface VerifyEmailResult {
@@ -66,8 +68,9 @@ export class EmailVerificationService {
 
       console.log(`[EmailVerification] Token created for user: ${userId}`);
 
-      // Send the verification email (does not fail token creation on send error —
-      // the token is already persisted and can still be resent).
+      // Send the verification email. The token itself is already persisted
+      // above regardless of what happens next — a failed send never
+      // deletes it, so a later resend can still use/replace it.
       const appUrl = getAppUrl();
       const verificationUrl = `${appUrl}/verify-email?token=${token}&userId=${userId}`;
       const emailResult = await EmailService.sendVerificationEmail(email, verificationUrl);
@@ -77,6 +80,17 @@ export class EmailVerificationService {
           `[EmailVerification] Failed to send verification email to ${email}:`,
           emailResult.error
         );
+        // Audit fix: this used to report success:true here even though no
+        // email was actually sent (EmailService's own result was ignored).
+        // The token is real and still returned (a resend/support flow can
+        // still use it), but `success` must honestly reflect that the
+        // email itself was not delivered.
+        return {
+          success: false,
+          message: 'Verification token created, but the verification email could not be sent',
+          token,
+          error: emailResult.error,
+        };
       }
 
       return {

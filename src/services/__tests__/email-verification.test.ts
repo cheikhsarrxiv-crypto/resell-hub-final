@@ -6,8 +6,17 @@
  * credentials are available in this environment (EMAIL_PROVIDER is
  * unset/'none' here), and the fix under test is that the call happens at
  * all, not the provider's own delivery guarantee.
+ *
+ * Audit fix: EmailService.send() now honestly reports success:false when
+ * EMAIL_PROVIDER is 'none' (previously a fabricated success). The
+ * describe block below defaults every test to a MOCKED successful send
+ * (via beforeEach) so the existing token/DB-lifecycle assertions keep
+ * testing exactly what they always tested — token creation, hashing,
+ * expiry, rate limiting — independently of email delivery. Tests that
+ * specifically cover the new failure-handling behavior override that
+ * default per-test.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { EmailVerificationService } from '@/services/EmailVerificationService';
@@ -37,6 +46,13 @@ async function createTestUser() {
 }
 
 describe.skipIf(!dbAvailable)('Email verification — real PostgreSQL', () => {
+  beforeEach(() => {
+    // Simulates a correctly configured provider — see this file's own
+    // header comment. Individual tests below override this when they
+    // specifically exercise the failure path.
+    vi.spyOn(EmailService, 'sendVerificationEmail').mockResolvedValue({ success: true, messageId: 'mock-test-id' });
+  });
+
   afterEach(async () => {
     vi.restoreAllMocks();
     for (const id of createdUserIds.splice(0)) {
@@ -201,5 +217,68 @@ describe.skipIf(!dbAvailable)('Email verification — real PostgreSQL', () => {
     // The token this signup produced must actually verify the same user.
     const verifyResult = await EmailVerificationService.verifyEmail(user.id, result.token!);
     expect(verifyResult.success).toBe(true);
+  });
+
+  // Audit fix (P0): the email send result is no longer ignored/fabricated.
+  it('createVerificationToken keeps the token in the database but returns success:false when the email fails to send', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendVerificationEmail').mockResolvedValue({
+      success: false,
+      error: 'EMAIL_PROVIDER_NOT_CONFIGURED',
+    });
+
+    const result = await EmailVerificationService.createVerificationToken(user.id, user.email);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('EMAIL_PROVIDER_NOT_CONFIGURED');
+    // The token itself is real and still returned — a resend/support flow
+    // can still rely on it; only the "the email was sent" claim is false.
+    expect(result.token).toBeDefined();
+
+    const stored = await prisma.emailVerificationToken.findUnique({ where: { userId: user.id } });
+    expect(stored).not.toBeNull();
+    expect(stored!.hashedToken).toBe(
+      crypto.createHash('sha256').update(result.token!).digest('hex')
+    );
+
+    // The token created despite the email failure still verifies the user.
+    const verifyResult = await EmailVerificationService.verifyEmail(user.id, result.token!);
+    expect(verifyResult.success).toBe(true);
+  });
+
+  it('a real provider error (not just "none") also produces success:false while keeping the token', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendVerificationEmail').mockResolvedValue({
+      success: false,
+      error: 'The gmail.com domain is not verified',
+    });
+
+    const result = await EmailVerificationService.createVerificationToken(user.id, user.email);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('The gmail.com domain is not verified');
+    expect(result.token).toBeDefined();
+  });
+});
+
+// Audit fix (P0) — EmailService.send()'s own 'none'-provider branch,
+// tested directly rather than through EmailVerificationService. Needs no
+// database at all, so it runs unconditionally (not gated by dbAvailable).
+describe('EmailService.send — no provider configured', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns success:false with the stable EMAIL_PROVIDER_NOT_CONFIGURED error instead of a fabricated success', async () => {
+    // This test environment has no EMAIL_PROVIDER set (see this file's
+    // own header comment) — exercises the real, unmocked 'none' branch.
+    // No real email is ever sent by this branch regardless.
+    const result = await EmailService.sendVerificationEmail(
+      'user@example.com',
+      'https://example.com/verify-email?token=x&userId=y'
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('EMAIL_PROVIDER_NOT_CONFIGURED');
   });
 });

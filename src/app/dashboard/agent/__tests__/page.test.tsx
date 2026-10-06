@@ -65,7 +65,7 @@ describe('AgentPage', () => {
   it('renders the premium empty-state welcome on first load (no messages yet)', () => {
     const html = renderToStaticMarkup(<AgentPage />);
 
-    expect(html).toContain('prête à vendre');
+    expect(html).toContain('propulsé par l&#x27;IA');
     expect(html).toContain('Exemples de demandes');
   });
 

@@ -24,8 +24,7 @@ describe('AgentMessageList', () => {
   it('empty conversation renders the premium welcome state, no message bubbles', () => {
     const html = renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />);
 
-    expect(html).toContain('prête à vendre');
-    expect(html).toContain('n&#x27;importe quel produit');
+    expect(html).toContain('propulsé par l&#x27;IA');
     expect(html).toContain('Exemples de demandes');
   });
 

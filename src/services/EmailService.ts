@@ -321,14 +321,19 @@ export class EmailService {
       console.error('[EmailService] Failed to log notification:', err);
     }
 
-    // If no provider configured, return success but with message
+    // Audit fix: no provider configured means no email is actually sent —
+    // this must report success:false (a stable, checkable error code),
+    // never a fabricated success. Every caller already treats a failed
+    // send as best-effort/non-fatal (see EmailVerificationService,
+    // PasswordResetService, StripeService) — this only makes the failure
+    // honest and observable, it does not change any caller's control flow.
     if (this.provider === 'none') {
       console.log(
         `[EmailService] EMAIL_PROVIDER_NOT_CONFIGURED - Would send: ${content.subject} to ${content.to}`
       );
       return {
-        success: true,
-        messageId: 'mock-' + Date.now(),
+        success: false,
+        error: 'EMAIL_PROVIDER_NOT_CONFIGURED',
       };
     }
 

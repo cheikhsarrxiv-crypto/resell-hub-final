@@ -70,12 +70,11 @@ export function AgentMessageList({ messages, sending, onConfirmAction, onCancelA
           className="text-2xl sm:text-3xl md:text-4xl font-semibold text-white mb-3 sm:mb-4 max-w-2xl leading-tight"
           style={{ fontFamily: 'var(--font-display)' }}
         >
-          Transforme ton idée en une boutique <span className="text-[#FF5A1F]">prête à vendre</span> en quelques
-          minutes.
+          Ton sourcing produit, <span className="text-[#FF5A1F]">propulsé par l&apos;IA</span>.
         </h2>
         <p className="text-sm sm:text-base text-gray-400 max-w-md mb-8 sm:mb-10">
-          Décris n&apos;importe quel produit — mode, high-tech, mobilier, et plus — l&apos;Agent le recherche,
-          compare les prix et prépare ta prochaine annonce.
+          Décris ce que tu recherches — l&apos;Agent IA trouve les produits correspondants, compare les offres et
+          t&apos;aide à préparer tes annonces.
         </p>
 
         <div className="w-full max-w-xl text-left">

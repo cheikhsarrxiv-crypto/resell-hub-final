@@ -104,8 +104,19 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Send email verification link (best-effort — signup already succeeded)
-    await EmailVerificationService.createVerificationToken(user.id, user.email);
+    // Send email verification link. The account is already created at this
+    // point and must stay created regardless of what happens here — never
+    // turn an email-delivery problem into a failed signup (no 500, no
+    // rollback). The result is still inspected (audit fix) so a failed
+    // send is at least loud in the server logs instead of being silently
+    // treated as if the email had gone out.
+    const verificationResult = await EmailVerificationService.createVerificationToken(user.id, user.email);
+    if (!verificationResult.success) {
+      console.error(
+        `[Signup] Account ${user.id} created, but the verification email could not be sent:`,
+        verificationResult.error ?? verificationResult.message
+      );
+    }
 
     return NextResponse.json(
       {

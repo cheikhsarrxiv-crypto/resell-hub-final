@@ -163,6 +163,25 @@ describe('AiAgentService.sendMessage', () => {
     );
   });
 
+  // Audit fix (P1) — a configuration-level check on the system prompt
+  // itself: running the real model is out of scope here (no eval harness
+  // exists yet for this), so this proves the INSTRUCTION is actually
+  // sent, not that a real model obeys it.
+  it('system prompt instructs the model to never present diagnostics.rejectedSamples as a found/available result (P1 fix)', async () => {
+    createMock.mockResolvedValue(textOnlyResponse('hi'));
+
+    await AiAgentService.sendMessage('ws-1', 'user-1', 'hi');
+
+    const systemPrompt = createMock.mock.calls[0][0].system as string;
+    expect(systemPrompt).toContain('rejectedSamples');
+    // (B) rejectedSamples must never be treated as results.
+    expect(systemPrompt).toMatch(/never (use|present|describing)[^.]*rejectedSamples/i);
+    // (C) results empty + rejectedSamples non-empty -> explain, never claim a find.
+    expect(systemPrompt).toMatch(/results is empty but rejectedSamples contains entries/i);
+    // (A) unchanged: results[] remains the one real source of truth.
+    expect(systemPrompt).toMatch(/Only an item actually present in (that same call's )?results\[\]/i);
+  });
+
   it('conversationId given but not owned by this workspace -> throws, never silently creates or reuses another workspace\'s conversation', async () => {
     prismaMock.agentConversation.findFirst.mockResolvedValue(null);
 
@@ -590,5 +609,70 @@ describe('AiAgentService — AiUsageService reserve/finalize/release wiring (rac
     expect((turn.toolCalls[0].result as any).error).toContain('capability');
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
     expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
+  });
+
+  describe('AI-first "free listing creation" workflow — attachments (real, already-uploaded photos)', () => {
+    it('records a real attachment as a synthetic user_photos_uploaded tool_use/tool_result pair, persisted BEFORE the model is ever called', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      createMock.mockResolvedValue(textOnlyResponse('Merci pour la photo !'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+      ]);
+
+      const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
+      const assistantPhotoRow = createCalls.find((c: any) => c.data.role === 'assistant' && c.data.toolName === 'user_photos_uploaded');
+      const toolResultPhotoRow = createCalls.find((c: any) => c.data.role === 'tool_result' && c.data.toolName === 'user_photos_uploaded');
+
+      expect(assistantPhotoRow).toBeDefined();
+      expect(toolResultPhotoRow).toBeDefined();
+      const toolUseBlocks = JSON.parse(assistantPhotoRow.data.content);
+      expect(toolUseBlocks[0]).toMatchObject({ type: 'tool_use', name: 'user_photos_uploaded' });
+      const toolResultBlocks = JSON.parse(toolResultPhotoRow.data.content);
+      const payload = JSON.parse(toolResultBlocks[0].content);
+      expect(payload.photos).toEqual([
+        expect.objectContaining({ url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' }),
+      ]);
+      expect(toolUseBlocks[0].id).toBe(toolResultBlocks[0].tool_use_id); // real tool_use_id pairing, same protocol as a real tool call
+
+      // Persisted (and therefore visible to findToolResultsByName later)
+      // BEFORE the Anthropic call for this turn.
+      const photoRowIndex = createCalls.indexOf(assistantPhotoRow);
+      expect(createMock).toHaveBeenCalledTimes(1);
+      expect(photoRowIndex).toBeLessThan(createCalls.length - 1); // there is at least the final assistant_summary row persisted after it
+    });
+
+    it('the model sees the attachment in its own message history for this turn', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const snapshots = queueResponses(textOnlyResponse('Merci pour la photo !'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'p/photo1.jpg', mimeType: 'image/jpeg' },
+      ]);
+
+      const sentMessages = snapshots[0];
+      const toolUseMessage = sentMessages.find((m: any) => Array.isArray(m.content) && m.content[0]?.name === 'user_photos_uploaded');
+      expect(toolUseMessage).toBeDefined();
+    });
+
+    it('no attachments given -> no synthetic tool_use/tool_result rows at all (unchanged regression for a plain text turn)', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      createMock.mockResolvedValue(textOnlyResponse('Bonjour !'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Bonjour', 'conv-1');
+
+      const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
+      expect(createCalls.some((c: any) => c.data.toolName === 'user_photos_uploaded')).toBe(false);
+    });
+
+    it('an empty attachments array behaves exactly like no attachments at all', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      createMock.mockResolvedValue(textOnlyResponse('Bonjour !'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Bonjour', 'conv-1', []);
+
+      const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
+      expect(createCalls.some((c: any) => c.data.toolName === 'user_photos_uploaded')).toBe(false);
+    });
   });
 });

@@ -215,7 +215,7 @@ export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null
       )}
       {isEmpty && (
         <p className="mt-3 text-xs text-[#F7F6F2]/35 text-center">
-          L&apos;Agent recherche n&apos;importe quel type de produit — mode, high-tech, mobilier, et plus.
+          L&apos;Agent recherche les produits que tu veux sourcer — mode, high-tech, mobilier, et plus.
         </p>
       )}
       </div>
