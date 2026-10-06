@@ -206,3 +206,17 @@ select:focus {
     transform: none;
   }
 }
+
+/* ===== Agent IA — welcome screen background (page.tsx) =====
+   Near-black Ink base with a few large, very diffuse orange halos — no
+   blue/purple, no animation (deliberately static: the brief asked for a
+   sober, professional feel, not a gaming/particle aesthetic). Mostly
+   black by design so text stays highly readable. */
+.agent-glow-bg {
+  background-color: #14161a;
+  background-image:
+    radial-gradient(55% 45% at 12% -5%, rgba(255, 90, 31, 0.16), transparent 70%),
+    radial-gradient(50% 40% at 105% 105%, rgba(255, 90, 31, 0.1), transparent 70%),
+    radial-gradient(40% 35% at 50% 35%, rgba(255, 90, 31, 0.05), transparent 70%);
+  background-repeat: no-repeat;
+}

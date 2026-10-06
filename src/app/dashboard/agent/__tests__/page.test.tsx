@@ -65,7 +65,8 @@ describe('AgentPage', () => {
   it('renders the premium empty-state welcome on first load (no messages yet)', () => {
     const html = renderToStaticMarkup(<AgentPage />);
 
-    expect(html).toContain('Que puis-je rechercher pour vous ?');
+    expect(html).toContain('prête à vendre');
+    expect(html).toContain('Exemples de demandes');
   });
 
   it('does not show "Nouvelle conversation" before any message has been sent', () => {

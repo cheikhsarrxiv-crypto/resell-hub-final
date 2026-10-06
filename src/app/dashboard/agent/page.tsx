@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useAgentConversation } from '@/hooks/useAgentConversation';
 import { useAgentUsage } from '@/hooks/useAgentUsage';
@@ -42,6 +42,14 @@ export default function AgentPage() {
 
   const { usage } = useAgentUsage();
 
+  // Lets a click on one of AgentMessageList's "Exemples de demandes" cards
+  // fill AgentComposer's field — the two are siblings with no shared
+  // state otherwise, so this one small piece of state is the connector.
+  // `nonce` (not just the text) so clicking the same card twice in a row
+  // still re-triggers AgentComposer's own prefill effect. Never sends
+  // anything itself — see AgentComposer's own `prefill` prop doc.
+  const [exampleToFill, setExampleToFill] = useState<{ text: string; nonce: number } | null>(null);
+
   // Once a brand new conversation gets its real id (first message ever
   // sent on this page load, so the URL had none yet), reflect it in the
   // URL — a refresh right after that first exchange must still be able
@@ -67,7 +75,18 @@ export default function AgentPage() {
   const showHistoryLoading = historyLoading && messages.length === 0;
 
   return (
-    <div className="flex flex-col h-[70vh] max-h-[720px] min-h-[420px] bg-white/[0.02] border border-white/[0.06] rounded-2xl overflow-hidden">
+    <div
+      className={`agent-glow-bg flex flex-col min-h-[420px] border border-white/[0.06] rounded-2xl ${
+        // Bounded, internally-scrolling "chat window" height only makes
+        // sense once there are real messages to scroll through. The empty
+        // welcome state (hero + "Exemples de demandes" + composer) is
+        // meant to flow naturally and let the page itself scroll (the
+        // dashboard shell's own <main> is already overflow-auto) — no
+        // fixed height, no overflow-hidden, so nothing gets clipped into
+        // a hidden internal scrollbar.
+        messages.length === 0 ? '' : 'h-[70vh] max-h-[720px] overflow-hidden'
+      }`}
+    >
       <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/[0.06] shrink-0">
         <div>
           <h1 className="text-lg font-semibold text-white" style={{ fontFamily: 'var(--font-display)' }}>
@@ -104,12 +123,13 @@ export default function AgentPage() {
           onConfirmAction={confirmAction}
           onCancelAction={cancelAction}
           onSend={sendMessage}
+          onExampleSelect={(text) => setExampleToFill({ text, nonce: Date.now() })}
         />
       )}
 
       {error && <AgentErrorBanner message={error} />}
 
-      <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} />
+      <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} prefill={exampleToFill} />
     </div>
   );
 }

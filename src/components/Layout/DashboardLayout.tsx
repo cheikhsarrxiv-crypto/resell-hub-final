@@ -41,6 +41,32 @@ export function DashboardLayout({
     setIsSidebarOpen(false);
   }, [pathname]);
 
+  // <main>'s own overflow-auto (below) is meant to be the dashboard's only
+  // scroll container — but document.documentElement ("html", the actual
+  // CSSOM "scrolling element") can still independently respond to a wheel
+  // event that lands outside main (e.g. over the sidebar) or to keyboard
+  // paging (End/Page Down) even when every element's own bounding box is
+  // already exactly viewport-height, because a descendant's scrollable
+  // overflow — even one an ancestor's own `overflow-hidden` visually
+  // clips — can still inflate html's reported scrollHeight. The result:
+  // the page shell (styled dark) stays put, but the few extra pixels of
+  // document-level scroll room reveal the UNstyled <body> (bg-gray-50,
+  // the light theme other, non-dashboard routes use) underneath it.
+  // Locking body/html scroll only while this layout is mounted — never
+  // globally in globals.css, which would also freeze the public/landing
+  // pages that rely on real document scroll — closes that gap without
+  // touching any other route.
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, []);
+
   const baseUrl = baseUrlOverride ?? (isAdmin ? '/admin' : `/workspace/${workspaceSlug}`);
 
   const navigation: NavItem[] = isAdmin
@@ -64,7 +90,7 @@ export function DashboardLayout({
       ];
 
   return (
-    <div className="flex h-screen bg-[#08080a]">
+    <div className="flex h-screen overflow-hidden bg-[#08080a]">
       <DashboardHeader onOpenMenu={() => setIsSidebarOpen(true)} />
       <NotificationBell />
 
@@ -98,7 +124,7 @@ export function DashboardLayout({
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0">
+      <main className="flex-1 min-w-0 min-h-0 overflow-auto pt-14 md:pt-0">
         <div className="p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
 

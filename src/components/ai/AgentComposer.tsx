@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Send } from 'lucide-react';
 import { canSendAgentMessage, MAX_AGENT_MESSAGE_LENGTH } from '@/lib/ai/agentConversation';
+import { AGENT_EXAMPLE_PROMPTS, AGENT_EXAMPLE_PROMPTS_SHORT } from '@/lib/ai/agentExamples';
 
 interface AgentComposerProps {
   sending: boolean;
@@ -14,48 +15,39 @@ interface AgentComposerProps {
    * identical in both states.
    */
   isEmpty?: boolean;
+  /**
+   * Set when the reseller clicks one of the static "Exemples de demandes"
+   * cards elsewhere on the page (AgentMessageList) — fills the field with
+   * that exact text and focuses it, exactly like clicking the rotating
+   * placeholder already does. `nonce` only exists so clicking the SAME
+   * card twice in a row still re-triggers the effect below (a changed
+   * primitive value, not object identity). Purely additive: never sends
+   * anything itself, never touches canSendAgentMessage/handleSend.
+   */
+  prefill?: { text: string; nonce: number } | null;
 }
 
-/**
- * Deliberately spans several product categories (sneakers, furniture,
- * electronics, gaming, photo, fashion listing creation) so the rotating
- * placeholder itself demonstrates the Agent is not fashion-only — see
- * the Phase D/E read-only audits on search_products universality.
- */
-const AGENT_EXAMPLE_PROMPTS = [
-  'Trouve-moi une Air Force 1 taille 43 à moins de 100 €',
-  'Trouve-moi une table moderne à moins de 150 €',
-  'Trouve-moi un MacBook Air M2 à moins de 700 €',
-  'Trouve-moi une PS5 d’occasion au meilleur prix',
-  'Trouve-moi une caméra Sony à moins de 800 €',
-  'Crée-moi une annonce pour cette veste',
-  'Trouve-moi une chaise de bureau confortable à moins de 200 €',
-];
-
-/**
- * Same 7 examples, shorter — on a ~390px phone the composer's actual text
- * area is only ~220px wide (outer padding + the send button + the
- * field's own padding all eat into the 390px viewport), where the full
- * sentences above visibly truncate mid-word. Rendered below `sm` instead
- * of the array above (never both at once — see the two overlay spans in
- * the JSX), same order/index so the rotation and the focus pick-up stay
- * in sync with their desktop counterpart.
- */
-const AGENT_EXAMPLE_PROMPTS_SHORT = [
-  'Air Force 1 — taille 43 — moins de 100 €',
-  'Table moderne — moins de 150 €',
-  'MacBook Air M2 — moins de 700 €',
-  'PS5 d’occasion — meilleur prix',
-  'Caméra Sony — moins de 800 €',
-  'Crée une annonce pour cette veste',
-  'Chaise de bureau — moins de 200 €',
-];
-
-export function AgentComposer({ sending, onSend, isEmpty = false }: AgentComposerProps) {
+export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null }: AgentComposerProps) {
   const [value, setValue] = useState('');
   const [exampleIndex, setExampleIndex] = useState(0);
   const [reducedMotion, setReducedMotion] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Additive only — reacts to an external "fill the composer" request
+  // (see prefill's own doc comment above). Intentionally keyed on
+  // prefill?.nonce alone, not prefill?.text, so the effect fires again
+  // even if the same example is clicked twice in a row.
+  useEffect(() => {
+    if (!prefill) return;
+    setValue(prefill.text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(prefill.text.length, prefill.text.length);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.nonce]);
 
   const canSend = canSendAgentMessage(value, sending);
   const trimmedLength = value.trim().length;
@@ -199,7 +191,11 @@ export function AgentComposer({ sending, onSend, isEmpty = false }: AgentCompose
             maxLength={MAX_AGENT_MESSAGE_LENGTH}
             disabled={sending}
             aria-disabled={sending}
-            className={`w-full resize-none bg-white/[0.04] border border-white/10 rounded-xl text-white placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 disabled:opacity-50 ${fieldSizeClasses}`}
+            className={`w-full resize-none bg-white/[0.04] rounded-xl text-white placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 disabled:opacity-50 transition-shadow ${
+              isEmpty
+                ? 'border border-[#FF5A1F]/25 shadow-[0_0_30px_-10px_rgba(255,90,31,0.35)] focus:shadow-[0_0_30px_-6px_rgba(255,90,31,0.5)]'
+                : 'border border-white/10'
+            } ${fieldSizeClasses}`}
           />
         </div>
         <button

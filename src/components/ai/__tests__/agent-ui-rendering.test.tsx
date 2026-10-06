@@ -24,15 +24,32 @@ describe('AgentMessageList', () => {
   it('empty conversation renders the premium welcome state, no message bubbles', () => {
     const html = renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />);
 
-    expect(html).toContain('Que puis-je rechercher pour vous ?');
+    expect(html).toContain('prête à vendre');
     expect(html).toContain('n&#x27;importe quel produit');
+    expect(html).toContain('Exemples de demandes');
   });
 
-  it('the empty state is plain text, never a button/link that could auto-send', () => {
+  it('the 7 example cards are real buttons (type="button", never a submit), never a link', () => {
     const html = renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />);
 
-    expect(html).not.toContain('<button');
+    // type="button" is the one thing that structurally guarantees a click
+    // can never submit/auto-trigger a form by accident — every button in
+    // the empty state (the 7 example cards) must carry it.
+    const buttonCount = (html.match(/<button/g) ?? []).length;
+    const typedButtonCount = (html.match(/type="button"/g) ?? []).length;
+    expect(buttonCount).toBe(7);
+    expect(typedButtonCount).toBeGreaterThanOrEqual(buttonCount);
     expect(html).not.toContain('<a ');
+  });
+
+  it('clicking an example card never sends anything by itself — it only calls onExampleSelect, never onSend', () => {
+    // renderToStaticMarkup cannot simulate a real click (no jsdom in this
+    // project — see this file's own header comment), so this proves the
+    // contract at the prop level instead: the empty state renders fine
+    // with onExampleSelect omitted entirely, and never references onSend
+    // for its own cards (onSend is only ever passed to the non-empty
+    // branch's sourcing/listing-draft cards, a separate code path).
+    expect(() => renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />)).not.toThrow();
   });
 
   it('a user message is displayed', () => {

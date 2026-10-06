@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, Footprints, Sofa, Laptop, Gamepad2, Camera, Shirt, Armchair, ArrowRight } from 'lucide-react';
 import type { AgentUiMessage } from '@/lib/ai/agentConversation';
 import { shouldStickToBottom } from '@/lib/ai/agentConversation';
+import { AGENT_EXAMPLE_PROMPTS } from '@/lib/ai/agentExamples';
 import { AgentLoadingIndicator } from './AgentLoadingIndicator';
 import { SourcingResultsGrid } from './SourcingResultsGrid';
 import { MarginSummaryList } from './MarginSummaryList';
@@ -24,9 +25,20 @@ interface AgentMessageListProps {
    * Omit to render sourcing cards read-only (no button).
    */
   onSend?: (message: string) => void;
+  /**
+   * Fired when the reseller clicks one of the "Exemples de demandes" cards
+   * in the empty state — fills the composer with that exact text (see
+   * AgentComposer's own `prefill` prop), never sends it automatically.
+   * Same "illustrative suggestion, never auto-send" rule as the composer's
+   * own rotating placeholder.
+   */
+  onExampleSelect?: (text: string) => void;
 }
 
-export function AgentMessageList({ messages, sending, onConfirmAction, onCancelAction, onSend }: AgentMessageListProps) {
+/** One icon per example, in the same order as AGENT_EXAMPLE_PROMPTS — purely decorative. */
+const EXAMPLE_ICONS = [Footprints, Sofa, Laptop, Gamepad2, Camera, Shirt, Armchair];
+
+export function AgentMessageList({ messages, sending, onConfirmAction, onCancelAction, onSend, onExampleSelect }: AgentMessageListProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   // Starts true: the very first paint of a non-empty list (a freshly
   // restored conversation, or the first message of a brand new one)
@@ -49,17 +61,48 @@ export function AgentMessageList({ messages, sending, onConfirmAction, onCancelA
 
   if (messages.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 text-center overflow-y-auto">
-        <div className="w-14 h-14 rounded-2xl bg-[#FF5A1F]/10 border border-[#FF5A1F]/20 flex items-center justify-center mb-5">
-          <Sparkles className="w-6 h-6 text-[#FF5A1F]" />
-        </div>
-        <h2 className="text-xl sm:text-2xl font-semibold text-white mb-2" style={{ fontFamily: 'var(--font-display)' }}>
-          Que puis-je rechercher pour vous ?
+      <div className="flex flex-col items-center px-4 sm:px-6 py-8 sm:py-10 text-center">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[#FF5A1F]/30 bg-[#FF5A1F]/10 px-3 py-1 text-xs font-medium text-[#FF5A1F] mb-5 sm:mb-6">
+          <Sparkles className="w-3.5 h-3.5" />
+          Agent IA
+        </span>
+        <h2
+          className="text-2xl sm:text-3xl md:text-4xl font-semibold text-white mb-3 sm:mb-4 max-w-2xl leading-tight"
+          style={{ fontFamily: 'var(--font-display)' }}
+        >
+          Transforme ton idée en une boutique <span className="text-[#FF5A1F]">prête à vendre</span> en quelques
+          minutes.
         </h2>
-        <p className="text-sm text-gray-500 max-w-md">
-          Décrivez n&apos;importe quel produit — mode, high-tech, mobilier, et plus — l&apos;Agent le recherche et
-          analyse sa marge potentielle.
+        <p className="text-sm sm:text-base text-gray-400 max-w-md mb-8 sm:mb-10">
+          Décris n&apos;importe quel produit — mode, high-tech, mobilier, et plus — l&apos;Agent le recherche,
+          compare les prix et prépare ta prochaine annonce.
         </p>
+
+        <div className="w-full max-w-xl text-left">
+          <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-[#FF5A1F]/80 mb-3 px-1">
+            <Sparkles className="w-3.5 h-3.5" />
+            Exemples de demandes
+          </p>
+          <div className="flex flex-col gap-2">
+            {AGENT_EXAMPLE_PROMPTS.map((prompt, i) => {
+              const Icon = EXAMPLE_ICONS[i] ?? Sparkles;
+              return (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => onExampleSelect?.(prompt)}
+                  className="group flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3 text-left transition-colors hover:border-[#FF5A1F]/40 hover:bg-[#FF5A1F]/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
+                >
+                  <span className="shrink-0 w-8 h-8 rounded-lg bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-gray-400 group-hover:text-[#FF5A1F] group-hover:border-[#FF5A1F]/30 transition-colors">
+                    <Icon className="w-4 h-4" />
+                  </span>
+                  <span className="flex-1 text-sm text-gray-300 group-hover:text-white transition-colors">{prompt}</span>
+                  <ArrowRight className="w-4 h-4 shrink-0 text-gray-600 group-hover:text-[#FF5A1F] transition-colors" />
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     );
   }
