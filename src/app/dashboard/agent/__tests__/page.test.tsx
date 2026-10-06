@@ -62,10 +62,10 @@ describe('AgentPage', () => {
     expect(html).toContain('Votre assistant pour rechercher et analyser des produits de revente.');
   });
 
-  it('renders the empty-state example prompts on first load (no messages yet)', () => {
+  it('renders the premium empty-state welcome on first load (no messages yet)', () => {
     const html = renderToStaticMarkup(<AgentPage />);
 
-    expect(html).toContain('Trouve-moi une sneaker Prada avec une bonne marge.');
+    expect(html).toContain('Que puis-je rechercher pour vous ?');
   });
 
   it('does not show "Nouvelle conversation" before any message has been sent', () => {

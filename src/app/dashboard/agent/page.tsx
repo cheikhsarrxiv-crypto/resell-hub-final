@@ -109,7 +109,7 @@ export default function AgentPage() {
 
       {error && <AgentErrorBanner message={error} />}
 
-      <AgentComposer sending={sending} onSend={sendMessage} />
+      <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} />
     </div>
   );
 }

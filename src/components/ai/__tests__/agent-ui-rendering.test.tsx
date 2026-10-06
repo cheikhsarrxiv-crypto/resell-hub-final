@@ -21,14 +21,14 @@ import { AgentComposer } from '@/components/ai/AgentComposer';
 import type { AgentUiMessage } from '@/lib/ai/agentConversation';
 
 describe('AgentMessageList', () => {
-  it('empty conversation renders the empty state with example prompts, no message bubbles', () => {
+  it('empty conversation renders the premium welcome state, no message bubbles', () => {
     const html = renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />);
 
-    expect(html).toContain('Trouve-moi une sneaker Prada avec une bonne marge.');
-    expect(html).toContain('Je cherche une veste Stone Island');
+    expect(html).toContain('Que puis-je rechercher pour vous ?');
+    expect(html).toContain('n&#x27;importe quel produit');
   });
 
-  it('example prompts in the empty state are plain text, never buttons/links that could auto-send', () => {
+  it('the empty state is plain text, never a button/link that could auto-send', () => {
     const html = renderToStaticMarkup(<AgentMessageList messages={[]} sending={false} />);
 
     expect(html).not.toContain('<button');

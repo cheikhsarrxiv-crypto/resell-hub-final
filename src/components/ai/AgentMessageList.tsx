@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { Sparkles } from 'lucide-react';
 import type { AgentUiMessage } from '@/lib/ai/agentConversation';
 import { shouldStickToBottom } from '@/lib/ai/agentConversation';
 import { AgentLoadingIndicator } from './AgentLoadingIndicator';
@@ -24,19 +25,6 @@ interface AgentMessageListProps {
    */
   onSend?: (message: string) => void;
 }
-
-/**
- * Purely illustrative — never wired to auto-send (Phase 11 spec: "Ces
- * exemples sont uniquement des suggestions UI. Ils ne doivent pas
- * déclencher automatiquement une requête"). Deliberately plain,
- * non-interactive text, not buttons, so there is no accidental way to
- * trigger a request from them in this phase.
- */
-const EXAMPLE_PROMPTS = [
-  'Trouve-moi une sneaker Prada avec une bonne marge.',
-  'Je cherche une veste Stone Island à moins de 300 €.',
-  'Compare le prix d’achat et la marge potentielle.',
-];
 
 export function AgentMessageList({ messages, sending, onConfirmAction, onCancelAction, onSend }: AgentMessageListProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -62,16 +50,16 @@ export function AgentMessageList({ messages, sending, onConfirmAction, onCancelA
   if (messages.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 text-center overflow-y-auto">
-        <p className="text-sm text-gray-500 mb-4 max-w-sm">
-          Décrivez ce que vous cherchez — l&apos;Agent peut rechercher des produits et analyser leur marge potentielle.
-        </p>
-        <div className="flex flex-col gap-2 w-full max-w-sm">
-          {EXAMPLE_PROMPTS.map((prompt) => (
-            <p key={prompt} className="text-sm text-gray-400 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-2.5">
-              {prompt}
-            </p>
-          ))}
+        <div className="w-14 h-14 rounded-2xl bg-[#FF5A1F]/10 border border-[#FF5A1F]/20 flex items-center justify-center mb-5">
+          <Sparkles className="w-6 h-6 text-[#FF5A1F]" />
         </div>
+        <h2 className="text-xl sm:text-2xl font-semibold text-white mb-2" style={{ fontFamily: 'var(--font-display)' }}>
+          Que puis-je rechercher pour vous ?
+        </h2>
+        <p className="text-sm text-gray-500 max-w-md">
+          Décrivez n&apos;importe quel produit — mode, high-tech, mobilier, et plus — l&apos;Agent le recherche et
+          analyse sa marge potentielle.
+        </p>
       </div>
     );
   }
