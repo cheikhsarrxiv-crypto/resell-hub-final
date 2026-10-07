@@ -184,6 +184,141 @@ export class StorageService {
   }
 
   /**
+   * AI-first "free listing creation" workflow — uploads a REAL photo the
+   * reseller sends directly in an agent conversation, BEFORE any Product
+   * exists to attach it to (mirrors uploadImage's own MIME/size validation
+   * exactly, minus the productId requirement — there is no Product yet).
+   * Stored under a workspace+conversation scoped path, never under a
+   * product's own path. Deliberately does NOT create a ProductImage row
+   * (same reasoning as rehostImageFromUrl above) — the caller
+   * (POST /api/ai/agent/photos) only ever hands the returned
+   * {url, storagePath, mimeType} back to AiAgentService.sendMessage, which
+   * records it as a synthetic, revalidatable tool result (see that
+   * method's own comment); a real ProductImage row (sourceType:
+   * 'USER_UPLOADED') is only ever created once create_product actually
+   * runs, from that same already-durable url/storagePath — never a second
+   * upload, never a second Supabase write for the same file.
+   */
+  static async uploadConversationImage(data: {
+    workspaceId: string;
+    conversationId: string;
+    file: File | Buffer;
+    fileName: string;
+    mimeType: string;
+  }): Promise<{ url: string; storagePath: string; mimeType: string }> {
+    if (!supabase) {
+      throw new Error('Storage service not configured. Please configure Supabase.');
+    }
+
+    if (!ALLOWED_MIME_TYPES.includes(data.mimeType)) {
+      throw new Error(`File type not allowed: ${data.mimeType}`);
+    }
+
+    let buffer: Buffer;
+    if (data.file instanceof Buffer) {
+      buffer = data.file;
+    } else if (typeof (data.file as any).arrayBuffer === 'function') {
+      buffer = Buffer.from(await (data.file as any).arrayBuffer());
+    } else {
+      buffer = Buffer.from(data.file as any);
+    }
+
+    if (buffer.length > MAX_FILE_SIZE) {
+      throw new Error('File too large. Maximum size: 10MB');
+    }
+
+    // SECURITY: verify the conversation itself belongs to this workspace
+    // — AgentMessage/the conversation's own real tool-result history has
+    // no other scoping of its own, so this is the actual isolation
+    // boundary, never trusting a conversationId the caller merely passes
+    // (same pattern as every verify*Access helper elsewhere).
+    const conversation = await prisma.agentConversation.findFirst({
+      where: { id: data.conversationId, workspaceId: data.workspaceId },
+      select: { id: true },
+    });
+    if (!conversation) {
+      throw new Error('Conversation not found or access denied');
+    }
+
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(7);
+    const ext = this.getFileExtension(data.mimeType);
+    const storagePath = `${data.workspaceId}/_draft-uploads/${data.conversationId}/${timestamp}-${random}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage.from(BUCKET_NAME).upload(storagePath, buffer, {
+      contentType: data.mimeType,
+      upsert: false,
+    });
+    if (uploadError) {
+      throw new Error(`Upload failed: ${uploadError.message}`);
+    }
+
+    const { data: publicUrlData } = supabase.storage.from(BUCKET_NAME).getPublicUrl(storagePath);
+
+    return { url: publicUrlData.publicUrl, storagePath, mimeType: data.mimeType };
+  }
+
+  /**
+   * Image-search feature (Phase 1) — fetches a conversation-attached
+   * photo's REAL bytes directly from Supabase Storage by its storagePath,
+   * via the Supabase SDK's own authenticated `.download()` call — never a
+   * raw fetch() of a client-supplied url. This is the actual SSRF guard:
+   * aiAgentMessageSchema only validates that `attachments[].url` is *a*
+   * well-formed URL, never that it points at this project's own Supabase
+   * bucket, so a url string from the request body must never be
+   * dereferenced server-side. storagePath, by contrast, is just a path
+   * inside OUR OWN bucket — re-verified below to actually be scoped under
+   * this exact workspace+conversation's own upload prefix (the same
+   * prefix uploadConversationImage itself always writes to), so even a
+   * forged storagePath can only ever resolve to this bucket, under this
+   * workspace+conversation's own folder, never anywhere else.
+   *
+   * mimeType is deliberately re-derived from storagePath's own file
+   * extension (the one uploadConversationImage itself wrote it with)
+   * rather than trusted from the caller-supplied mimeType field — never
+   * pass an unverified media_type for what becomes an Anthropic vision
+   * content block.
+   *
+   * Returns null (never throws) on any failure — a missing, corrupted,
+   * oversized, or wrong-type file must degrade this one photo to "could
+   * not be used" for the caller, never crash the whole agent turn.
+   */
+  static async downloadConversationImageBytes(data: {
+    workspaceId: string;
+    conversationId: string;
+    storagePath: string;
+  }): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    if (!supabase) return null;
+
+    const expectedPrefix = `${data.workspaceId}/_draft-uploads/${data.conversationId}/`;
+    if (!data.storagePath.startsWith(expectedPrefix)) {
+      return null;
+    }
+
+    const extension = data.storagePath.split('.').pop()?.toLowerCase();
+    const mimeType = (
+      { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' } as Record<string, string>
+    )[extension ?? ''];
+    if (!mimeType || !ALLOWED_MIME_TYPES.includes(mimeType)) {
+      return null;
+    }
+
+    const conversation = await prisma.agentConversation.findFirst({
+      where: { id: data.conversationId, workspaceId: data.workspaceId },
+      select: { id: true },
+    });
+    if (!conversation) return null;
+
+    const { data: fileData, error } = await supabase.storage.from(BUCKET_NAME).download(data.storagePath);
+    if (error || !fileData) return null;
+
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+    if (buffer.length > MAX_FILE_SIZE) return null;
+
+    return { buffer, mimeType };
+  }
+
+  /**
    * Delete image from storage
    * SECURITY: Validates workspace + product ownership
    */
