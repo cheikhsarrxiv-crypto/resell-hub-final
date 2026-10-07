@@ -2,8 +2,8 @@
 
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import Link from 'next/link';
 import { Button } from '@/components/UI/Button';
+import { AuthCard } from '@/components/auth/AuthCard';
 import { signOutAction } from '@/app/actions/auth';
 
 type VerifyState = 'idle' | 'verifying' | 'success' | 'error';
@@ -43,14 +43,14 @@ function VerifyEmailContent() {
         const data = await response.json();
 
         if (!response.ok) {
-          setVerifyError(data.error || 'Verification failed');
+          setVerifyError(data.error || 'La vérification a échoué');
           setVerifyState('error');
           return;
         }
 
         setVerifyState('success');
       } catch (err) {
-        setVerifyError(err instanceof Error ? err.message : 'Verification failed');
+        setVerifyError(err instanceof Error ? err.message : 'La vérification a échoué');
         setVerifyState('error');
       }
     };
@@ -68,124 +68,116 @@ function VerifyEmailContent() {
       const data = await response.json();
 
       if (!response.ok) {
-        setResendMessage(data.error || 'Failed to resend verification email');
+        setResendMessage(data.error || "L'envoi de l'email de vérification a échoué");
         setResendState('error');
         return;
       }
 
-      setResendMessage(data.message || 'Verification email sent');
+      setResendMessage(data.message || 'Email de vérification envoyé');
       setResendState('sent');
     } catch (err) {
-      setResendMessage(err instanceof Error ? err.message : 'Failed to resend verification email');
+      setResendMessage(err instanceof Error ? err.message : "L'envoi de l'email de vérification a échoué");
       setResendState('error');
     }
   };
 
-  return (
-    <div className="min-h-screen bg-[#14161A] flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-          <div className="flex items-center justify-center gap-2 mb-6">
-            <svg width="26" height="26" viewBox="0 0 72 72" className="flex-shrink-0">
-              <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="6" />
-              <path d="M24 48 L36 22 L48 48 M29 39 H43" stroke="#14161A" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-            </svg>
-            <h1 className="text-3xl font-bold text-[#14161A] tracking-tight">ADKSY</h1>
-          </div>
-
-          {token && userId ? (
-            <>
-              {verifyState === 'verifying' && (
-                <p className="text-gray-600">Verifying your email address...</p>
-              )}
-              {verifyState === 'success' && (
-                <>
-                  <h2 className="text-xl font-semibold text-green-700 mb-2">Email verified</h2>
-                  <p className="text-gray-600 mb-6">
-                    Your email address has been confirmed. You now have full access to ADKSY.
-                  </p>
-                  <Link href="/dashboard">
-                    <Button variant="primary" size="lg" className="w-full">
-                      Continue to dashboard
-                    </Button>
-                  </Link>
-                </>
-              )}
-              {verifyState === 'error' && (
-                <>
-                  <h2 className="text-xl font-semibold text-red-700 mb-2">Verification failed</h2>
-                  <p className="text-gray-600 mb-6">{verifyError}</p>
-                  <Button variant="primary" size="lg" className="w-full" onClick={handleResend} loading={resendState === 'sending'}>
-                    Send a new verification email
-                  </Button>
-                  {resendMessage && (
-                    <p className={`mt-4 text-sm ${resendState === 'error' ? 'text-red-600' : 'text-green-600'}`}>
-                      {resendMessage}
-                    </p>
-                  )}
-                </>
-              )}
-            </>
-          ) : (
-            <>
-              <h2 className="text-xl font-semibold text-[#14161A] mb-2">Check your email</h2>
-              <p className="text-gray-600 mb-6">
-                We sent a verification link to your email address. Click it to activate your account
-                and unlock full access to ADKSY.
-              </p>
-              <Button
-                variant="primary"
-                size="lg"
-                className="w-full"
-                onClick={handleResend}
-                loading={resendState === 'sending'}
-                disabled={resendState === 'sending'}
-              >
-                Resend verification email
-              </Button>
-              {resendMessage && (
-                <p className={`mt-4 text-sm ${resendState === 'error' ? 'text-red-600' : 'text-green-600'}`}>
-                  {resendMessage}
-                </p>
-              )}
-            </>
-          )}
-
-          <div className="mt-6 pt-6 border-t border-gray-200 space-y-3">
-            <p className="text-gray-600 text-sm">
-              {/* Plain <a>, not <Link>: for a still-unverified, already
-                  logged-in user this hits a real two-hop server redirect
-                  (middleware sends /login -> /dashboard since a session
-                  exists, then dashboard/layout.tsx sends -> /verify-email
-                  since the email isn't verified yet). A real full page
-                  load resolves that chain correctly (verified via curl -L
-                  end to end), but Next.js's App Router client-side
-                  navigation can get stuck on a blank page across a
-                  same-navigation double redirect — a plain anchor forces
-                  a full reload and sidesteps it. */}
-              <a href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
-                Back to login
-              </a>
-            </p>
-            {/* A user who reaches this page already authenticated but
-                unverified had no way to sign out before: "Back to login"
-                only bounces them right back here (session exists ->
-                middleware sends /login -> /dashboard -> dashboard/layout.tsx
-                sends -> /verify-email). signOutAction is the same
-                Server Action used elsewhere (DashboardLayout, workspace
-                page); for a visitor with no session it's a harmless no-op
-                redirect to /login. */}
-            <form action={signOutAction}>
-              <button
-                type="submit"
-                className="text-gray-500 hover:text-gray-700 text-sm font-medium"
-              >
-                Sign out
-              </button>
-            </form>
-          </div>
-        </div>
-      </div>
+  const footer = (
+    <div className="space-y-3">
+      {/* Plain <a>, not <Link>: for a still-unverified, already logged-in
+          user this hits a real two-hop server redirect (middleware sends
+          /login -> /dashboard since a session exists, then
+          dashboard/layout.tsx sends -> /verify-email since the email
+          isn't verified yet). A real full page load resolves that chain
+          correctly (verified via curl -L end to end), but Next.js's App
+          Router client-side navigation can get stuck on a blank page
+          across a same-navigation double redirect — a plain anchor
+          forces a full reload and sidesteps it. */}
+      <p className="text-sm text-gray-600">
+        <a href="/login" className="text-[#FF5A1F] hover:text-[#e64f18] font-medium">
+          Retour à la connexion
+        </a>
+      </p>
+      {/* A user who reaches this page already authenticated but
+          unverified had no way to sign out before: "Back to login" only
+          bounces them right back here (session exists -> middleware
+          sends /login -> /dashboard -> dashboard/layout.tsx sends ->
+          /verify-email). signOutAction is the same Server Action used
+          elsewhere (DashboardLayout, workspace page); for a visitor with
+          no session it's a harmless no-op redirect to /login. */}
+      <form action={signOutAction}>
+        <button type="submit" className="text-gray-500 hover:text-gray-700 text-sm font-medium">
+          Se déconnecter
+        </button>
+      </form>
     </div>
+  );
+
+  if (token && userId) {
+    if (verifyState === 'success') {
+      return (
+        <AuthCard title="Email vérifié" footer={footer}>
+          <p className="text-sm text-gray-600 text-center mb-6">
+            Ton adresse email a été confirmée. Tu as maintenant un accès complet à ADKSY.
+          </p>
+          <a href="/dashboard">
+            <Button variant="primary" size="lg" className="w-full rounded-xl">
+              Aller au dashboard
+            </Button>
+          </a>
+        </AuthCard>
+      );
+    }
+
+    if (verifyState === 'error') {
+      return (
+        <AuthCard title="Échec de la vérification" footer={footer}>
+          <p className="text-sm text-gray-600 text-center mb-6">{verifyError}</p>
+          <Button
+            variant="primary"
+            size="lg"
+            className="w-full rounded-xl"
+            onClick={handleResend}
+            loading={resendState === 'sending'}
+          >
+            Envoyer un nouvel email de vérification
+          </Button>
+          {resendMessage && (
+            <p className={`mt-4 text-sm text-center ${resendState === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+              {resendMessage}
+            </p>
+          )}
+        </AuthCard>
+      );
+    }
+
+    return (
+      <AuthCard title="Vérification en cours" footer={footer}>
+        <p className="text-sm text-gray-600 text-center">Vérification de ton adresse email...</p>
+      </AuthCard>
+    );
+  }
+
+  return (
+    <AuthCard title="Vérifie ta boîte mail" footer={footer}>
+      <p className="text-sm text-gray-600 text-center mb-6">
+        Nous avons envoyé un lien de vérification à ton adresse email. Clique dessus pour activer ton
+        compte et débloquer l&apos;accès complet à ADKSY.
+      </p>
+      <Button
+        variant="primary"
+        size="lg"
+        className="w-full rounded-xl"
+        onClick={handleResend}
+        loading={resendState === 'sending'}
+        disabled={resendState === 'sending'}
+      >
+        Renvoyer l&apos;email de vérification
+      </Button>
+      {resendMessage && (
+        <p className={`mt-4 text-sm text-center ${resendState === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+          {resendMessage}
+        </p>
+      )}
+    </AuthCard>
   );
 }

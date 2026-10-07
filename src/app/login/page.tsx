@@ -6,6 +6,10 @@ import { useRouter } from 'next/navigation';
 import { signIn } from 'next-auth/react';
 import { Button } from '@/components/UI/Button';
 import { PasswordInput } from '@/components/UI/PasswordInput';
+import { AuthCard } from '@/components/auth/AuthCard';
+
+const fieldClassName =
+  'w-full px-4 py-2.5 bg-white border border-black/10 rounded-xl text-[#14161A] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 focus:border-transparent transition-shadow';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,102 +33,78 @@ export default function LoginPage() {
       });
 
       if (result?.status === 429) {
-        throw new Error('Too many login attempts. Please try again in 15 minutes.');
+        throw new Error('Trop de tentatives de connexion. Réessaie dans 15 minutes.');
       }
 
       if (!result || result.error) {
-        throw new Error('Invalid email or password');
+        throw new Error('Email ou mot de passe invalide');
       }
 
       router.push('/dashboard');
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof Error ? err.message : 'La connexion a échoué');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#14161A] flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-lg p-8">
-          <div className="flex items-center gap-2 mb-2">
-            <svg width="26" height="26" viewBox="0 0 72 72" className="flex-shrink-0">
-              <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="6" />
-              <path d="M24 48 L36 22 L48 48 M29 39 H43" stroke="#14161A" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-            </svg>
-            <h1 className="text-3xl font-bold text-[#14161A] tracking-tight">ADKSY</h1>
+    <AuthCard
+      title="Se connecter"
+      subtitle="Accède à ton espace ADKSY."
+      footer={
+        <p className="text-sm text-gray-600">
+          Pas encore de compte ?{' '}
+          <Link href="/signup" className="text-[#FF5A1F] hover:text-[#e64f18] font-medium">
+            Créer un compte
+          </Link>
+        </p>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-5">
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+            {error}
           </div>
-          <p className="text-gray-600 mb-8">Manage your reselling business</p>
+        )}
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-                {error}
-              </div>
-            )}
-
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={formData.email}
-                onChange={(e) =>
-                  setFormData({ ...formData, email: e.target.value })
-                }
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="your@email.com"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label
-                  htmlFor="password"
-                  className="block text-sm font-medium text-gray-700"
-                >
-                  Password
-                </label>
-                <Link href="/forgot-password" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
-                  Forgot password?
-                </Link>
-              </div>
-              <PasswordInput
-                id="password"
-                value={formData.password}
-                onChange={(e) =>
-                  setFormData({ ...formData, password: e.target.value })
-                }
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <Button
-              type="submit"
-              variant="primary"
-              size="lg"
-              loading={loading}
-              className="w-full"
-            >
-              Sign In
-            </Button>
-          </form>
-
-          <div className="mt-6 pt-6 border-t border-gray-200">
-            <p className="text-gray-600 text-sm">
-              Don't have an account?{' '}
-              <Link href="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
-                Sign up
-              </Link>
-            </p>
-          </div>
+        <div>
+          <label htmlFor="email" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Email
+          </label>
+          <input
+            id="email"
+            type="email"
+            value={formData.email}
+            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+            className={fieldClassName}
+            placeholder="toi@exemple.com"
+          />
         </div>
-      </div>
-    </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label htmlFor="password" className="block text-sm font-medium text-[#14161A]">
+              Mot de passe
+            </label>
+            <Link href="/forgot-password" className="text-xs text-[#FF5A1F] hover:text-[#e64f18] font-medium">
+              Mot de passe oublié ?
+            </Link>
+          </div>
+          <PasswordInput
+            id="password"
+            value={formData.password}
+            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+            className={fieldClassName}
+            placeholder="••••••••"
+          />
+        </div>
+
+        <Button type="submit" variant="primary" size="lg" loading={loading} className="w-full rounded-xl">
+          Se connecter
+        </Button>
+      </form>
+    </AuthCard>
   );
 }

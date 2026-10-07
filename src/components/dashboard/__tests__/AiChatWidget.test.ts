@@ -107,6 +107,14 @@ describe('DashboardLayout — mounts the widget for the merchant dashboard only'
 
   it('imports and renders AiChatWidget, gated on !isAdmin', () => {
     expect(layoutSource).toContain("import { AiChatWidget } from '@/components/dashboard/AiChatWidget'");
-    expect(layoutSource).toContain('{!isAdmin && <AiChatWidget />}');
+    const gateIndex = layoutSource.indexOf('{!isAdmin && (');
+    expect(gateIndex).toBeGreaterThan(-1);
+    expect(layoutSource.slice(gateIndex, gateIndex + 120)).toContain('<AiChatWidget />');
+  });
+
+  it('is hidden below md: on mobile (the new bottom nav is the mobile entry point instead), unchanged on desktop', () => {
+    const gateIndex = layoutSource.indexOf('{!isAdmin && (');
+    const block = layoutSource.slice(gateIndex, gateIndex + 150);
+    expect(block).toContain('hidden md:block');
   });
 });

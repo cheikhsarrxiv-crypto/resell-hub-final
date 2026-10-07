@@ -19,7 +19,7 @@ const resetSource = fs.readFileSync(path.join(process.cwd(), 'src/app/reset-pass
 describe('/login — forgot-password link added, no regression', () => {
   it('links to /forgot-password', () => {
     expect(loginSource).toContain('href="/forgot-password"');
-    expect(loginSource).toContain('Forgot password?');
+    expect(loginSource).toContain('Mot de passe oublié ?');
   });
 
   it('still calls next-auth signIn() with credentials (unchanged submit logic)', () => {
@@ -43,8 +43,8 @@ describe('/forgot-password — requests a reset link', () => {
   });
 
   it('shows the same generic confirmation regardless of API response content (never branches on account existence)', () => {
-    const submittedBranch = forgotSource.slice(forgotSource.indexOf('submitted ?'));
-    expect(submittedBranch).toContain('If an account exists for');
+    expect(forgotSource).toContain('if (submitted)');
+    expect(forgotSource).toContain('Si un compte existe pour');
   });
 
   it('surfaces a 429 (rate limited) as a distinct error rather than the generic success state', () => {

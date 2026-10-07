@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { DashboardSidebar, type NavItem } from '@/components/dashboard/DashboardSidebar';
 import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
+import { DashboardBottomNav } from '@/components/dashboard/DashboardBottomNav';
 import { AiChatWidget } from '@/components/dashboard/AiChatWidget';
 import { NotificationBell } from '@/components/dashboard/NotificationBell';
 
@@ -120,17 +121,39 @@ export function DashboardLayout({
           pathname={pathname}
           isAdmin={isAdmin}
           onNavigate={() => setIsSidebarOpen(false)}
+          onClose={() => setIsSidebarOpen(false)}
         />
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 min-w-0 min-h-0 overflow-auto pt-14 md:pt-0">
+      {/* Main Content — pb-16 (mobile only) reserves room for the fixed
+          DashboardBottomNav below, the same way pt-14 already reserves
+          room for DashboardHeader above; md:pb-0 drops it once the
+          bottom nav itself is hidden at md: and up. */}
+      <main className="flex-1 min-w-0 min-h-0 overflow-auto pt-14 pb-16 md:pt-0 md:pb-0">
         <div className="p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
 
       {/* Merchant-facing assistant only — not shown in the admin section,
-          which has a different context/audience. */}
-      {!isAdmin && <AiChatWidget />}
+          which has a different context/audience. Hidden below md: on
+          purpose (mobile redesign): DashboardBottomNav's own "Agent IA"
+          tab is now the mobile entry point into the Agent, and this
+          floating button would otherwise collide with the fixed bottom
+          nav. Desktop keeps it exactly as before. The component itself
+          is untouched — only whether it's rendered here changes. */}
+      {!isAdmin && (
+        <div className="hidden md:block">
+          <AiChatWidget />
+        </div>
+      )}
+
+      {/* Mobile-only persistent navigation — see DashboardBottomNav's own
+          header comment. Same isAdmin guard as AiChatWidget above: the
+          admin section's navigation (Dashboard/Users/Orders/Metrics/
+          Settings) has no Agent/Products routes to point to, so this
+          never renders there. */}
+      {!isAdmin && (
+        <DashboardBottomNav pathname={pathname} baseUrl={baseUrl} onOpenMenu={() => setIsSidebarOpen(true)} />
+      )}
     </div>
   );
 }

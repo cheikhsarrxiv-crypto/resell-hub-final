@@ -5,6 +5,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/UI/Button';
 import { PasswordInput } from '@/components/UI/PasswordInput';
+import { AuthCard } from '@/components/auth/AuthCard';
+
+const fieldClassName =
+  'w-full px-4 py-2.5 bg-white border border-black/10 rounded-xl text-[#14161A] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 focus:border-transparent transition-shadow';
 
 export default function SignupPage() {
   const router = useRouter();
@@ -25,13 +29,13 @@ export default function SignupPage() {
 
     // Validate
     if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
+      setError('Les mots de passe ne correspondent pas');
       setLoading(false);
       return;
     }
 
     if (formData.password.length < 8) {
-      setError('Password must be at least 8 characters');
+      setError('Le mot de passe doit contenir au moins 8 caractères');
       setLoading(false);
       return;
     }
@@ -51,141 +55,121 @@ export default function SignupPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Signup failed');
+        throw new Error(data.error || "L'inscription a échoué");
       }
 
       // Redirect to login
       router.push('/login?success=true');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Signup failed');
+      setError(err instanceof Error ? err.message : "L'inscription a échoué");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#14161A] flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-lg p-8">
-          <div className="flex items-center gap-2 mb-2">
-            <svg width="26" height="26" viewBox="0 0 72 72" className="flex-shrink-0">
-              <circle cx="36" cy="36" r="32" fill="none" stroke="#FF5A1F" strokeWidth="6" />
-              <path d="M24 48 L36 22 L48 48 M29 39 H43" stroke="#14161A" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-            </svg>
-            <h1 className="text-3xl font-bold text-[#14161A] tracking-tight">ADKSY</h1>
+    <AuthCard
+      title="Créer ton compte"
+      subtitle="Commence à vendre sur plusieurs marketplaces avec ADKSY."
+      footer={
+        <p className="text-sm text-gray-600">
+          Déjà un compte ?{' '}
+          <Link href="/login" className="text-[#FF5A1F] hover:text-[#e64f18] font-medium">
+            Se connecter
+          </Link>
+        </p>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-5">
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+            {error}
           </div>
-          <p className="text-gray-600 mb-8">Create your account to get started</p>
+        )}
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-                {error}
-              </div>
-            )}
-
-            <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                Full Name
-              </label>
-              <input
-                id="name"
-                type="text"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Your name"
-                required
-              />
-            </div>
-
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="your@email.com"
-                required
-              />
-            </div>
-
-            <div>
-              <label htmlFor="country" className="block text-sm font-medium text-gray-700 mb-2">
-                Country
-              </label>
-              <select
-                id="country"
-                value={formData.country}
-                onChange={(e) => setFormData({ ...formData, country: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="FR">France</option>
-                <option value="DE">Germany</option>
-                <option value="IT">Italy</option>
-                <option value="ES">Spain</option>
-                <option value="NL">Netherlands</option>
-                <option value="BE">Belgium</option>
-                <option value="US">United States</option>
-                <option value="GB">United Kingdom</option>
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
-              <PasswordInput
-                id="password"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="At least 8 characters"
-                required
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="confirmPassword"
-                className="block text-sm font-medium text-gray-700 mb-2"
-              >
-                Confirm Password
-              </label>
-              <PasswordInput
-                id="confirmPassword"
-                value={formData.confirmPassword}
-                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Confirm password"
-                required
-              />
-            </div>
-
-            <Button
-              type="submit"
-              variant="primary"
-              size="lg"
-              loading={loading}
-              className="w-full"
-            >
-              Create Account
-            </Button>
-          </form>
-
-          <div className="mt-6 pt-6 border-t border-gray-200">
-            <p className="text-gray-600 text-sm">
-              Already have an account?{' '}
-              <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
-                Sign in
-              </Link>
-            </p>
-          </div>
+        <div>
+          <label htmlFor="name" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Nom complet
+          </label>
+          <input
+            id="name"
+            type="text"
+            value={formData.name}
+            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+            className={fieldClassName}
+            placeholder="Ton nom"
+            required
+          />
         </div>
-      </div>
-    </div>
+
+        <div>
+          <label htmlFor="email" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Email
+          </label>
+          <input
+            id="email"
+            type="email"
+            value={formData.email}
+            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+            className={fieldClassName}
+            placeholder="toi@exemple.com"
+            required
+          />
+        </div>
+
+        <div>
+          <label htmlFor="country" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Pays
+          </label>
+          <select
+            id="country"
+            value={formData.country}
+            onChange={(e) => setFormData({ ...formData, country: e.target.value })}
+            className={fieldClassName}
+          >
+            <option value="FR">France</option>
+            <option value="DE">Allemagne</option>
+            <option value="IT">Italie</option>
+            <option value="ES">Espagne</option>
+            <option value="NL">Pays-Bas</option>
+            <option value="BE">Belgique</option>
+            <option value="US">États-Unis</option>
+            <option value="GB">Royaume-Uni</option>
+          </select>
+        </div>
+
+        <div>
+          <label htmlFor="password" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Mot de passe
+          </label>
+          <PasswordInput
+            id="password"
+            value={formData.password}
+            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+            className={fieldClassName}
+            placeholder="8 caractères minimum"
+            required
+          />
+        </div>
+
+        <div>
+          <label htmlFor="confirmPassword" className="block text-sm font-medium text-[#14161A] mb-1.5">
+            Confirmer le mot de passe
+          </label>
+          <PasswordInput
+            id="confirmPassword"
+            value={formData.confirmPassword}
+            onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+            className={fieldClassName}
+            placeholder="Confirme ton mot de passe"
+            required
+          />
+        </div>
+
+        <Button type="submit" variant="primary" size="lg" loading={loading} className="w-full rounded-xl">
+          Créer mon compte
+        </Button>
+      </form>
+    </AuthCard>
   );
 }
