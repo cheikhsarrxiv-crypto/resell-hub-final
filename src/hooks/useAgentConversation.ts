@@ -13,6 +13,7 @@ import {
   cancelAgentAction,
   type AgentUiMessage,
   type AgentPendingAction,
+  type AgentPhotoAttachment,
 } from '@/lib/ai/agentConversation';
 
 /**
@@ -71,8 +72,26 @@ export function useAgentConversation(initialConversationId?: string) {
   }, []);
 
   const sendMessage = useCallback(
-    async (rawMessage: string) => {
-      if (!canSendAgentMessage(rawMessage, state.sending)) return;
+    async (
+      rawMessage: string,
+      attachments?: AgentPhotoAttachment[],
+      // Image-search feature (Phase 1) — first-message UX fix: when the
+      // composer uploaded a photo BEFORE this hook's own conversationId
+      // existed, POST /api/ai/agent/photos already created the real
+      // AgentConversation row and handed its id back to the composer
+      // (see that route's own comment) — this lets THIS send use that
+      // exact id instead of state.conversationId (still null at this
+      // point; it only updates from this call's own response below),
+      // so the message lands in the SAME conversation the photo was
+      // just scoped to, never a second, orphaned one. Omitted (the
+      // default): unchanged — uses state.conversationId exactly like
+      // before this parameter existed.
+      conversationIdOverride?: string
+    ) => {
+      const hasAttachments = Boolean(attachments && attachments.length > 0);
+      if (!canSendAgentMessage(rawMessage, state.sending, hasAttachments)) return;
+
+      const effectiveConversationId = conversationIdOverride ?? state.conversationId;
 
       const userMessage: AgentUiMessage = { id: makeAgentMessageId(), role: 'user', content: rawMessage.trim() };
       dispatch({ type: 'SEND_START', message: userMessage });
@@ -82,7 +101,7 @@ export function useAgentConversation(initialConversationId?: string) {
         response = await fetch('/api/ai/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildAgentRequestBody(rawMessage, state.conversationId)),
+          body: JSON.stringify(buildAgentRequestBody(rawMessage, effectiveConversationId, attachments)),
         });
       } catch {
         // fetch() itself threw — a network-level failure, never reached

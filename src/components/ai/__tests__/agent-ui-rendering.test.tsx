@@ -400,6 +400,65 @@ describe('AgentComposer', () => {
     // Below the 90% threshold with an empty value — the counter is not shown at all.
     expect(html).not.toContain('/ 4000');
   });
+
+  describe('Image-search feature (Phase 1) — attach-photo control', () => {
+    // Tailwind's own `disabled:opacity-30`/`disabled:cursor-not-allowed`
+    // variant classes already put the literal substring "disabled" inside
+    // this button's `class` attribute REGARDLESS of whether it's actually
+    // disabled — a naive /disabled/ substring/regex match on the raw HTML
+    // would false-positive on every render. React's SSR only ever emits a
+    // real disabled attribute as the exact token `disabled=""`, which this
+    // helper checks for within just this one button's own tag.
+    function attachButtonIsDisabled(html: string): boolean {
+      const match = html.match(/<button[^>]*aria-label="Joindre une photo"[^>]*>/);
+      expect(match).not.toBeNull();
+      return match![0].includes('disabled=""');
+    }
+
+    it('renders an accessible "Joindre une photo" button', () => {
+      const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} conversationId="conv-1" />);
+
+      expect(html).toContain('aria-label="Joindre une photo"');
+    });
+
+    // First-message UX fix: POST /api/ai/agent/photos now creates the
+    // AgentConversation row itself when none exists yet (see that
+    // route's own comment) — so the attach button is NEVER gated on
+    // conversationId being set. Updated from the earlier behavior (where
+    // it stayed disabled until a conversation existed) per the explicit
+    // instruction to fix the coverage forward rather than delete it.
+    it('the attach button is already enabled with no conversationId yet (brand new conversation, first turn)', () => {
+      const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} conversationId={null} />);
+
+      expect(attachButtonIsDisabled(html)).toBe(false);
+    });
+
+    it('the attach button stays enabled once a real conversationId exists too', () => {
+      const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} conversationId="conv-1" />);
+
+      expect(attachButtonIsDisabled(html)).toBe(false);
+    });
+
+    it('the attach button is disabled while sending, with or without a conversationId', () => {
+      const htmlWithConversation = renderToStaticMarkup(<AgentComposer sending={true} onSend={() => {}} conversationId="conv-1" />);
+      const htmlWithoutConversation = renderToStaticMarkup(<AgentComposer sending={true} onSend={() => {}} conversationId={null} />);
+
+      expect(attachButtonIsDisabled(htmlWithConversation)).toBe(true);
+      expect(attachButtonIsDisabled(htmlWithoutConversation)).toBe(true);
+    });
+
+    it('omitting conversationId entirely (existing call sites, e.g. this file\'s other tests) renders without crashing and keeps the attach button enabled', () => {
+      expect(() => renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} />)).not.toThrow();
+      const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} />);
+      expect(attachButtonIsDisabled(html)).toBe(false);
+    });
+
+    it('no preview row renders before any file has been picked', () => {
+      const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} conversationId="conv-1" />);
+
+      expect(html).not.toContain('aria-label="Retirer la photo"');
+    });
+  });
 });
 
 describe('Phase 11D regression: a restored conversation (via deserializeHistoryResponse) renders exactly like a live one', () => {

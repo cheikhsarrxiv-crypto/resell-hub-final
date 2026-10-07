@@ -1,13 +1,29 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Send } from 'lucide-react';
-import { canSendAgentMessage, MAX_AGENT_MESSAGE_LENGTH } from '@/lib/ai/agentConversation';
+import Image from 'next/image';
+import { Send, Paperclip, X, Loader2 } from 'lucide-react';
+import {
+  canSendAgentMessage,
+  MAX_AGENT_MESSAGE_LENGTH,
+  resolveKnownConversationId,
+  type AgentPhotoAttachment,
+} from '@/lib/ai/agentConversation';
 import { AGENT_EXAMPLE_PROMPTS, AGENT_EXAMPLE_PROMPTS_SHORT } from '@/lib/ai/agentExamples';
+
+// Image-search feature (Phase 1) — mirrors StorageService's own
+// ALLOWED_MIME_TYPES/MAX_FILE_SIZE exactly (that file is server-only —
+// Supabase service role + Prisma — and must never be imported into a
+// 'use client' bundle; ImageUploadZone.tsx already duplicates the same
+// two values for the same reason). Client-side validation here is purely
+// a fast, friendly rejection — StorageService re-validates both
+// server-side regardless, which remains the real enforcement.
+const ALLOWED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const MAX_IMAGE_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 interface AgentComposerProps {
   sending: boolean;
-  onSend: (message: string) => void;
+  onSend: (message: string, attachments?: AgentPhotoAttachment[], conversationIdOverride?: string) => void;
   /**
    * True on the welcome screen (no messages yet in the conversation) —
    * switches the composer to a larger, more premium presentation. Purely
@@ -25,13 +41,71 @@ interface AgentComposerProps {
    * anything itself, never touches canSendAgentMessage/handleSend.
    */
   prefill?: { text: string; nonce: number } | null;
+  /**
+   * Image-search feature (Phase 1) — the real, already-persisted
+   * AgentConversation id, once one exists. null before the conversation's
+   * first message has actually been sent. The attach control is NEVER
+   * gated on this being set — POST /api/ai/agent/photos now creates the
+   * AgentConversation row itself when no id exists yet (see that route's
+   * own comment), so a reseller can attach a photo on a brand new
+   * conversation's very first turn too (see this component's own
+   * `uploadedConversationId` state for how the id that creates returns
+   * then flows into the eventual send).
+   */
+  conversationId?: string | null;
 }
 
-export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null }: AgentComposerProps) {
+interface PendingImageAttachment {
+  file: File;
+  preview: string;
+  uploading: boolean;
+  error: string | null;
+  uploaded: AgentPhotoAttachment | null;
+}
+
+export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null, conversationId = null }: AgentComposerProps) {
   const [value, setValue] = useState('');
   const [exampleIndex, setExampleIndex] = useState(0);
   const [reducedMotion, setReducedMotion] = useState(false);
+  const [attachment, setAttachment] = useState<PendingImageAttachment | null>(null);
+  // Image-search feature (Phase 1) — first-message UX fix: set only when
+  // uploadAttachment's own call to POST /api/ai/agent/photos had to
+  // create a brand new AgentConversation row (conversationId prop was
+  // still null at the time), from that response's own returned id. Lets
+  // a SECOND photo pick (after removing the first, before ever sending)
+  // reuse the SAME just-created conversation instead of creating another
+  // one, and lets handleSend pass it as sendMessage's conversationId
+  // override. Reset whenever conversationId genuinely goes back to null
+  // (a real "Nouvelle conversation" reset — see the effect below); once a
+  // real send completes, the `conversationId` prop itself becomes
+  // authoritative again and this value stops being read (see
+  // `effectiveConversationId` below).
+  const [uploadedConversationId, setUploadedConversationId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Revokes the previous blob: preview URL whenever it's replaced, and on
+  // unmount — the only two moments a given preview URL is ever discarded.
+  useEffect(() => {
+    return () => {
+      if (attachment?.preview) URL.revokeObjectURL(attachment.preview);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachment?.preview]);
+
+  // Image-search feature (Phase 1) — a conversationId that goes back to
+  // null only ever means an explicit reset ("Nouvelle conversation" —
+  // see AgentPage's own resetConversation): any photo/conversation this
+  // composer resolved for the PREVIOUS conversation must never leak into
+  // the new one. A no-op on first mount (conversationId already starts
+  // null, so this just confirms the already-null initial state).
+  useEffect(() => {
+    if (conversationId === null) {
+      setUploadedConversationId(null);
+      clearAttachment();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   // Additive only — reacts to an external "fill the composer" request
   // (see prefill's own doc comment above). Intentionally keyed on
@@ -49,7 +123,8 @@ export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce]);
 
-  const canSend = canSendAgentMessage(value, sending);
+  const hasUploadedAttachment = Boolean(attachment?.uploaded);
+  const canSend = canSendAgentMessage(value, sending, hasUploadedAttachment) && !attachment?.uploading;
   const trimmedLength = value.trim().length;
   const showCounter = trimmedLength > MAX_AGENT_MESSAGE_LENGTH * 0.9;
 
@@ -87,10 +162,103 @@ export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null
     el.style.height = `${el.scrollHeight}px`;
   }, [value]);
 
+  const clearAttachment = () => {
+    setAttachment(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  /**
+   * Image-search feature (Phase 1) — uploads the chosen file through the
+   * EXISTING POST /api/ai/agent/photos endpoint (same route/StorageService
+   * method already used by the FREE listing creation workflow — see that
+   * route's own comment) as soon as it's picked, so the real
+   * {url, storagePath, mimeType} is already available by the time the
+   * reseller hits Send. Never sends raw file bytes over the chat's own
+   * JSON body — only this already-uploaded reference, exactly like
+   * AgentPhotoAttachment already expects.
+   */
+  const uploadAttachment = async (file: File) => {
+    if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
+      setAttachment({
+        file,
+        preview: URL.createObjectURL(file),
+        uploading: false,
+        error: "Format d'image non pris en charge (JPEG, PNG, WebP ou GIF uniquement).",
+        uploaded: null,
+      });
+      return;
+    }
+    if (file.size > MAX_IMAGE_FILE_SIZE) {
+      setAttachment({
+        file,
+        preview: URL.createObjectURL(file),
+        uploading: false,
+        error: 'Image trop volumineuse (10 Mo maximum).',
+        uploaded: null,
+      });
+      return;
+    }
+
+    setAttachment({ file, preview: URL.createObjectURL(file), uploading: true, error: null, uploaded: null });
+
+    // Image-search feature (Phase 1) — first-message UX fix: send
+    // whichever conversationId this composer already knows about, if
+    // any (the real prop once a conversation exists, or one THIS
+    // composer instance already had the upload route create for an
+    // earlier photo pick in the same not-yet-sent turn) — omitted
+    // entirely otherwise, letting the route create a brand new
+    // AgentConversation row itself (see that route's own comment).
+    const knownConversationId = resolveKnownConversationId(conversationId, uploadedConversationId);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (knownConversationId) formData.append('conversationId', knownConversationId);
+      const response = await fetch('/api/ai/agent/photos', { method: 'POST', body: formData });
+      const data: any = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success) {
+        setAttachment((current) =>
+          current ? { ...current, uploading: false, error: data?.error || "L'envoi de la photo a échoué." } : current
+        );
+        return;
+      }
+
+      if (!knownConversationId && typeof data.conversationId === 'string') {
+        setUploadedConversationId(data.conversationId);
+      }
+
+      setAttachment((current) =>
+        current
+          ? { ...current, uploading: false, error: null, uploaded: { url: data.url, storagePath: data.storagePath, mimeType: data.mimeType } }
+          : current
+      );
+    } catch {
+      setAttachment((current) => (current ? { ...current, uploading: false, error: 'Connexion impossible. Réessayez.' } : current));
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) uploadAttachment(file);
+  };
+
   const handleSend = () => {
     if (!canSend) return;
-    onSend(value);
+    // aiAgentMessageSchema.message still requires non-empty text even
+    // when a photo is attached — a reseller sending just a photo with no
+    // caption gets a real, honest, generic default here, never a
+    // silently invented product description.
+    const textToSend = value.trim().length > 0 ? value : 'Je cherche ce produit.';
+    // Image-search feature (Phase 1) — first-message UX fix: when this
+    // composer's own photo upload is what created the conversation (no
+    // conversationId prop yet), pass that exact id through so sendMessage
+    // uses it instead of the hook's own (still-null) state — see
+    // useAgentConversation.sendMessage's own comment on this parameter.
+    const conversationIdOverride = resolveKnownConversationId(conversationId, uploadedConversationId) ?? undefined;
+    onSend(textToSend, attachment?.uploaded ? [attachment.uploaded] : undefined, conversationIdOverride);
     setValue('');
+    clearAttachment();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -138,10 +306,62 @@ export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null
   return (
     <div className={`border-t border-white/[0.06] shrink-0 ${isEmpty ? 'p-5 sm:p-8 bg-[#14161A]/60' : 'p-3 sm:p-4'}`}>
       <div className={isEmpty ? 'max-w-2xl mx-auto w-full' : ''}>
+      {attachment && (
+        <div className="mb-2 flex items-center gap-2">
+          <div className="relative w-12 h-12 rounded-lg overflow-hidden bg-white/[0.06] shrink-0">
+            <Image src={attachment.preview} alt="Photo jointe" fill className="object-cover" />
+            {attachment.uploading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                <Loader2 className="w-4 h-4 text-white animate-spin" />
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            {attachment.error ? (
+              <p className="text-xs text-red-400 truncate">{attachment.error}</p>
+            ) : attachment.uploading ? (
+              <p className="text-xs text-gray-500">Envoi de la photo…</p>
+            ) : (
+              <p className="text-xs text-gray-500 truncate">{attachment.file.name}</p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={clearAttachment}
+            aria-label="Retirer la photo"
+            className="w-7 h-7 rounded-full bg-white/[0.08] text-gray-400 hover:text-white hover:bg-white/[0.14] flex items-center justify-center shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/40"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
       <div className="flex items-end gap-2">
         <label htmlFor="agent-composer-input" className="sr-only">
           Écrire un message à l&apos;Agent ADKSY
         </label>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          onChange={handleFileChange}
+          // Image-search feature (Phase 1) — first-message UX fix: no
+          // longer gated on conversationId existing yet — POST
+          // /api/ai/agent/photos now creates the AgentConversation row
+          // itself when none exists (see that route's own comment), so a
+          // photo can be attached before the very first message is sent.
+          disabled={sending || Boolean(attachment)}
+          className="hidden"
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sending || Boolean(attachment)}
+          aria-label="Joindre une photo"
+          title="Joindre une photo"
+          className="w-10 h-10 rounded-full bg-white/[0.06] text-gray-400 hover:text-white hover:bg-white/[0.1] flex items-center justify-center shrink-0 transition-colors disabled:opacity-30 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/40"
+        >
+          <Paperclip className="w-4 h-4" />
+        </button>
         <div className="relative flex-1">
           {showRotatingExample && (
             // Decorative only — aria-hidden so screen readers never read the

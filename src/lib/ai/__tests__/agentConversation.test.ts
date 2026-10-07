@@ -13,6 +13,7 @@ import {
   confirmAgentAction,
   cancelAgentAction,
   shouldStickToBottom,
+  resolveKnownConversationId,
   MAX_AGENT_MESSAGE_LENGTH,
   AUTO_SCROLL_THRESHOLD_PX,
   type AgentUiMessage,
@@ -631,5 +632,23 @@ describe('shouldStickToBottom (Phase 11E — auto-scroll decision)', () => {
   it('a custom threshold is honored', () => {
     expect(shouldStickToBottom(400, 600, 100)).toBe(false); // distance = 100, default threshold 80
     expect(shouldStickToBottom(400, 600, 100, 150)).toBe(true); // same distance, wider threshold
+  });
+});
+
+describe('resolveKnownConversationId (Image-search feature, Phase 1 — first-message UX fix)', () => {
+  it('the real conversationId prop wins when both are set', () => {
+    expect(resolveKnownConversationId('conv-real', 'conv-locally-created')).toBe('conv-real');
+  });
+
+  it('falls back to the locally-resolved id (from an earlier photo upload in the same not-yet-sent turn) when the prop is still null', () => {
+    expect(resolveKnownConversationId(null, 'conv-locally-created')).toBe('conv-locally-created');
+  });
+
+  it('returns null when neither exists yet (no conversation, no photo uploaded) — the upload route will create one', () => {
+    expect(resolveKnownConversationId(null, null)).toBeNull();
+  });
+
+  it('never prefers the locally-resolved id over a real, different conversationId prop — the real conversation is always authoritative once it exists', () => {
+    expect(resolveKnownConversationId('conv-from-server', 'conv-stale-local')).toBe('conv-from-server');
   });
 });

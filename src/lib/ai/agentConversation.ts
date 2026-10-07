@@ -141,9 +141,54 @@ export function agentConversationReducer(
 }
 
 /** Non-empty (after trim), within the backend's own limit, and not already sending. */
-export function canSendAgentMessage(message: string, sending: boolean): boolean {
+/**
+ * AI-first "free listing creation" workflow — one real photo already
+ * uploaded via POST /api/ai/agent/photos (see that route), ready to be
+ * attached to the NEXT chat turn. Never raw bytes here — only the
+ * already-durable {url, storagePath, mimeType} that route returned.
+ */
+export interface AgentPhotoAttachment {
+  url: string;
+  storagePath: string;
+  mimeType: string;
+}
+
+/**
+ * Image-search feature (Phase 1) — first-message UX fix: the attach
+ * control in AgentComposer is never gated on a conversationId already
+ * existing (POST /api/ai/agent/photos now creates that row itself when
+ * none is given — see that route's own comment). This is the exact
+ * decision AgentComposer makes, both when deciding which conversationId
+ * to send on the NEXT photo upload in the same not-yet-sent turn (so a
+ * second photo pick reuses the conversation the first one just created,
+ * never creating a second one) and when deciding which conversationId to
+ * pass as sendMessage's override for the eventual send. `conversationId`
+ * is the real prop (the hook's own state, authoritative once set);
+ * `locallyResolvedConversationId` is the id this one composer instance
+ * already received back from an earlier upload in the same turn, if any.
+ * The real prop always wins once it exists.
+ */
+export function resolveKnownConversationId(
+  conversationId: string | null,
+  locallyResolvedConversationId: string | null
+): string | null {
+  return conversationId ?? locallyResolvedConversationId;
+}
+
+/**
+ * AI-first "free listing creation" workflow — `hasAttachments` lets the
+ * composer send with an EMPTY text field when at least one real photo is
+ * already attached (e.g. the reseller just sends a photo with no caption)
+ * — the message text itself is still required by the backend
+ * (aiAgentMessageSchema.message), so the composer is expected to fill in a
+ * plain default caption in that case (see AgentComposer's own handleSend),
+ * never leave it genuinely empty.
+ */
+export function canSendAgentMessage(message: string, sending: boolean, hasAttachments: boolean = false): boolean {
   const trimmed = message.trim();
-  return trimmed.length > 0 && trimmed.length <= MAX_AGENT_MESSAGE_LENGTH && !sending;
+  if (sending) return false;
+  if (hasAttachments) return trimmed.length <= MAX_AGENT_MESSAGE_LENGTH;
+  return trimmed.length > 0 && trimmed.length <= MAX_AGENT_MESSAGE_LENGTH;
 }
 
 /**
@@ -151,14 +196,23 @@ export function canSendAgentMessage(message: string, sending: boolean): boolean 
  * workspaceId/userId/subscription/credentials field at all — the server
  * derives the workspace from the authenticated session
  * (verifyWorkspaceAccess), never from the request body — so there is no
- * field here to accidentally populate with one.
+ * field here to accidentally populate with one. `attachments`, when
+ * given, is always already-uploaded, real photo references (see
+ * AgentPhotoAttachment) — never raw file bytes over this JSON body.
  */
 export function buildAgentRequestBody(
   message: string,
-  conversationId: string | null
-): { message: string; conversationId?: string } {
+  conversationId: string | null,
+  attachments?: AgentPhotoAttachment[]
+): { message: string; conversationId?: string; attachments?: AgentPhotoAttachment[] } {
   const trimmed = message.trim();
-  return conversationId ? { message: trimmed, conversationId } : { message: trimmed };
+  const body: { message: string; conversationId?: string; attachments?: AgentPhotoAttachment[] } = conversationId
+    ? { message: trimmed, conversationId }
+    : { message: trimmed };
+  if (attachments && attachments.length > 0) {
+    body.attachments = attachments;
+  }
+  return body;
 }
 
 /**
