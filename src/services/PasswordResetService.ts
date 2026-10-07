@@ -12,9 +12,21 @@ import { getAppUrl } from '@/lib/env';
  */
 
 interface ResetTokenResult {
+  /** True iff the token itself was created/stored (DB write succeeded) —
+   * unchanged meaning, existing callers/tests rely on this exactly as
+   * before. Independent of whether the email actually went out. */
   success: boolean;
   message: string;
   token?: string;
+  /** True iff EmailService reported the reset email as actually sent for
+   * THIS call. False when EmailService.send() returned success:false
+   * (provider not configured, provider rejected it, etc.). Undefined
+   * when the token itself was never created (the catch branch below) —
+   * the email was never attempted in that case. Added so callers (the
+   * forgot-password route) can distinguish "token created, email never
+   * went out" from genuine success, without changing what `success`
+   * itself has always meant. */
+  emailSent?: boolean;
 }
 
 interface ResetPasswordResult {
@@ -71,6 +83,11 @@ export class PasswordResetService {
       const emailResult = await EmailService.sendPasswordResetEmail(email, resetUrl);
 
       if (!emailResult.success) {
+        // Reuses EmailService's own error value (a stable sentinel like
+        // 'EMAIL_PROVIDER_NOT_CONFIGURED', or the real Resend error
+        // message/statusCode/name EmailService already extracts) — never
+        // a second, invented error-code system. Never logs the token or
+        // any API key.
         console.error('[PasswordReset] Failed to send reset email:', emailResult.error);
       }
 
@@ -78,6 +95,7 @@ export class PasswordResetService {
         success: true,
         message: 'Reset token created',
         token, // Returned for the email link only — never logged, never persisted raw.
+        emailSent: emailResult.success,
       };
     } catch (error) {
       console.error('[PasswordReset] Token creation failed:', error);

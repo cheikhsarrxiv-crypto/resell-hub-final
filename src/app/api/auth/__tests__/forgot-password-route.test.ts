@@ -85,6 +85,49 @@ describe.skipIf(!dbAvailable)('POST /api/auth/forgot-password — real PostgreSQ
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
+  it('EmailService failure for an existing account returns a generic failure response, never a fake success', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendPasswordResetEmail').mockResolvedValue({
+      success: false,
+      error: 'EMAIL_PROVIDER_NOT_CONFIGURED',
+    });
+
+    const response = await POST(makeRequest({ email: user.email }, uniqueIp()));
+    const body = await response.json();
+
+    // The core fix: a real EmailService failure must no longer be
+    // reported as the generic 200 success — this necessarily differs
+    // from the unregistered-email case (which never attempts anything
+    // and always gets GENERIC_RESPONSE), an accepted, deliberate
+    // trade-off per this task's own instructions.
+    expect(response.status).not.toBe(200);
+    expect(response.ok).toBe(false);
+
+    // The body stays generic and professional — never the token, never
+    // the real EmailService.error value, never a stack trace.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toMatch(/[0-9a-f]{64}/); // no 64-hex-char reset token
+    expect(serialized).not.toContain('EMAIL_PROVIDER_NOT_CONFIGURED');
+    expect(serialized).not.toContain('RESEND');
+    expect(serialized).not.toContain(user.email);
+
+    // The token row was still created — this fix is about the HTTP
+    // response, never about losing the already-written token.
+    const stored = await prisma.passwordResetToken.findUnique({ where: { userId: user.id } });
+    expect(stored).not.toBeNull();
+  });
+
+  it('a successful email send still returns the exact same generic 200 as before — no regression', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendPasswordResetEmail').mockResolvedValue({ success: true, messageId: 'mock' });
+
+    const response = await POST(makeRequest({ email: user.email }, uniqueIp()));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toEqual({ message: "If an account exists with this email address, we've sent a password reset link." });
+  });
+
   it('rejects invalid input (400) before doing any DB work', async () => {
     const response = await POST(makeRequest({ email: 'not-an-email' }, uniqueIp()));
     expect(response.status).toBe(400);

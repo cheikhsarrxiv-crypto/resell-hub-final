@@ -83,6 +83,36 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
     expect(resetUrl).toContain(`userId=${user.id}`);
   });
 
+  it('emailSent is true when EmailService reports success', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendPasswordResetEmail').mockResolvedValue({ success: true, messageId: 'mock' });
+
+    const result = await PasswordResetService.createResetToken(user.id, user.email);
+
+    expect(result.success).toBe(true); // token creation itself — unchanged meaning
+    expect(result.emailSent).toBe(true);
+  });
+
+  it('emailSent is false when EmailService reports failure, while the token is still created (success stays true)', async () => {
+    const user = await createTestUser();
+    vi.spyOn(EmailService, 'sendPasswordResetEmail').mockResolvedValue({
+      success: false,
+      error: 'EMAIL_PROVIDER_NOT_CONFIGURED',
+    });
+
+    const result = await PasswordResetService.createResetToken(user.id, user.email);
+
+    expect(result.success).toBe(true); // DB write still succeeded
+    expect(result.emailSent).toBe(false);
+    expect(result.token).toBeDefined();
+
+    // The token row is real and usable even though the email failed —
+    // this fix is about reporting the failure, never about losing the
+    // already-created token.
+    const stored = await prisma.passwordResetToken.findUnique({ where: { userId: user.id } });
+    expect(stored).not.toBeNull();
+  });
+
   it('a new request invalidates the previous token (upsert overwrites the same row)', async () => {
     const user = await createTestUser();
 

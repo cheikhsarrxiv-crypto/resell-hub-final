@@ -11,6 +11,20 @@ const GENERIC_RESPONSE = {
     "If an account exists with this email address, we've sent a password reset link.",
 };
 
+// Returned ONLY when an existing account's token/email step genuinely
+// failed (PasswordResetService.createResetToken's emailSent !== true) —
+// a real EmailService/Resend failure must never be reported to the
+// caller as success. This necessarily differs from GENERIC_RESPONSE's
+// 200 (an unregistered email never reaches this branch at all, since
+// nothing is attempted for it), which is an accepted, deliberate
+// trade-off: surfacing a genuine infrastructure failure takes priority
+// over perfect indistinguishability during an outage. The body itself
+// stays generic and professional — never the token, never
+// emailResult.error, never a stack trace, never which step failed.
+const EMAIL_SEND_FAILED_RESPONSE = {
+  error: "Impossible d'envoyer l'e-mail pour le moment. Réessaie dans quelques instants.",
+};
+
 /**
  * POST /api/auth/forgot-password
  * Request a password reset link.
@@ -68,8 +82,16 @@ export async function POST(request: NextRequest) {
     });
 
     if (user && !user.deletedAt) {
-      // Best-effort — never let a failure here change the response.
-      await PasswordResetService.createResetToken(user.id, user.email);
+      const tokenResult = await PasswordResetService.createResetToken(user.id, user.email);
+
+      if (!tokenResult.emailSent) {
+        // Logged generically — PasswordResetService.createResetToken
+        // already logged the real emailResult.error/DB error server-side;
+        // this only marks that the request ends in a failure response,
+        // never re-logging the email address, token, or technical cause.
+        console.error('[Forgot Password] Reset email was not sent for this request — returning a failure response.');
+        return NextResponse.json(EMAIL_SEND_FAILED_RESPONSE, { status: 500 });
+      }
     }
 
     return NextResponse.json(GENERIC_RESPONSE);

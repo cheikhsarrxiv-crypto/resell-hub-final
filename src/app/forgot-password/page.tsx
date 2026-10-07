@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/UI/Button';
 import { AuthCard } from '@/components/auth/AuthCard';
+import { interpretForgotPasswordResponse } from '@/lib/forgotPasswordResponse';
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
@@ -23,9 +24,10 @@ export default function ForgotPasswordPage() {
         body: JSON.stringify({ email }),
       });
 
-      if (response.status === 429) {
-        const data = await response.json();
-        throw new Error(data.error || 'Trop de tentatives. Réessaie plus tard.');
+      const outcome = await interpretForgotPasswordResponse(response);
+
+      if (outcome.kind !== 'submitted') {
+        throw new Error(outcome.message);
       }
 
       // The API always returns a generic success response regardless of

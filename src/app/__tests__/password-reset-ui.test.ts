@@ -15,6 +15,10 @@ import { describe, it, expect } from 'vitest';
 const loginSource = fs.readFileSync(path.join(process.cwd(), 'src/app/login/page.tsx'), 'utf-8');
 const forgotSource = fs.readFileSync(path.join(process.cwd(), 'src/app/forgot-password/page.tsx'), 'utf-8');
 const resetSource = fs.readFileSync(path.join(process.cwd(), 'src/app/reset-password/page.tsx'), 'utf-8');
+const forgotPasswordResponseSource = fs.readFileSync(
+  path.join(process.cwd(), 'src/lib/forgotPasswordResponse.ts'),
+  'utf-8'
+);
 
 describe('/login — forgot-password link added, no regression', () => {
   it('links to /forgot-password', () => {
@@ -48,7 +52,19 @@ describe('/forgot-password — requests a reset link', () => {
   });
 
   it('surfaces a 429 (rate limited) as a distinct error rather than the generic success state', () => {
-    expect(forgotSource).toContain('response.status === 429');
+    // 429-detection now lives in the extracted, unit-tested
+    // interpretForgotPasswordResponse helper (src/lib/forgotPasswordResponse.ts
+    // — see forgotPasswordResponse.test.ts) rather than inline in the page,
+    // so the page only needs to use that helper and act on its result.
+    expect(forgotSource).toContain('interpretForgotPasswordResponse');
+    expect(forgotPasswordResponseSource).toContain('response.status === 429');
+  });
+
+  it('a real server failure (non-429, non-ok) is also surfaced as an error, never the generic success state', () => {
+    // Confirms the page no longer treats every non-429 status as success —
+    // it branches on the helper's outcome.kind, not just on status===429.
+    expect(forgotSource).toContain('outcome.kind !== \'submitted\'');
+    expect(forgotPasswordResponseSource).toContain("kind: 'failed'");
   });
 
   it('links back to /login', () => {
