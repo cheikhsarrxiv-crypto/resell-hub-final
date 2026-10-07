@@ -40,6 +40,14 @@ export async function middleware(request: NextRequest) {
     pathname === '/reset-password' ||
     pathname === '/api/email/verify' ||
     pathname.startsWith('/api/auth') ||
+    // Vercel Cron Jobs call these with no NextAuth session at all (see
+    // vercel.json) — they authenticate via CRON_SECRET inside each route
+    // itself (src/lib/cronAuth.ts's verifyCronSecret, checked first thing
+    // in both handlers), never via a user session. Exempting them here
+    // only lets the request REACH the route; it grants no access by
+    // itself — a request without the exact CRON_SECRET still gets a 401
+    // from the route. No other /api/* path is affected.
+    pathname.startsWith('/api/cron') ||
     pathname.startsWith('/pricing') ||
     pathname.startsWith('/_next')
   ) {
