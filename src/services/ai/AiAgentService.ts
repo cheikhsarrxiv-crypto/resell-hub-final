@@ -8,6 +8,7 @@ import { AiActionService } from './AiActionService';
 import { AiEntitlementService, getRequiredCapabilityForTool } from './AiEntitlementService';
 import { AiUsageService } from './AiUsageService';
 import { AgentToolCategory } from './tools/types';
+import { formatAgentProfileForPrompt } from '@/lib/ai/agentProfile';
 
 const logger = createLogger('ai-agent');
 
@@ -202,9 +203,41 @@ export class AiAgentService {
     return !result.allowed;
   }
 
-  private static buildSystemPrompt(): string {
+  /**
+   * AI Agent Personalization V1 — appends a <user_profile> block (see
+   * formatAgentProfileForPrompt) built from this workspace's AgentProfile
+   * row, if one exists. A workspace with no profile (every workspace that
+   * existed before this feature, and anyone who skips onboarding) gets
+   * formatAgentProfileForPrompt(null) === '' — the exact same prompt as
+   * before this feature existed, byte for byte. Never touches
+   * SYSTEM_PROMPT_INSTRUCTIONS itself or the tool list that follows it —
+   * purely additive, inserted between the two.
+   */
+  private static async buildSystemPrompt(workspaceId: string): Promise<string> {
     const toolNames = AiToolRegistry.list().map((tool) => tool.name);
-    return `${SYSTEM_PROMPT_INSTRUCTIONS}\n\nTools available to you right now: ${
+
+    // Never lets a profile-lookup failure (a transient DB hiccup, or a
+    // test/mock that doesn't model this table) block or crash the turn —
+    // same "degrade, never throw" principle already applied to the photo
+    // download in sendMessage above. Falls back to exactly the pre-
+    // existing, profile-less prompt. Logged at 'error' (not 'warn'): a
+    // real Prisma/DB failure here is a genuine anomaly worth
+    // investigating, never silently indistinguishable from the expected,
+    // ordinary "no profile yet" case — only the TURN's behavior degrades
+    // gracefully, the trace of a real failure never does.
+    let profileBlock = '';
+    try {
+      const profileRow = await prisma.agentProfile.findUnique({ where: { workspaceId } });
+      profileBlock = formatAgentProfileForPrompt(profileRow);
+    } catch (error) {
+      logger.error(
+        'AgentProfile lookup failed — continuing this turn without profile context, but this is a real failure, not an absent profile',
+        error instanceof Error ? error : String(error),
+        { workspaceId }
+      );
+    }
+
+    return `${SYSTEM_PROMPT_INSTRUCTIONS}${profileBlock}\n\nTools available to you right now: ${
       toolNames.length > 0 ? toolNames.join(', ') : '(none yet)'
     }.`;
   }
@@ -421,7 +454,7 @@ export class AiAgentService {
     }
 
     const client = this.getClient();
-    const system = this.buildSystemPrompt();
+    const system = await this.buildSystemPrompt(workspaceId);
     const tools = AiToolRegistry.toAnthropicTools();
 
     const toolCalls: AgentToolCallRecord[] = [];

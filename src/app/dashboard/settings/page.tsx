@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useWorkspace } from '@/hooks';
 import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
@@ -151,6 +152,25 @@ export default function SettingsPage() {
           <DashboardButton variant="primary" onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
             {saving ? 'Saving...' : 'Save Changes'}
           </DashboardButton>
+        </DashboardCardContent>
+      </DashboardCard>
+
+      {/* AI Agent Personalization V1 — entry point only; the actual
+          onboarding/edit UI lives on the Agent page itself
+          (?editProfile=1 reopens it there, pre-filled), never duplicated
+          here — see AgentOnboarding.tsx. */}
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Préférences Agent IA</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
+          <p className="text-sm text-gray-400 mb-4">
+            Usage principal, budget habituel, plateformes et catégories — pour que l&apos;Agent IA adapte mieux ses
+            recherches à ton profil.
+          </p>
+          <Link href="/dashboard/agent?editProfile=1">
+            <DashboardButton variant="outline">Modifier mes préférences</DashboardButton>
+          </Link>
         </DashboardCardContent>
       </DashboardCard>
 

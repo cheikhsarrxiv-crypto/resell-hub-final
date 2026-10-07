@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useAgentConversation } from '@/hooks/useAgentConversation';
 import { useAgentUsage } from '@/hooks/useAgentUsage';
@@ -8,6 +8,8 @@ import { AgentMessageList } from '@/components/ai/AgentMessageList';
 import { AgentComposer } from '@/components/ai/AgentComposer';
 import { AgentErrorBanner } from '@/components/ai/AgentErrorBanner';
 import { AgentUsageBanner } from '@/components/ai/AgentUsageBanner';
+import { AgentOnboarding } from '@/components/ai/AgentOnboarding';
+import { recordToProfileInput, type AgentProfileInput } from '@/lib/ai/agentProfile';
 
 /**
  * Phase 11A — text-only Agent conversation page. Phase 11D — restores a
@@ -41,6 +43,57 @@ export default function AgentPage() {
   } = useAgentConversation(initialConversationId);
 
   const { usage } = useAgentUsage();
+
+  // AI Agent Personalization V1 — checked once per page load, via an
+  // effect (never during the initial synchronous render, which always
+  // shows the normal Agent UI first — see showOnboarding below). Once the
+  // check resolves, profileChecked flips to true and the view switches to
+  // onboarding if there is genuinely no profile yet, or if explicitly
+  // requested. ?editProfile=1 (from Settings — see
+  // src/app/dashboard/settings/page.tsx) forces the onboarding open again
+  // even when a profile already exists, pre-filled from it.
+  const editProfileRequested = searchParams.get('editProfile') === '1';
+  const [profileChecked, setProfileChecked] = useState(false);
+  const [hasProfile, setHasProfile] = useState(false);
+  const [existingProfileForEdit, setExistingProfileForEdit] = useState<AgentProfileInput | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/ai/agent/profile')
+      .then((res) => res.json().catch(() => null))
+      .then((data: any) => {
+        if (cancelled) return;
+        const profile = data?.profile ?? null;
+        setHasProfile(Boolean(profile));
+        if (profile) setExistingProfileForEdit(recordToProfileInput(profile));
+        setProfileChecked(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // A failed check never blocks access to the Agent — treated the
+        // exact same way as "no profile yet" (onboarding would show, but
+        // "Terminer maintenant"/"Passer" always let the reseller through
+        // immediately; the Agent itself works identically either way).
+        setHasProfile(false);
+        setProfileChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Checked once per page load only — a completed/edited onboarding
+    // flips hasProfile directly via handleOnboardingComplete below,
+    // never by re-running this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleOnboardingComplete = useCallback(() => {
+    setHasProfile(true);
+    if (editProfileRequested) {
+      router.replace(pathname);
+    }
+  }, [editProfileRequested, pathname, router]);
+
+  const showOnboarding = profileChecked && (!hasProfile || editProfileRequested);
 
   // Lets a click on one of AgentMessageList's "Exemples de demandes" cards
   // fill AgentComposer's field — the two are siblings with no shared
@@ -94,7 +147,7 @@ export default function AgentPage() {
           </h1>
           <p className="text-sm text-gray-500">Votre assistant pour rechercher et analyser des produits de revente.</p>
         </div>
-        {messages.length > 0 && (
+        {!showOnboarding && messages.length > 0 && (
           <button
             type="button"
             onClick={handleNewConversation}
@@ -106,30 +159,36 @@ export default function AgentPage() {
         )}
       </div>
 
-      {usage && <AgentUsageBanner usage={usage} />}
-
-      {showHistoryLoading ? (
-        <div className="flex-1 flex items-center justify-center" role="status">
-          <p className="text-sm text-gray-500">Chargement de la conversation…</p>
-        </div>
-      ) : historyError ? (
-        <div className="flex-1 flex items-center justify-center px-6 text-center">
-          <AgentErrorBanner message={historyError} />
-        </div>
+      {showOnboarding ? (
+        <AgentOnboarding onComplete={handleOnboardingComplete} initialAnswers={editProfileRequested ? existingProfileForEdit : null} />
       ) : (
-        <AgentMessageList
-          messages={messages}
-          sending={sending}
-          onConfirmAction={confirmAction}
-          onCancelAction={cancelAction}
-          onSend={sendMessage}
-          onExampleSelect={(text) => setExampleToFill({ text, nonce: Date.now() })}
-        />
+        <>
+          {usage && <AgentUsageBanner usage={usage} />}
+
+          {showHistoryLoading ? (
+            <div className="flex-1 flex items-center justify-center" role="status">
+              <p className="text-sm text-gray-500">Chargement de la conversation…</p>
+            </div>
+          ) : historyError ? (
+            <div className="flex-1 flex items-center justify-center px-6 text-center">
+              <AgentErrorBanner message={historyError} />
+            </div>
+          ) : (
+            <AgentMessageList
+              messages={messages}
+              sending={sending}
+              onConfirmAction={confirmAction}
+              onCancelAction={cancelAction}
+              onSend={sendMessage}
+              onExampleSelect={(text) => setExampleToFill({ text, nonce: Date.now() })}
+            />
+          )}
+
+          {error && <AgentErrorBanner message={error} />}
+
+          <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} prefill={exampleToFill} />
+        </>
       )}
-
-      {error && <AgentErrorBanner message={error} />}
-
-      <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} prefill={exampleToFill} />
     </div>
   );
 }
