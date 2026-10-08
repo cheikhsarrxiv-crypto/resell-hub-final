@@ -220,3 +220,98 @@ select:focus {
     radial-gradient(40% 35% at 50% 35%, rgba(255, 90, 31, 0.05), transparent 70%);
   background-repeat: no-repeat;
 }
+
+/* ===== Agent IA — onboarding questionnaire (AgentOnboarding.tsx) =====
+   Two independent animation layers, same house convention as
+   dash-reveal/agent-example-fade above (CSS keyframes + JS
+   prefers-reduced-motion check, no animation library):
+   1) a whole-step slide (exit then enter, direction-aware) when moving
+      between questions;
+   2) a short staggered rise for the category label / question / answer
+      cards within a step, so they don't all appear at once. */
+.agent-onb-exit-forward {
+  animation: agentOnbExitForward 0.12s ease-in forwards;
+}
+.agent-onb-exit-backward {
+  animation: agentOnbExitBackward 0.12s ease-in forwards;
+}
+.agent-onb-enter-forward {
+  animation: agentOnbEnterForward 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.agent-onb-enter-backward {
+  animation: agentOnbEnterBackward 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes agentOnbExitForward {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(-20px); }
+}
+@keyframes agentOnbExitBackward {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(20px); }
+}
+@keyframes agentOnbEnterForward {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes agentOnbEnterBackward {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.agent-onb-category,
+.agent-onb-question,
+.agent-onb-card {
+  animation: agentOnbRise 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes agentOnbRise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.agent-onb-progress-fill {
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-onb-exit-forward,
+  .agent-onb-exit-backward,
+  .agent-onb-enter-forward,
+  .agent-onb-enter-backward,
+  .agent-onb-category,
+  .agent-onb-question,
+  .agent-onb-card {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .agent-onb-progress-fill {
+    transition: none;
+  }
+}
+
+/* ===== Agent IA — onboarding "dedicated flow" chrome (V2) =====
+   While AgentOnboarding is showing (its root carries
+   .agent-onboarding-root — see that component), this visually turns the
+   surrounding Agent page into a focused, immersive step instead of "a
+   card inside the dashboard": the page's own title/subtitle header
+   (the first child of the same agent-glow-bg panel, rendered
+   unconditionally by src/app/dashboard/agent/page.tsx) and the mobile
+   bottom nav (DashboardBottomNav, identified by its own
+   aria-label — not by file/import) are hidden, and the panel's hairline
+   border is dropped so the questionnaire doesn't look boxed in.
+   CSS-only (:has()), so neither page.tsx nor DashboardBottomNav.tsx is
+   touched: nothing is removed from the DOM, both reappear the instant
+   onboarding completes (showOnboarding flips back to false). Widely
+   supported in all evergreen browsers. */
+.agent-glow-bg:has(> .agent-onboarding-root) {
+  border-color: transparent;
+}
+.agent-glow-bg:has(> .agent-onboarding-root) > div:first-child {
+  display: none;
+}
+body:has(.agent-onboarding-root) nav[aria-label='Navigation principale'] {
+  display: none;
+}
