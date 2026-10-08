@@ -15,7 +15,11 @@ datasource db {
 model User {
   id            String    @id @default(cuid())
   email         String    @unique
-  password      String
+  // Nullable since Google OAuth: a Google-only account has no password
+  // at all (never a placeholder/random hash — see
+  // src/lib/auth/provisionUser.ts and src/auth.ts's Credentials
+  // authorize(), which refuses to call bcrypt.compare against null).
+  password      String?
   name          String
   phone         String?
   country       String?   @default("FR")
@@ -301,11 +305,16 @@ model ProductImage {
   // manual dashboard flow (StorageService.uploadImage) has neither this
   // nor sourceUrl/generationMetadata set — a real, ordinary, unchanged
   // state, never backfilled or inferred for pre-existing rows.
-  sourceType String? // 'REAL' | 'GENERATED'
+  sourceType String? // 'REAL' | 'GENERATED' | 'USER_UPLOADED'
   // For sourceType='REAL': the exact source image URL this was copied
   // from (may equal `url` when hotlinked, never re-hosted — see
   // actionTools.ts's create_product). For sourceType='GENERATED': not
   // used (generation provenance lives in generationMetadata instead).
+  // For sourceType='USER_UPLOADED' (AI-first "free listing creation"
+  // workflow — a real photo the reseller sent directly in an agent
+  // conversation, see UserUploadedListingImage): null — there is no
+  // external source listing to point back to, only the reseller's own
+  // upload (`url`/`storagePath` already carry that provenance).
   sourceUrl String?
   // For sourceType='GENERATED' only: JSON-stringified real generation
   // metadata (provider name, prompt actually sent, model, generatedAt) —

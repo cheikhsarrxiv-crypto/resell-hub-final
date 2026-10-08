@@ -5,6 +5,7 @@ import prisma from '@/lib/prisma';
 import { rateLimiter, RateLimiterService } from '@/lib/ratelimit';
 import { EmailVerificationService } from '@/services/EmailVerificationService';
 import { isReservedAdminEmail } from '@/lib/admin';
+import { provisionUser } from '@/lib/auth/provisionUser';
 
 export async function POST(request: NextRequest) {
   try {
@@ -67,41 +68,16 @@ export async function POST(request: NextRequest) {
     // Hash password
     const hashedPassword = await bcrypt.hash(result.data.password, 10);
 
-    // Create user
-    const user = await prisma.user.create({
-      data: {
-        email: result.data.email,
-        password: hashedPassword,
-        name: result.data.name,
-        country: result.data.country,
-      },
-    });
-
-    // Create free subscription
-    const freePlan = await prisma.plan.findUnique({
-      where: { name: 'free' },
-    });
-
-    if (!freePlan) {
-      throw new Error('Free plan not found');
-    }
-
-    const subscription = await prisma.subscription.create({
-      data: {
-        planId: freePlan.id,
-        status: 'active',
-      },
-    });
-
-    // Create default workspace
-    const workspace = await prisma.workspace.create({
-      data: {
-        name: `${user.name}'s Workspace`,
-        slug: user.email.split('@')[0].toLowerCase().replace(/\./g, '-'),
-        userId: user.id,
-        subscriptionId: subscription.id,
-        country: user.country || 'FR',
-      },
+    // Create user + free subscription + default workspace, atomically —
+    // the same shared provisioning Google sign-in uses (see
+    // src/lib/auth/provisionUser.ts). preVerifiedEmail: false — the
+    // existing email verification flow below still runs unchanged.
+    const { user, workspace } = await provisionUser({
+      email: result.data.email,
+      password: hashedPassword,
+      name: result.data.name,
+      country: result.data.country,
+      preVerifiedEmail: false,
     });
 
     // Send email verification link. The account is already created at this

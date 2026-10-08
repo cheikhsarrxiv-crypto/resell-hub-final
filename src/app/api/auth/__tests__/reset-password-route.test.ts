@@ -68,7 +68,7 @@ describe.skipIf(!dbAvailable)('POST /api/auth/reset-password — real PostgreSQL
     expect(response.status).toBe(200);
 
     const updatedUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const newPasswordValid = await bcrypt.compare('brand-new-password-1', updatedUser!.password);
+    const newPasswordValid = await bcrypt.compare('brand-new-password-1', updatedUser!.password!);
     expect(newPasswordValid).toBe(true);
   });
 

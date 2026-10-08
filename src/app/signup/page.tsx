@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/UI/Button';
 import { PasswordInput } from '@/components/UI/PasswordInput';
 import { AuthCard } from '@/components/auth/AuthCard';
+import { GoogleButton } from '@/components/auth/GoogleButton';
 
 const fieldClassName =
   'w-full px-4 py-2.5 bg-white border border-black/10 rounded-xl text-[#14161A] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/50 focus:border-transparent transition-shadow';
@@ -80,6 +81,15 @@ export default function SignupPage() {
         </p>
       }
     >
+      <div className="space-y-5 mb-5">
+        <GoogleButton />
+        <div className="flex items-center gap-3" aria-hidden="true">
+          <div className="flex-1 h-px bg-black/10" />
+          <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">ou</span>
+          <div className="flex-1 h-px bg-black/10" />
+        </div>
+      </div>
+
       <form onSubmit={handleSubmit} className="space-y-5">
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">

@@ -164,7 +164,7 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
     await PasswordResetService.resetPassword(user.id, token!, 'brand-new-password-1');
 
     const updatedUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const oldPasswordStillValid = await bcrypt.compare('original-password-1', updatedUser!.password);
+    const oldPasswordStillValid = await bcrypt.compare('original-password-1', updatedUser!.password!);
     expect(oldPasswordStillValid).toBe(false);
   });
 
@@ -174,7 +174,7 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
     await PasswordResetService.resetPassword(user.id, token!, 'brand-new-password-1');
 
     const updatedUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const newPasswordValid = await bcrypt.compare('brand-new-password-1', updatedUser!.password);
+    const newPasswordValid = await bcrypt.compare('brand-new-password-1', updatedUser!.password!);
     expect(newPasswordValid).toBe(true);
   });
 
@@ -186,7 +186,7 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
     expect(result.success).toBe(false);
 
     const stillUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const oldPasswordValid = await bcrypt.compare('original-password-1', stillUser!.password);
+    const oldPasswordValid = await bcrypt.compare('original-password-1', stillUser!.password!);
     expect(oldPasswordValid).toBe(true);
   });
 
@@ -216,7 +216,7 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
     expect(remainingToken).toBeNull();
 
     const stillUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const oldPasswordValid = await bcrypt.compare('original-password-1', stillUser!.password);
+    const oldPasswordValid = await bcrypt.compare('original-password-1', stillUser!.password!);
     expect(oldPasswordValid).toBe(true);
   });
 
@@ -232,7 +232,7 @@ describe.skipIf(!dbAvailable)('PasswordResetService — real PostgreSQL', () => 
 
     // Password stays what the first (successful) reset set it to.
     const finalUser = await prisma.user.findUnique({ where: { id: user.id } });
-    const firstPasswordStillValid = await bcrypt.compare('brand-new-password-1', finalUser!.password);
+    const firstPasswordStillValid = await bcrypt.compare('brand-new-password-1', finalUser!.password!);
     expect(firstPasswordStillValid).toBe(true);
   });
 });

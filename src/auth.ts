@@ -1,9 +1,12 @@
 import NextAuth, { type NextAuthConfig } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
+import Google from 'next-auth/providers/google';
 import bcrypt from 'bcryptjs';
 import { loginSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
 import { authConfig as baseAuthConfig } from '@/auth.config';
+import { provisionUser } from '@/lib/auth/provisionUser';
+import { isReservedAdminEmail } from '@/lib/admin';
 
 // Full config — Node.js runtime only (API routes, server components).
 // Never import this file from middleware.ts: the Credentials provider
@@ -42,6 +45,18 @@ export const authConfig: NextAuthConfig = {
             return null;
           }
 
+          // Google OAuth chantier — a Google-only account has no
+          // password at all (the column is nullable). Never call
+          // bcrypt.compare against null: it would throw instead of
+          // simply rejecting the attempt, and would otherwise let
+          // someone probe for Google-only accounts via the error shape.
+          // A Google-only account simply cannot sign in with a password
+          // yet — same user-facing "invalid credentials" outcome as any
+          // other failed login.
+          if (!user.password) {
+            return null;
+          }
+
           const isPasswordValid = await bcrypt.compare(
             result.data.password,
             user.password
@@ -62,12 +77,81 @@ export const authConfig: NextAuthConfig = {
         }
       },
     }),
+    Google({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    }),
   ],
   callbacks: {
     ...baseAuthConfig.callbacks,
-    async jwt({ token, user }) {
+    // Google OAuth chantier — runs for every provider, but only ever
+    // branches on account?.provider === 'google'; the Credentials path
+    // (account.provider === 'credentials') returns true immediately and
+    // is otherwise completely untouched by this callback.
+    async signIn({ user, account, profile }) {
+      if (account?.provider !== 'google') {
+        return true;
+      }
+
+      // Google sets this on every standard OAuth consent — this is the
+      // proof of mailbox ownership the whole linking decision rests on.
+      // Refusing without it means no user is ever created or modified
+      // from an unverified Google email.
+      if (!profile?.email || profile.email_verified !== true) {
+        console.error('[Auth] Google sign-in rejected — email missing or not verified by Google');
+        return false;
+      }
+
+      if (isReservedAdminEmail(profile.email)) {
+        console.error('[Auth] Google sign-in rejected — reserved admin email');
+        return false;
+      }
+
+      const existing = await prisma.user.findUnique({
+        where: { email: profile.email },
+        select: { id: true },
+      });
+
+      if (existing) {
+        // Link only — never touches password/workspace/subscription/
+        // email on the existing row. The jwt callback below re-resolves
+        // this same id by email independently, so this mutation is
+        // defense-in-depth, not the only guarantee.
+        user.id = existing.id;
+        return true;
+      }
+
+      const { user: created } = await provisionUser({
+        email: profile.email,
+        name: profile.name ?? profile.email.split('@')[0],
+        password: null,
+        preVerifiedEmail: true,
+      });
+      user.id = created.id;
+      return true;
+    },
+    async jwt({ token, user, account }) {
       if (user) {
-        token.id = user.id;
+        // Google OAuth chantier — the signIn callback above already
+        // resolved (existing account) or created (new account) the
+        // canonical User row for this Google identity. Re-reading it by
+        // email here — instead of trusting that user.id mutated in
+        // signIn survives into this callback unchanged — is the only
+        // extra DB read on the Google path, and makes the "same
+        // User.id" guarantee independent of any object-identity
+        // assumption between the two callbacks.
+        let resolvedUserId = user.id as string;
+        if (account?.provider === 'google' && user.email) {
+          const dbUser = await prisma.user.findUnique({
+            where: { email: user.email },
+            select: { id: true },
+          });
+          if (dbUser) {
+            resolvedUserId = dbUser.id;
+          }
+        }
+
+        token.id = resolvedUserId;
         token.email = user.email;
         token.name = user.name;
 
@@ -83,7 +167,7 @@ export const authConfig: NextAuthConfig = {
         // eBay OAuth connect) operate on the user's real workspace
         // instead of falling back to the literal string 'default'.
         const workspace = await prisma.workspace.findFirst({
-          where: { userId: user.id as string },
+          where: { userId: resolvedUserId },
           orderBy: { createdAt: 'desc' },
           select: { id: true },
         });
