@@ -1,6 +1,42 @@
 import { extractSourcingOutcomes, formatProviderName } from '@/lib/ai/sourcingResults';
+import type { SourcingSearchOutcome } from '@/lib/ai/sourcingResults';
 import { SourcingResultCard } from './SourcingResultCard';
 import type { NormalizedSourcingResult } from '@/services/sourcing/types';
+
+export type EmptySourcingOutcomeKind = 'all_unavailable' | 'no_exploitable_results';
+
+/**
+ * UI diagnostic fix — classifies a zero-result search_products outcome so
+ * the message never conflates "no provider could even run a search" with
+ * "a provider ran fine but found nothing exploitable", merely because some
+ * OTHER, unrelated provider happened to fail (the real-production bug:
+ * eBay auth error + Tavily running fine but filtering out every candidate
+ * both landed on the exact same generic "fournisseur indisponible"
+ * sentence). Never asserts a provider "succeeded" purely from its absence
+ * in providerErrors (see sourcingResults.ts's own asStringArray
+ * contract) — only ever trusts providersSearched/providersFailed, the two
+ * fields SourcingService.search itself populates for EVERY provider it
+ * actually attempted, unconditionally, before success/failure is known
+ * (see providersSearched.push(provider.name) in SourcingService.ts,
+ * which runs before each provider's own try/catch).
+ *
+ * When providersSearched is empty, this function has no structured basis
+ * to tell "nobody was searched" apart from "an older/partial response
+ * shape simply didn't carry this field" — it deliberately falls back to
+ * the original, more conservative signal (providerErrors alone, the exact
+ * pre-existing behavior) rather than asserting a cause the data doesn't
+ * support.
+ */
+export function classifyEmptySourcingOutcome(
+  outcome: Pick<SourcingSearchOutcome, 'providersSearched' | 'providersFailed' | 'providerErrors'>
+): EmptySourcingOutcomeKind {
+  if (outcome.providersSearched.length === 0) {
+    return outcome.providerErrors.length > 0 ? 'all_unavailable' : 'no_exploitable_results';
+  }
+
+  const succeededProviders = outcome.providersSearched.filter((p) => !outcome.providersFailed.includes(p));
+  return succeededProviders.length === 0 ? 'all_unavailable' : 'no_exploitable_results';
+}
 
 interface SourcingResultsGridProps {
   toolCalls: unknown[] | undefined;
@@ -65,12 +101,13 @@ export function SourcingResultsGrid({ toolCalls, onSend }: SourcingResultsGridPr
         const isPartial = outcome.results.length > 0 && problemProviders.length > 0;
 
         if (outcome.results.length === 0) {
+          const emptyKind = classifyEmptySourcingOutcome(outcome);
           return (
             <div key={outcome.toolCallIndex} className="space-y-1">
               <p className="text-sm text-gray-500 italic">
-                {outcome.providerErrors.length > 0
+                {emptyKind === 'all_unavailable'
                   ? 'Recherche temporairement indisponible auprès du fournisseur.'
-                  : 'Aucun résultat trouvé pour cette recherche.'}
+                  : 'Aucun résultat exploitable trouvé pour cette recherche.'}
               </p>
               {problemProviders.length > 0 && (
                 <p className="text-xs text-amber-400/90">

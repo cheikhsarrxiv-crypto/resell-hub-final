@@ -328,7 +328,7 @@ describe('SourcingResultsGrid', () => {
       <SourcingResultsGrid toolCalls={[{ name: 'search_products', result: { status: 'ok', results: [] } }]} />
     );
 
-    expect(html).toContain('Aucun résultat trouvé');
+    expect(html).toContain('Aucun résultat exploitable trouvé');
   });
 
   it('an honest "unavailable" message when the provider errored, never a fabricated result', () => {
