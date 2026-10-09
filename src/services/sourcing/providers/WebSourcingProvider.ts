@@ -346,6 +346,31 @@ function tokenize(text: string): string[] {
 }
 
 /**
+ * Web relevance fix (reliability of claims audit) — WHICH text is the
+ * real product identity to check against. When the reseller (or the
+ * Agent, on their behalf) gave a structured `brand` and/or `model`,
+ * THOSE are the product's real identity, and the only required tokens —
+ * `query.query` is then free-text search PHRASING (e.g. "sneakers",
+ * "France", a price qualifier), never a second, independent set of
+ * mandatory words a real listing's own title has no actual reason to
+ * repeat verbatim. A real "Nike Air Max 90" listing does not, and should
+ * not need to, contain the word "sneakers" or a country name just
+ * because the reseller's search phrase did.
+ *
+ * Only when NEITHER brand nor model is given does this fall back to
+ * `query.query` itself as the required-token source — unchanged from
+ * before this fix, since the free-text query is then genuinely the only
+ * structured signal available for what's being searched for at all.
+ */
+function computeRequiredRelevanceTokens(query: NormalizedSearchQuery): string[] {
+  const hasStructuredIdentity = Boolean(query.brand && query.model);
+  const identitySource = hasStructuredIdentity
+    ? [query.brand, query.model].filter(Boolean).join(' ')
+    : [query.brand, query.model, query.query].filter(Boolean).join(' ');
+  return tokenize(stripKidsSegmentWords(identitySource));
+}
+
+/**
  * Deep Web Sourcing Engine fix (mission sections 1 & 4) — a DETERMINISTIC
  * check run AFTER LLM extraction, never relying on the model's own
  * judgment of "is this the right product". A general web search for
@@ -355,16 +380,16 @@ function tokenize(text: string): string[] {
  * before they ever become a NormalizedSourcingResult.
  *
  * Rule (deliberately simple and auditable, never a fuzzy/ML match):
- * every significant token from the ORIGINAL structured query
- * (query.brand + query.model + query.query — never the pass's own
- * expanded text, which would already contain unrelated keywords like
- * "used"/"outlet") must appear, verbatim, somewhere in the offer's own
- * title/productName/brand/model. "Nike Air Max" requires "nike", "air"
- * AND "max" all present — "Nike Air Jordan 1" has "nike"/"air" but not
- * "max", so it is rejected without needing a hardcoded "Jordan" blocklist.
- * A query with no usable tokens at all (should not happen — query.query
- * is required/non-empty) never rejects anything on this basis, since
- * there would be nothing real to check against.
+ * every significant token from the product's real identity — see
+ * computeRequiredRelevanceTokens's own comment for exactly what that
+ * means when brand/model are given vs when only free text is available —
+ * must appear, verbatim, somewhere in the offer's own title/productName/
+ * brand/model. "Nike Air Max" requires "nike", "air" AND "max" all
+ * present — "Nike Air Jordan 1" has "nike"/"air" but not "max", so it is
+ * rejected without needing a hardcoded "Jordan" blocklist. A query with
+ * no usable tokens at all (should not happen — query.query is required/
+ * non-empty) never rejects anything on this basis, since there would be
+ * nothing real to check against.
  *
  * Separately, an offer whose own text matches ACCESSORY_ONLY_PATTERN is
  * always rejected regardless of token overlap — "Nike Air Max 1/97 Sean
@@ -389,7 +414,7 @@ export function isProductRelevant(offer: ExtractedWebOffer, query: NormalizedSea
     return false;
   }
 
-  const requiredTokens = tokenize(stripKidsSegmentWords([query.brand, query.model, query.query].filter(Boolean).join(' ')));
+  const requiredTokens = computeRequiredRelevanceTokens(query);
   if (requiredTokens.length === 0) {
     return true;
   }
@@ -414,7 +439,7 @@ function explainIrrelevance(offer: ExtractedWebOffer, query: NormalizedSearchQue
   if (textNamesKidsSegment(offerText) && !queryRequestsKidsSegment(query)) {
     return 'This listing is for a kids/toddler/infant variant, excluded from an adult-intent search.';
   }
-  const requiredTokens = tokenize(stripKidsSegmentWords([query.brand, query.model, query.query].filter(Boolean).join(' ')));
+  const requiredTokens = computeRequiredRelevanceTokens(query);
   const offerTokens = new Set(tokenize(offerText));
   const missing = requiredTokens.filter((token) => !offerTokens.has(token));
   if (missing.length > 0) {

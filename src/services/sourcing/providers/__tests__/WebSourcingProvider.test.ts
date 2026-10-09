@@ -152,10 +152,43 @@ describe('isProductRelevant (Deep Web Sourcing Engine fix)', () => {
     expect(isProductRelevant(offer({ title: 'anything at all' }), { query: 'x' })).toBe(true);
   });
 
-  it('uses query.brand/model when the free-text query is more generic — "sneakers" + brand "Nike" + model "Air Max" still requires all three', () => {
+  it('when brand/model are set, only brand+model tokens are required — a contextual word in query.query (e.g. "sneakers") is never mandatory', () => {
     const structuredQuery: NormalizedSearchQuery = { query: 'sneakers', brand: 'Nike', model: 'Air Max' };
     expect(isProductRelevant(offer({ title: 'Nike Air Max 90 sneakers' }), structuredQuery)).toBe(true);
     expect(isProductRelevant(offer({ title: 'Adidas sneakers' }), structuredQuery)).toBe(false);
+  });
+
+  it('"Nike Air Max 90" is relevant to a "Nike Air Max sneakers France" search (brand+model set, title has neither "sneakers" nor "France")', () => {
+    const structuredQuery: NormalizedSearchQuery = { query: 'Nike Air Max sneakers France', brand: 'Nike', model: 'Air Max' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90' }), structuredQuery)).toBe(true);
+  });
+
+  it('a Nike listing for an unrelated model is still rejected when brand+model are set', () => {
+    const structuredQuery: NormalizedSearchQuery = { query: 'Nike Air Max sneakers France', brand: 'Nike', model: 'Air Max' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Jordan 1' }), structuredQuery)).toBe(false);
+  });
+
+  it('a wrong brand is not accepted just because generic/contextual words of query.query match', () => {
+    const structuredQuery: NormalizedSearchQuery = { query: 'sneakers France', brand: 'Nike', model: 'Air Max' };
+    expect(isProductRelevant(offer({ title: 'Adidas sneakers France' }), structuredQuery)).toBe(false);
+  });
+
+  it('a query without brand nor model keeps filtering on query.query (fallback unchanged)', () => {
+    const freeTextQuery: NormalizedSearchQuery = { query: 'Nike Air Max sneakers France' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90' }), freeTextQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90 sneakers France' }), freeTextQuery)).toBe(true);
+  });
+
+  it('brand alone (no model) keeps the existing fallback — query.query tokens stay required', () => {
+    const brandOnlyQuery: NormalizedSearchQuery = { query: 'Nike running shoes', brand: 'Nike' };
+    expect(isProductRelevant(offer({ title: 'Nike Air Max 90' }), brandOnlyQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike running shoes' }), brandOnlyQuery)).toBe(true);
+  });
+
+  it('model alone (no brand) keeps the existing fallback — query.query tokens stay required', () => {
+    const modelOnlyQuery: NormalizedSearchQuery = { query: 'Nike Air Max sneakers', model: 'Air Max' };
+    expect(isProductRelevant(offer({ title: 'Adidas Air Max Clone' }), modelOnlyQuery)).toBe(false);
+    expect(isProductRelevant(offer({ title: 'Nike Air Max sneakers' }), modelOnlyQuery)).toBe(true);
   });
 });
 
