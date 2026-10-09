@@ -72,6 +72,37 @@ const logger = createLogger('sourcing-web');
 export const TAVILY_MAX_RAW_RESULTS = 10;
 
 /**
+ * Sourcing web search quality fix — a search engine's general relevance
+ * ranking has no notion of "this is a marketplace listing" vs "this is an
+ * unrelated video that happens to mention the same brand/product words"
+ * (e.g. a "Nike sneakers under 100 EUR" query can legitimately rank a
+ * popular haul/review/unboxing video above any real listing page, simply
+ * because that video's own title/description/transcript is well indexed
+ * for those exact words). Such a page can never yield a real offer here
+ * anyway (WebResultExtractionService never extracts a price/currency from
+ * a video page it has no commercial content to find one in — see that
+ * service's own "never guess" rule), so excluding it up front doesn't
+ * change WHAT this provider can return, only saves the extraction budget
+ * (MAX_CANDIDATES_FOR_EXTRACTION) from being spent on a candidate that was
+ * never going to produce a usable result.
+ *
+ * Deliberately narrow and explicit (per this fix's own brief): only the
+ * one video platform actually observed crowding out real listings is
+ * excluded here — never a broad guess at "every site that might not be
+ * commercial" (that would risk silently dropping a real marketplace this
+ * provider has never specifically verified, e.g. a lesser-known resale
+ * site). `youtube.com` is listed alongside its own `m.` mobile subdomain
+ * and its separate short-link domain `youtu.be` — Tavily's own
+ * domain-matching behavior for a bare domain against its subdomains is
+ * not confirmed from this environment (developer docs unreachable), so
+ * each real hostname this provider could plausibly see is named
+ * explicitly rather than assumed to be covered by a parent domain alone.
+ * Extend this list only with another real, specifically-observed
+ * non-commercial platform — never speculatively.
+ */
+export const EXCLUDED_WEB_SOURCING_DOMAINS: string[] = ['youtube.com', 'm.youtube.com', 'youtu.be'];
+
+/**
  * Hard cap on how many raw hits from ONE pass ever get a real LLM
  * extraction call — the deliberate cost/latency bound this task's brief
  * asked for ("Ne fais PAS un appel LLM illimité"). Candidates are
@@ -610,6 +641,12 @@ export class WebSourcingProvider implements SourcingProvider {
             const outcome = await engine.search({
               query: plannedQuery.queryText,
               maxResults: TAVILY_MAX_RAW_RESULTS,
+              // Sourcing web search quality fix — see
+              // EXCLUDED_WEB_SOURCING_DOMAINS' own comment. Applied to
+              // every pass uniformly (never only 'exact'), since a video
+              // page is exactly as unusable for a secondhand/outlet/
+              // recovery-phrased query as for the exact one.
+              excludeDomains: EXCLUDED_WEB_SOURCING_DOMAINS,
               // Omitted entirely for 'basic' (Tavily's own default) —
               // only the recovery pass's 'advanced' depth is ever sent
               // explicitly, so the default path's request shape is

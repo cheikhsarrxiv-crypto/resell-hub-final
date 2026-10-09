@@ -34,6 +34,7 @@ import {
   WebSourcingProvider,
   MAX_CANDIDATES_FOR_EXTRACTION,
   MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH,
+  EXCLUDED_WEB_SOURCING_DOMAINS,
   isProductRelevant,
   parseSourceDate,
 } from '@/services/sourcing/providers/WebSourcingProvider';
@@ -596,6 +597,66 @@ describe('WebSourcingProvider.searchProducts', () => {
     expect(queryArg.query).toContain('L');
     expect(queryArg.query).toContain('black');
     expect(queryArg.query).toContain('coats');
+  });
+
+  it('sourcing web search quality fix — transmits excludeDomains (including youtube.com) to the search engine on every call', async () => {
+    const engine = fakeEngine('tavily', []);
+    getConfiguredProvidersMock.mockReturnValue([engine]);
+    extractBatchMock.mockResolvedValue([]);
+
+    await provider.searchProducts({ query: 'Nike sneakers' });
+
+    const [queryArg] = engine.search.mock.calls[0];
+    expect(queryArg.excludeDomains).toEqual(EXCLUDED_WEB_SOURCING_DOMAINS);
+    expect(queryArg.excludeDomains).toContain('youtube.com');
+  });
+
+  it('sourcing web search quality fix — does not exclude real commercial domains (only the named video platform is excluded)', () => {
+    expect(EXCLUDED_WEB_SOURCING_DOMAINS).not.toContain('vinted.fr');
+    expect(EXCLUDED_WEB_SOURCING_DOMAINS).not.toContain('etsy.com');
+    expect(EXCLUDED_WEB_SOURCING_DOMAINS).not.toContain('vestiairecollective.com');
+    expect(EXCLUDED_WEB_SOURCING_DOMAINS).not.toContain('depop.com');
+  });
+
+  it('sourcing web search quality fix — every other search parameter (query, maxResults) stays unchanged alongside excludeDomains', async () => {
+    const engine = fakeEngine('tavily', []);
+    getConfiguredProvidersMock.mockReturnValue([engine]);
+    extractBatchMock.mockResolvedValue([]);
+
+    await provider.searchProducts({ query: 'Nike sneakers' });
+
+    const [queryArg] = engine.search.mock.calls[0];
+    expect(queryArg.query).toBe('Nike sneakers');
+    expect(queryArg.maxResults).toBe(10);
+  });
+
+  it('sourcing web search quality fix — a candidate from youtube.com, even if extraction somehow ran on it, still yields zero offers without a real price/currency (defense in depth, independent of excludeDomains)', async () => {
+    const youtubeHit = hit({
+      url: 'https://www.youtube.com/watch?v=abc123',
+      domain: 'www.youtube.com',
+      title: 'Nike Sneakers Haul Under $100!',
+      content: 'Watch my latest Nike sneaker haul video, all under $100 — like and subscribe!',
+    });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [youtubeHit])]);
+    // A video page has no commercial offer to extract — the extraction
+    // service never fabricates a price/currency from it (see
+    // WebResultExtractionService's own "never guess" rule) — modeled here
+    // exactly like its real "no offer" outcome.
+    extractBatchMock.mockResolvedValue([{ result: youtubeHit, outcome: { status: 'ok', data: offers() } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Nike sneakers' });
+
+    expect(outcome.results).toEqual([]);
+  });
+
+  it('sourcing web search quality fix — zero exploitable candidates still returns a real, honest empty result, never a fabricated offer', async () => {
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [])]);
+    extractBatchMock.mockResolvedValue([]);
+
+    const outcome = await provider.searchProducts({ query: 'Nike sneakers' });
+
+    expect(outcome.results).toEqual([]);
+    expect(outcome.error).toBeUndefined();
   });
 
   it('never invents a location — location intent not already in query.query is not added on its own', async () => {
