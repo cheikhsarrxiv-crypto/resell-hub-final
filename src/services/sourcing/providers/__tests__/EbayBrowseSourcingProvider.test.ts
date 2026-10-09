@@ -15,7 +15,7 @@ vi.mock('@/services/sourcing/providers/EbayApplicationTokenManager', () => ({
   EbayApplicationTokenTimeoutError: class EbayApplicationTokenTimeoutError extends Error {},
 }));
 
-import { EbayApplicationTokenManager } from '@/services/sourcing/providers/EbayApplicationTokenManager';
+import { EbayApplicationTokenManager, EbayApplicationTokenAuthError } from '@/services/sourcing/providers/EbayApplicationTokenManager';
 import { EbayBrowseSourcingProvider } from '@/services/sourcing/providers/EbayBrowseSourcingProvider';
 
 function searchResponse(itemSummaries: any[], overrides: Record<string, any> = {}) {
@@ -275,6 +275,56 @@ describe('EbayBrowseSourcingProvider.searchProducts', () => {
 
     expect(outcome.results).toEqual([]);
     expect(outcome.error?.kind).toBe('timeout');
+  });
+
+  // Diagnostic fix (eBay auth audit) — a failure to even MINT a token
+  // (EbayApplicationTokenManager.getAccessToken itself throwing) is a
+  // genuinely different cause than a 401/403 from the Browse API search
+  // call (see the "a 401 from eBay" test above, which mocks the search
+  // fetch itself, never the token step) — both still classify as
+  // kind: 'auth' (preserved, unchanged, for backward compatibility), but
+  // the message must now carry the real, already-safe diagnostic text
+  // instead of the old fixed, uninformative string.
+  it('a token-minting failure (missing credentials) -> kind stays "auth", message carries the real diagnostic text, no fabricated results', async () => {
+    (EbayApplicationTokenManager.getAccessToken as any).mockRejectedValue(
+      new EbayApplicationTokenAuthError('EBAY_BUY_API_CLIENT_ID/EBAY_BUY_API_CLIENT_SECRET are not set')
+    );
+
+    const outcome = await provider.searchProducts({ query: 'x' });
+
+    expect(outcome.results).toEqual([]);
+    expect(outcome.error?.kind).toBe('auth');
+    expect(outcome.error?.message).toBe(
+      'eBay token request failed: EBAY_BUY_API_CLIENT_ID/EBAY_BUY_API_CLIENT_SECRET are not set'
+    );
+    expect(outcome.error?.message).not.toBe('eBay authentication failed');
+  });
+
+  it('a token-minting failure (eBay OAuth error_description) -> kind stays "auth", the real eBay-reported reason is preserved', async () => {
+    (EbayApplicationTokenManager.getAccessToken as any).mockRejectedValue(
+      new EbayApplicationTokenAuthError('invalid_client')
+    );
+
+    const outcome = await provider.searchProducts({ query: 'x' });
+
+    expect(outcome.results).toEqual([]);
+    expect(outcome.error).toEqual({ provider: 'ebay', message: 'eBay token request failed: invalid_client', kind: 'auth' });
+  });
+
+  it('a token-minting failure message never contains a credential value or a minted token', async () => {
+    const clientId = 'real-client-id-123';
+    const clientSecret = 'super-secret-value-456';
+    const mintedToken = 'minted-access-token-789';
+    (EbayApplicationTokenManager.getAccessToken as any).mockRejectedValue(
+      new EbayApplicationTokenAuthError('eBay token request failed with status 400')
+    );
+
+    const outcome = await provider.searchProducts({ query: 'x' });
+
+    expect(outcome.error?.message).not.toContain(clientId);
+    expect(outcome.error?.message).not.toContain(clientSecret);
+    expect(outcome.error?.message).not.toContain(mintedToken);
+    expect(outcome.error?.message).toBe('eBay token request failed: eBay token request failed with status 400');
   });
 });
 

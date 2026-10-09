@@ -80,12 +80,36 @@ function buildFilterParam(query: NormalizedSearchQuery): string | undefined {
   return clauses.length > 0 ? clauses.join(',') : undefined;
 }
 
+/**
+ * Diagnostic fix (eBay auth audit) — EbayApplicationTokenAuthError's own
+ * `message` is real, useful diagnostic text, not a generic placeholder:
+ * EbayApplicationTokenManager only ever constructs it from one of three
+ * fixed forms, none of which can ever contain the client id/secret or a
+ * minted token:
+ *   - the literal "EBAY_BUY_API_CLIENT_ID/EBAY_BUY_API_CLIENT_SECRET are
+ *     not set" (a fixed string, just names the env vars, never their
+ *     values — the actual clientId/clientSecret variables are never
+ *     referenced after the token request is sent);
+ *   - eBay's OWN `error_description` from its token endpoint's JSON error
+ *     body — an OAuth2 error explanation (e.g. "invalid_client"), never an
+ *     echo of the credentials that were submitted (eBay's token endpoint,
+ *     like any OAuth2 authorization server, never echoes back the secret
+ *     it was asked to validate);
+ *   - "eBay token request failed with status {code}" — just the real
+ *     HTTP status code.
+ * Previously discarded here in favor of a fixed, uninformative string —
+ * the one, precise point this audit identified where a real, already-safe
+ * diagnostic signal was lost before ever reaching providerErrors/the
+ * agent. `kind` stays 'auth' unchanged (nothing reads this new message
+ * text to decide behavior — see the audit's own check that no code
+ * branches on `kind === 'auth'` today — so this is purely additive).
+ */
 function classifyFetchError(error: unknown): SourcingProviderErrorInfo {
   if (error instanceof EbayApplicationTokenTimeoutError || (error instanceof Error && error.name === 'TimeoutError')) {
     return { provider: 'ebay', message: 'Request to eBay timed out', kind: 'timeout' };
   }
   if (error instanceof EbayApplicationTokenAuthError) {
-    return { provider: 'ebay', message: 'eBay authentication failed', kind: 'auth' };
+    return { provider: 'ebay', message: `eBay token request failed: ${error.message}`, kind: 'auth' };
   }
   return { provider: 'ebay', message: 'eBay search request failed', kind: 'unknown' };
 }
