@@ -19,7 +19,7 @@
  * warnings; a fuller, still fully documented ranking) rather than
  * renaming/duplicating it.
  */
-import { NormalizedSearchQuery, NormalizedSourcingResult } from './types';
+import { AuthenticityStatus, NormalizedSearchQuery, NormalizedSourcingResult } from './types';
 
 /**
  * A single EUR conversion of the query's own price bounds, resolved ONCE
@@ -292,6 +292,22 @@ export function annotateResult(
         "This result's source link points to a page listing several offers (a category/search/brand page), not a direct link to this specific offer — opening it may show the general page rather than this exact item."
       );
     }
+
+    // Source freshness — attached here (not by WebSourcingProvider itself)
+    // for the exact same "warnings gets replaced wholesale by this
+    // function's own list" reason as the two warnings above. A page being
+    // reachable right now is never, by itself, evidence that a price/stock
+    // fact this old is still accurate — see
+    // NormalizedSourcingResult.sourceDateStatus's own comment.
+    if (result.sourceDateStatus === 'unknown') {
+      warnings.push(
+        'This page reports no publication date — how old this information is cannot be determined, and its accessibility right now is not evidence that its price/stock details are still current.'
+      );
+    } else if (result.sourceDateStatus === 'invalid') {
+      warnings.push(
+        "This page reported a publication date that could not be reliably interpreted — treat its age as unknown, and its accessibility right now is not evidence that its price/stock details are still current."
+      );
+    }
   }
 
   // --- Known-cost uncertainty ---
@@ -501,12 +517,22 @@ export function isUnresolvedListingPage(result: NormalizedSourcingResult): boole
  *
  * Deliberately NOT scored here (documented, not silently omitted):
  * "concurrence" (competition) — no provider/field in this codebase
- * reports how many other sellers list the same item; "fraîcheur du
- * résultat" (result freshness) — WebSearchResult.publishedDate exists on
- * the RAW web hit but is not threaded through to NormalizedSourcingResult
- * today, and most hits report no publish date at all. Both would need a
- * real signal this engine does not have; adding either now would mean
- * guessing, which this mission's own rules forbid.
+ * reports how many other sellers list the same item.
+ * "fraîcheur du résultat" (result freshness) — source freshness phase:
+ * sourceDateStatus/sourcePublishedAt/sourcePublishedAgeDays now ARE
+ * threaded through to NormalizedSourcingResult (see that type's own
+ * comments, set by WebSourcingProvider/SourcingService), but are still
+ * deliberately NOT folded into this additive score. Turning "how old is
+ * this" into a point value would require a universal staleness threshold
+ * (e.g. "more than N days is bad") applied the same way to every kind of
+ * question — but how old is "too old" genuinely depends on what's being
+ * asked (a typical-price question tolerates an old source; a
+ * right-now-in-stock question does not), which this engine has no way to
+ * know from the result alone. Imposing one fixed cutoff here would be
+ * exactly the kind of invented business rule this mission's own rules
+ * forbid — the real, raw signal is surfaced on the result instead, for
+ * the Agent to reason about per the nature of the reseller's actual
+ * question (see AiAgentService's own system prompt).
  */
 export function computeOpportunityScore(result: NormalizedSourcingResult): { score: number; factors: string[] } {
   let score = 0;
@@ -577,6 +603,90 @@ export function detectPriceConflict(
     priceA: `${a.price} ${a.currency.toUpperCase()}`,
     priceB: `${b.price} ${b.currency.toUpperCase()}`,
   };
+}
+
+/**
+ * Phase 2 (reliability of claims) — generalizes detectPriceConflict's own
+ * "exact duplicate disagreeing on a real fact" check to the other fields
+ * duplicate sources could genuinely disagree on: condition, availability,
+ * and authenticity (both the institutional authenticityStatus and the
+ * free-text authenticitySource claim). ONLY ever meant to be called by
+ * SourcingService.deduplicate() on two results it has ALREADY identified
+ * as the exact same offer (same provider+sourceId, or same sourceUrl when
+ * sourceId is absent) — never a broader "looks similar" match (see
+ * deduplicateWebResultsBySignal for that conservative-merge pass,
+ * deliberately untouched by this function). Two different sellers, two
+ * different variants, or two genuinely distinct listings are never
+ * compared here at all — that identity decision belongs entirely to the
+ * caller's own dedup key, not to this function.
+ *
+ * Absence is never a contradiction: an attribute where EITHER side has no
+ * real signal (`condition`/`availability`/`authenticitySource` undefined,
+ * or — for `authenticityStatus` specifically — 'unverified'/'unknown',
+ * its own documented "no signal" values, see AuthenticityStatus's own
+ * comment) is never flagged as conflicting with the other side; one
+ * source simply not reporting a fact the other one does is normal,
+ * asymmetric information, not a disagreement.
+ *
+ * Never decides which value is "correct" and never claims either source
+ * is wrong — both real values are returned so the caller can name them
+ * explicitly in a warning, exactly like detectPriceConflict already does
+ * for price.
+ */
+export interface AttributeConflict {
+  attribute: 'condition' | 'availability' | 'authenticityStatus' | 'authenticitySource';
+  valueA: string;
+  valueB: string;
+}
+
+/** 'unverified'/'unknown' are AuthenticityStatus's own documented "no real signal" values (see types.ts) — never treated as a real claim that could disagree with another source's real claim. */
+const AUTHENTICITY_NO_SIGNAL: ReadonlySet<AuthenticityStatus> = new Set(['unverified', 'unknown']);
+
+/** Case/whitespace-insensitive only — never a semantic interpretation of whether two different strings "really" mean the same thing (e.g. "used" vs "pre-owned" are left as a real, reportable difference, never silently equated). */
+function normalizedStringsDiffer(a: string, b: string): boolean {
+  return a.trim().toLowerCase() !== b.trim().toLowerCase();
+}
+
+export function detectAttributeConflicts(a: NormalizedSourcingResult, b: NormalizedSourcingResult): AttributeConflict[] {
+  const conflicts: AttributeConflict[] = [];
+
+  if (a.condition !== undefined && b.condition !== undefined && normalizedStringsDiffer(a.condition, b.condition)) {
+    conflicts.push({ attribute: 'condition', valueA: a.condition, valueB: b.condition });
+  }
+
+  if (a.availability !== undefined && b.availability !== undefined && normalizedStringsDiffer(a.availability, b.availability)) {
+    conflicts.push({ attribute: 'availability', valueA: a.availability, valueB: b.availability });
+  }
+
+  if (
+    !AUTHENTICITY_NO_SIGNAL.has(a.authenticityStatus) &&
+    !AUTHENTICITY_NO_SIGNAL.has(b.authenticityStatus) &&
+    a.authenticityStatus !== b.authenticityStatus
+  ) {
+    conflicts.push({ attribute: 'authenticityStatus', valueA: a.authenticityStatus, valueB: b.authenticityStatus });
+  }
+
+  if (
+    a.authenticitySource !== undefined &&
+    b.authenticitySource !== undefined &&
+    normalizedStringsDiffer(a.authenticitySource, b.authenticitySource)
+  ) {
+    conflicts.push({ attribute: 'authenticitySource', valueA: a.authenticitySource, valueB: b.authenticitySource });
+  }
+
+  return conflicts;
+}
+
+const ATTRIBUTE_CONFLICT_LABEL: Record<AttributeConflict['attribute'], string> = {
+  condition: 'Condition conflict',
+  availability: 'Availability conflict',
+  authenticityStatus: 'Authenticity status conflict',
+  authenticitySource: 'Authenticity claim conflict',
+};
+
+/** Mirrors detectPriceConflict's own warning phrasing exactly ("shown with the first value found; verify before relying on it") — never asserts which value is correct. */
+export function formatAttributeConflictWarning(conflict: AttributeConflict): string {
+  return `${ATTRIBUTE_CONFLICT_LABEL[conflict.attribute]}: this exact listing was reported as both "${conflict.valueA}" and "${conflict.valueB}" by duplicate sources — shown with the first value found; verify before relying on it.`;
 }
 
 /**

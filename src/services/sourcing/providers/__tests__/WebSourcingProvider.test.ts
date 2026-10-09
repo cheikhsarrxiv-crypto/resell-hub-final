@@ -35,6 +35,7 @@ import {
   MAX_CANDIDATES_FOR_EXTRACTION,
   MAX_TOTAL_EXTRACTION_CALLS_PER_SEARCH,
   isProductRelevant,
+  parseSourceDate,
 } from '@/services/sourcing/providers/WebSourcingProvider';
 import { ExtractedWebOffer } from '@/services/sourcing/WebResultExtractionService';
 import { NormalizedSearchQuery } from '@/services/sourcing/types';
@@ -285,6 +286,41 @@ describe('WebSourcingProvider.getProductDetails', () => {
   });
 });
 
+// Source freshness (Phase 1) — deterministic, mechanical parsing of
+// Tavily's own reported publishedDate. No guessing, no default to "now".
+describe('parseSourceDate (source freshness)', () => {
+  it('a real, parseable past date -> "known", with a normalized ISO value', () => {
+    const result = parseSourceDate('2024-03-15T00:00:00Z');
+    expect(result.status).toBe('known');
+    expect(result.iso).toBe(new Date('2024-03-15T00:00:00Z').toISOString());
+  });
+
+  it('undefined (no date reported at all) -> "unknown", never defaulted to today', () => {
+    const result = parseSourceDate(undefined);
+    expect(result.status).toBe('unknown');
+    expect(result.iso).toBeUndefined();
+  });
+
+  it('a malformed, non-date string -> "invalid", never silently treated as unknown or as a real date', () => {
+    const result = parseSourceDate('not-a-real-date');
+    expect(result.status).toBe('invalid');
+    expect(result.iso).toBeUndefined();
+  });
+
+  it('a date further in the future than this engine could trust -> "invalid" (a page cannot honestly be "published" in the future)', () => {
+    const farFuture = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    const result = parseSourceDate(farFuture);
+    expect(result.status).toBe('invalid');
+    expect(result.iso).toBeUndefined();
+  });
+
+  it('a date essentially "now" (within clock-skew tolerance) is still "known", never incorrectly rejected as future/invalid', () => {
+    const justNow = new Date().toISOString();
+    const result = parseSourceDate(justNow);
+    expect(result.status).toBe('known');
+  });
+});
+
 describe('WebSourcingProvider.searchProducts', () => {
   let provider: WebSourcingProvider;
 
@@ -316,6 +352,71 @@ describe('WebSourcingProvider.searchProducts', () => {
     expect(result.price).toBe(220);
     expect(result.currency).toBe('EUR');
     expect(result.marketplace).toBe('vinted');
+  });
+
+  it('source freshness — the raw hit\'s own publishedDate becomes a real, parsed sourcePublishedAt and sourceDateStatus "known" on the result', async () => {
+    const rawHit = hit({ publishedDate: '2024-06-01T00:00:00Z' });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([{ result: rawHit, outcome: { status: 'ok', data: offers(FULL_OFFER) } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].sourceDateStatus).toBe('known');
+    expect(outcome.results[0].sourcePublishedAt).toBe(new Date('2024-06-01T00:00:00Z').toISOString());
+  });
+
+  it('source freshness — a raw hit with no publishedDate at all becomes sourceDateStatus "unknown", never a guessed date', async () => {
+    const rawHit = hit({ publishedDate: undefined });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([{ result: rawHit, outcome: { status: 'ok', data: offers(FULL_OFFER) } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].sourceDateStatus).toBe('unknown');
+    expect(outcome.results[0].sourcePublishedAt).toBeUndefined();
+  });
+
+  it('source freshness — a raw hit with an unparseable publishedDate becomes sourceDateStatus "invalid", never coerced', async () => {
+    const rawHit = hit({ publishedDate: 'sometime last year maybe' });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([{ result: rawHit, outcome: { status: 'ok', data: offers(FULL_OFFER) } }]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].sourceDateStatus).toBe('invalid');
+    expect(outcome.results[0].sourcePublishedAt).toBeUndefined();
+  });
+
+  it('source freshness — several distinct offers extracted from the SAME raw page all share that one page\'s own sourceDateStatus/sourcePublishedAt (one page, one publish date)', async () => {
+    const rawHit = hit({ publishedDate: '2024-01-10T00:00:00Z' });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([
+      {
+        result: rawHit,
+        outcome: { status: 'ok', data: offers({ ...FULL_OFFER, price: 100 }, { ...FULL_OFFER, price: 150, size: 'M' }) },
+      },
+    ]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results).toHaveLength(2);
+    expect(outcome.results[0].sourceDateStatus).toBe('known');
+    expect(outcome.results[1].sourceDateStatus).toBe('known');
+    expect(outcome.results[0].sourcePublishedAt).toBe(outcome.results[1].sourcePublishedAt);
+  });
+
+  it('never sets authenticityStatus "verified" or any priceVerifiedAt for a web result, no matter how fresh/recent its publish date is — no institutional program and no real re-verification exist for this provider', async () => {
+    const rawHit = hit({ publishedDate: new Date().toISOString() });
+    getConfiguredProvidersMock.mockReturnValue([fakeEngine('tavily', [rawHit])]);
+    extractBatchMock.mockResolvedValue([
+      { result: rawHit, outcome: { status: 'ok', data: offers({ ...FULL_OFFER, authenticityClaim: '100% authentic, with receipt' }) } },
+    ]);
+
+    const outcome = await provider.searchProducts({ query: 'Stone Island jacket' });
+
+    expect(outcome.results[0].authenticityStatus).not.toBe('verified');
+    expect(outcome.results[0].authenticityStatus).toBe('claimed');
+    expect((outcome.results[0] as any).priceVerifiedAt).toBeUndefined();
   });
 
   it('extraction reporting offers: [] (e.g. a non-offer page) -> excluded from results, never forced into a result', async () => {

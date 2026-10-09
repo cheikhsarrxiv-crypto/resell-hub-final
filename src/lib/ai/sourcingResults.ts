@@ -206,6 +206,21 @@ export function formatUnknownCostFactor(factor: string): string {
 }
 
 /**
+ * Source freshness — a plain-language rendering of a KNOWN
+ * sourcePublishedAgeDays (never called for 'unknown'/'invalid'/undefined
+ * sourceDateStatus — those are only ever surfaced via the card's own
+ * warnings list, which already carries the real caveat sentence; this
+ * helper exists only for the positive "we do have a real age" case).
+ * Deliberately never implies verification — this is the SOURCE's own
+ * claimed publish date, not something ADKSY re-checked.
+ */
+export function formatSourcePublishedAge(ageDays: number): string {
+  if (ageDays <= 0) return "Page publiée aujourd'hui (selon la source)";
+  if (ageDays === 1) return 'Page publiée hier (selon la source)';
+  return `Page publiée il y a ${ageDays} jours (selon la source)`;
+}
+
+/**
  * Phase 4 — a display name for a bare SourcingProvider.name (e.g. from
  * providersSearched/providersFailed/providersUnavailable/providersSkipped
  * — no marketplace value available for these, unlike a specific result).

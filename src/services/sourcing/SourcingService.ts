@@ -17,6 +17,8 @@ import {
   classifyResultQuality,
   computeOpportunityScore,
   detectPriceConflict,
+  detectAttributeConflicts,
+  formatAttributeConflictWarning,
   isUnresolvedListingPage,
   ResolvedPriceBounds,
 } from './OpportunityRankingService';
@@ -63,13 +65,22 @@ function deduplicate(results: NormalizedSourcingResult[]): NormalizedSourcingRes
     // NormalizedSourcingResult.verificationStatus's own comment for why
     // this is the one, narrow case this engine actually sets it.
     const conflict = detectPriceConflict(existing, result);
-    if (conflict.conflicting) {
+    // Phase 2 (reliability of claims) — the exact same "exact duplicate
+    // disagreeing on a real fact" check, extended to condition/
+    // availability/authenticity (see detectAttributeConflicts' own
+    // comment for exactly why this never fires on mere absence of data,
+    // and never on two results that aren't already this same dedup key).
+    const attributeConflicts = detectAttributeConflicts(existing, result);
+    if (conflict.conflicting || attributeConflicts.length > 0) {
       seen.set(key, {
         ...existing,
         verificationStatus: 'conflicting',
         warnings: [
           ...(existing.warnings ?? []),
-          `Price conflict: this exact listing was reported as both ${conflict.priceA} and ${conflict.priceB} by duplicate sources — shown with the first price found; verify before relying on it.`,
+          ...(conflict.conflicting
+            ? [`Price conflict: this exact listing was reported as both ${conflict.priceA} and ${conflict.priceB} by duplicate sources — shown with the first price found; verify before relying on it.`]
+            : []),
+          ...attributeConflicts.map(formatAttributeConflictWarning),
         ],
       });
     }
@@ -638,7 +649,26 @@ export class SourcingService {
 
     const overallLimit = query.limit ?? DEFAULT_OVERALL_LIMIT;
     const balanced = balanceByProvider(kept, overallLimit);
-    const results = sortResults(balanced, query.sort);
+    const sorted = sortResults(balanced, query.sort);
+
+    // Source freshness — `retrievedAt` is the one, real instant THIS
+    // search actually ran, stamped identically onto every result
+    // regardless of provider (see NormalizedSourcingResult.retrievedAt's
+    // own comment: this is never a "verification", only "we fetched this
+    // at this time"). `sourcePublishedAgeDays` is then a deterministic
+    // subtraction from a result's own already-real, already-validated
+    // `sourcePublishedAt` (set upstream by WebSourcingProvider, never
+    // re-parsed or re-validated here) — computed once, centrally, rather
+    // than duplicated per provider, since "how long ago was this search"
+    // is the same question for every provider's results in one response.
+    const retrievedAtIso = new Date(searchStartedAt).toISOString();
+    const results = sorted.map((result) => {
+      const sourcePublishedAgeDays =
+        result.sourceDateStatus === 'known' && result.sourcePublishedAt
+          ? Math.max(0, Math.floor((searchStartedAt - new Date(result.sourcePublishedAt).getTime()) / (24 * 60 * 60 * 1000)))
+          : undefined;
+      return { ...result, retrievedAt: retrievedAtIso, sourcePublishedAgeDays };
+    });
 
     const diagnostics: SourcingSearchDiagnostics = {
       rawResultsBeforeFiltering: rawResults.length,

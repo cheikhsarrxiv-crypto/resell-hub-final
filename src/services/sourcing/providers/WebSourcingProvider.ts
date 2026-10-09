@@ -55,6 +55,7 @@ import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
   RejectedSample,
+  SourceDateStatus,
   SourcingProvider,
   SourcingProviderCapability,
   SourcingProviderErrorInfo,
@@ -120,6 +121,33 @@ function deriveMarketplace(domain: string | undefined): string {
   if (!domain) return 'web';
   const bare = domain.replace(/^www\./, '');
   return KNOWN_DOMAIN_MARKETPLACE_NAMES[bare] ?? bare;
+}
+
+/**
+ * Source freshness — a purely mechanical parse of WebSearchResult.publishedDate
+ * (itself already normalized to undefined for an empty string by
+ * TavilyWebSearchProvider — see that type's own comment). Never infers a
+ * date from anything else (title/content/url) — only this one real,
+ * source-reported field is ever consulted. A date that parses but lands
+ * further in the future than this provider's own clock, beyond a small
+ * tolerance for clock skew, is treated as 'invalid': a source claiming to
+ * be "published" in the future is not a real publish date this engine can
+ * trust, and must never be surfaced as if it were.
+ */
+const FUTURE_DATE_TOLERANCE_MS = 24 * 60 * 60 * 1000;
+
+export function parseSourceDate(publishedDate: string | undefined): { status: SourceDateStatus; iso?: string } {
+  if (!publishedDate) {
+    return { status: 'unknown' };
+  }
+  const parsedMs = new Date(publishedDate).getTime();
+  if (Number.isNaN(parsedMs)) {
+    return { status: 'invalid' };
+  }
+  if (parsedMs > Date.now() + FUTURE_DATE_TOLERANCE_MS) {
+    return { status: 'invalid' };
+  }
+  return { status: 'known', iso: new Date(parsedMs).toISOString() };
 }
 
 // Location/region intent (e.g. "in France", "in Europe") is NEVER added
@@ -435,6 +463,12 @@ function toNormalizedResults(
   // only matters for a caller that bypasses that schema entirely (as this
   // provider's own unit tests do, mocking extractBatch directly).
   const pageType = extracted.pageType ?? 'UNKNOWN';
+  // Source freshness — ONE date per raw page (Tavily reports exactly one
+  // publishedDate per hit, never one per offer), applied identically to
+  // every offer extracted from it. Never re-parsed per offer: that would
+  // risk a different outcome for two offers from the very same page/date,
+  // which would be incoherent (the page was published once).
+  const sourceDate = parseSourceDate(raw.publishedDate);
   // Provenance (Option A audit, point 3): when a page yields more than one
   // offer, every one of those results shares the SAME raw.url (Tavily
   // never gives this provider a distinct per-offer URL — see
@@ -488,6 +522,8 @@ function toNormalizedResults(
     color: offer.color ?? undefined,
     availability: offer.availability ?? undefined,
     pageType,
+    sourceDateStatus: sourceDate.status,
+    sourcePublishedAt: sourceDate.iso,
     foundByQuery: plannedQuery.queryText,
     searchPass: plannedQuery.pass,
     // Deep Web Sourcing Engine (mission section 13) — the one, honest

@@ -166,6 +166,14 @@ describe('get_listing tool definition', () => {
     expect(result.listing.updatedAt).toBe('2026-01-02T00:00:00.000Z');
   });
 
+  it('Phase 2 (reliability of claims) — never fabricates a "last synced at" timestamp: no such field exists on the result, only the real syncStatus outcome and the generic updatedAt (which is never a sync date)', async () => {
+    const result: any = await getListingTool.handler('ws-1', { listingId: 'listing-1' });
+
+    expect(result.listing.lastSyncedAt).toBeUndefined();
+    expect(Object.keys(result.listing)).not.toContain('lastSyncedAt');
+    expect(Object.keys(result.listing)).not.toContain('syncedAt');
+  });
+
   it('5. optional info absent -> no field is invented, everything comes back null/absent as appropriate', async () => {
     getListingMock.mockResolvedValue(
       makeListing({

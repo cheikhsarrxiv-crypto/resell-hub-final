@@ -11,8 +11,10 @@ import {
   classifyResultQuality,
   compareColor,
   computeOpportunityScore,
+  detectAttributeConflicts,
   detectPriceConflict,
   explainClassification,
+  formatAttributeConflictWarning,
   isLikelyListingPageUrl,
   isUnresolvedListingPage,
   normalizeColorTokens,
@@ -782,5 +784,113 @@ describe('explainClassification — Web Sourcing smoke-test fix (section 3)', ()
         expect(reason).toBeUndefined();
       }
     }
+  });
+});
+
+/**
+ * Phase 2 (reliability of claims) — detectAttributeConflicts. Mirrors
+ * detectPriceConflict's own contract (never decide which value is
+ * "correct", just report both real values) extended to condition/
+ * availability/authenticity. Always exercised on two `makeResult()`
+ * results sharing the SAME identity in spirit (SourcingService.deduplicate
+ * is the only real caller, and it only ever calls this on two results it
+ * already identified as the exact same offer) — this file tests the pure
+ * comparison logic itself, never the identity decision (that belongs to
+ * SourcingService.test.ts's own dedup-key tests).
+ */
+describe('detectAttributeConflicts (Phase 2 — reliability of claims)', () => {
+  it('same article, CONTRADICTORY condition -> one real conflict, both values preserved, neither declared correct', () => {
+    const a = makeResult({ condition: 'used' });
+    const b = makeResult({ condition: 'new' });
+
+    const conflicts = detectAttributeConflicts(a, b);
+
+    expect(conflicts).toEqual([{ attribute: 'condition', valueA: 'used', valueB: 'new' }]);
+  });
+
+  it('same article, CONTRADICTORY authenticity claim text -> a real authenticitySource conflict', () => {
+    const a = makeResult({ authenticitySource: '100% authentic, with receipt' });
+    const b = makeResult({ authenticitySource: 'no proof of authenticity provided' });
+
+    const conflicts = detectAttributeConflicts(a, b);
+
+    expect(conflicts).toEqual([
+      { attribute: 'authenticitySource', valueA: '100% authentic, with receipt', valueB: 'no proof of authenticity provided' },
+    ]);
+  });
+
+  it('same article, CONTRADICTORY authenticityStatus (both carry a real signal) -> a real conflict', () => {
+    const a = makeResult({ authenticityStatus: 'verified', authenticitySource: 'eBay Authenticity Guarantee' });
+    const b = makeResult({ authenticityStatus: 'claimed', authenticitySource: 'eBay Authenticity Guarantee' });
+
+    const conflicts = detectAttributeConflicts(a, b);
+
+    expect(conflicts.some((c) => c.attribute === 'authenticityStatus')).toBe(true);
+  });
+
+  it('same offer, CONTRADICTORY availability -> a real availability conflict', () => {
+    const a = makeResult({ availability: 'IN_STOCK' });
+    const b = makeResult({ availability: 'OUT_OF_STOCK' });
+
+    const conflicts = detectAttributeConflicts(a, b);
+
+    expect(conflicts).toEqual([{ attribute: 'availability', valueA: 'IN_STOCK', valueB: 'OUT_OF_STOCK' }]);
+  });
+
+  it('identical results on every comparable attribute -> NO artificial conflict at all', () => {
+    const a = makeResult({ condition: 'used', availability: 'IN_STOCK', authenticitySource: 'seller claim' });
+    const b = makeResult({ condition: 'used', availability: 'IN_STOCK', authenticitySource: 'seller claim' });
+
+    expect(detectAttributeConflicts(a, b)).toEqual([]);
+  });
+
+  it('case/whitespace-only differences are NOT a conflict (never a false positive on formatting alone)', () => {
+    const a = makeResult({ condition: 'Used' });
+    const b = makeResult({ condition: '  used  ' });
+
+    expect(detectAttributeConflicts(a, b)).toEqual([]);
+  });
+
+  it('missing data on ONE side is never treated as a contradiction — absence is not disagreement', () => {
+    const withCondition = makeResult({ condition: 'used' });
+    const withoutCondition = makeResult({ condition: undefined });
+    const withAvailability = makeResult({ availability: 'IN_STOCK' });
+    const withoutAvailability = makeResult({ availability: undefined });
+    const withClaim = makeResult({ authenticitySource: 'seller claim' });
+    const withoutClaim = makeResult({ authenticitySource: undefined });
+
+    expect(detectAttributeConflicts(withCondition, withoutCondition)).toEqual([]);
+    expect(detectAttributeConflicts(withAvailability, withoutAvailability)).toEqual([]);
+    expect(detectAttributeConflicts(withClaim, withoutClaim)).toEqual([]);
+  });
+
+  it('authenticityStatus "unverified"/"unknown" (no real signal) is never a conflict with a real "verified"/"claimed" signal on the other side', () => {
+    const verified = makeResult({ authenticityStatus: 'verified', authenticitySource: 'eBay Authenticity Guarantee' });
+    const unverified = makeResult({ authenticityStatus: 'unverified' });
+    const claimed = makeResult({ authenticityStatus: 'claimed', authenticitySource: 'seller says authentic' });
+    const unknown = makeResult({ authenticityStatus: 'unknown' });
+
+    expect(detectAttributeConflicts(verified, unverified).some((c) => c.attribute === 'authenticityStatus')).toBe(false);
+    expect(detectAttributeConflicts(claimed, unknown).some((c) => c.attribute === 'authenticityStatus')).toBe(false);
+  });
+
+  it('several real conflicts on the same pair are ALL reported, never just the first one found', () => {
+    const a = makeResult({ condition: 'used', availability: 'IN_STOCK' });
+    const b = makeResult({ condition: 'new', availability: 'OUT_OF_STOCK' });
+
+    const conflicts = detectAttributeConflicts(a, b);
+
+    expect(conflicts).toHaveLength(2);
+    expect(conflicts.map((c) => c.attribute).sort()).toEqual(['availability', 'condition']);
+  });
+
+  it('formatAttributeConflictWarning names the exact attribute and both real values, never asserting which is correct', () => {
+    const warning = formatAttributeConflictWarning({ attribute: 'condition', valueA: 'used', valueB: 'new' });
+
+    expect(warning).toContain('Condition conflict');
+    expect(warning).toContain('"used"');
+    expect(warning).toContain('"new"');
+    expect(warning.toLowerCase()).not.toContain('is wrong');
+    expect(warning.toLowerCase()).not.toContain('is correct');
   });
 });

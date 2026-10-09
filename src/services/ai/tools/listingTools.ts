@@ -39,6 +39,17 @@ const getListingInputSchema = z.object({
  *   real live-stock source of truth, distinct from Product.quantity,
  *   see that field's own schema comment) are returned as-is, letting the
  *   model reason over real data instead of a computed guess.
+ * - Phase 2 (reliability of claims) — `syncStatus` ("synced"/"pending"/
+ *   "failed") has NO accompanying "last synced at" timestamp: unlike
+ *   Inventory (which has a real `lastSyncedAt` column), Listing's own
+ *   schema has no such field (see prisma/schema.prisma's Listing model —
+ *   adding one would need a migration, out of scope here). `updatedAt`
+ *   is NOT a substitute: it is bumped by ANY update to the row, including
+ *   a manual edit that has nothing to do with marketplace sync, so it
+ *   must never be presented as "last synced"/"last confirmed against the
+ *   marketplace" — doing so would be inventing a sync date ADKSY doesn't
+ *   actually have. The tool's own description below tells the model this
+ *   explicitly.
  */
 function formatListingForAgent(
   listing: NonNullable<Awaited<ReturnType<typeof ListingService.getListing>>>,
@@ -100,6 +111,7 @@ export const getListingTool: AgentToolDefinition<{ listingId: string }> = {
     'Read-only — never modifies, publishes, delists, or negotiates anything, and never requires confirmation. ' +
     "Returns only fields that are actually stored in ADKSY — a field that isn't set comes back as null or is simply absent, never guessed or invented " +
     "(this includes authenticity, which is not stored on a real Listing at all, and shipping carrier/tracking, which only exist once a real order/shipment exists). " +
+    "syncStatus ('synced'/'pending'/'failed') says the listing's last known sync outcome, but ADKSY does not store WHEN that sync happened — there is no reliable 'last synced at' timestamp for a Listing. updatedAt is NOT that timestamp (it changes on any edit to the row, sync-related or not, e.g. a manual price change) and must never be presented as a sync date. If asked how recently this listing was synced, say plainly that this isn't known rather than inferring a date from updatedAt or from syncStatus alone. " +
     "Returns { found: false } if the listing doesn't exist in this workspace — never another workspace's listing, and never reveals whether a listing with that id exists elsewhere.",
   category: 'read',
   inputSchema: getListingInputSchema,
@@ -179,6 +191,7 @@ export const getListingsTool: AgentToolDefinition<GetListingsInput> = {
     'marketplace filters on the listing\'s real MarketplaceConnection, never guessed. productId/sku narrow to a single product\'s listings ' +
     "(sku is resolved to a product in this workspace first; an unknown sku returns { found: false }, never another workspace's product). " +
     'For a single already-known listing id, use get_listing instead. ' +
+    "syncStatus tells you the last known sync OUTCOME, never WHEN it happened — ADKSY stores no reliable 'last synced at' timestamp for a Listing (unlike Inventory, which has one). Never present updatedAt as a sync date, and say plainly that the sync date isn't known if asked. " +
     'Never returns OAuth tokens, API credentials, or any other MarketplaceConnection secret, nor invented profit/margin figures.',
   category: 'read',
   inputSchema: getListingsInputSchema,

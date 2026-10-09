@@ -106,10 +106,16 @@ describe('SourcingService.search', () => {
         classification: 'WEB_LEAD',
         // Web Sourcing smoke-test fix (section 3) — explicit, derived reason.
         classificationReason: 'listing quality is LOW (availability not confirmed, condition not confirmed)',
+        // Source freshness — stamped onto every result by SourcingService
+        // itself, regardless of provider; a real ISO instant, asserted
+        // separately below rather than as a literal (it's `Date.now()` at
+        // search time, not a fixed value this test can predict).
+        retrievedAt: expect.any(String),
       },
     ]);
     expect(response.providerErrors).toEqual([]);
     expect(response.totalResults).toBe(1);
+    expect(() => new Date(response.results[0].retrievedAt as string).toISOString()).not.toThrow();
   });
 
   it('never fabricates a result: an empty provider response stays an empty result set', async () => {
@@ -1432,5 +1438,266 @@ describe('SourcingService.search — classificationReason (Web Sourcing smoke-te
 
     expect(response.results).toEqual([]);
     expect(response.results.some((r: any) => r.classification === 'REJECTED')).toBe(false);
+  });
+});
+
+/**
+ * Source freshness and reliability (Phase 1 — fraîcheur des sources et
+ * tests de fiabilité). WebSourcingProvider.test.ts already covers how
+ * sourceDateStatus/sourcePublishedAt get COMPUTED from a raw web hit
+ * (parseSourceDate) — these tests instead cover what SourcingService
+ * itself does with that real signal once a provider has already set it:
+ * stamping `retrievedAt` uniformly, computing `sourcePublishedAgeDays`
+ * deterministically, and never excluding/upgrading a result based on
+ * freshness alone (no universal staleness threshold, no fabricated
+ * "verified" status). `fakeResult({ source: 'web', ... })` here simulates
+ * exactly what WebSourcingProvider would have already produced, the same
+ * way every other test in this file simulates a provider's own real
+ * output — it never re-tests WebSourcingProvider's own parsing logic.
+ */
+describe('SourcingService.search — source freshness and reliability (Phase 1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('stamps a real, valid, identical retrievedAt on every result of one search, regardless of provider', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1' });
+    const b = fakeResult({ sourceUrl: 'https://x/2', price: 20 });
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(2);
+    for (const result of response.results) {
+      expect(typeof (result as any).retrievedAt).toBe('string');
+      expect(() => new Date((result as any).retrievedAt).toISOString()).not.toThrow();
+    }
+    expect((response.results[0] as any).retrievedAt).toBe((response.results[1] as any).retrievedAt);
+  });
+
+  it('a "web" result with a known publish date gets a real, deterministic sourcePublishedAgeDays, computed from the search\'s own retrievedAt — never from a separately guessed "today"', async () => {
+    const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const web = fakeResult({ source: 'web', sourceDateStatus: 'known', sourcePublishedAt: fiveDaysAgo });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [web] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect((response.results[0] as any).sourcePublishedAgeDays).toBe(5);
+  });
+
+  it('a "web" result with a KNOWN but VERY OLD publish date is still returned, never excluded — no universal staleness cutoff is imposed on every category of question', async () => {
+    const twoYearsAgo = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString();
+    const web = fakeResult({ source: 'web', sourceDateStatus: 'known', sourcePublishedAt: twoYearsAgo });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [web] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect((response.results[0] as any).sourcePublishedAgeDays).toBeGreaterThanOrEqual(729);
+  });
+
+  it('a "web" result with NO known publish date (sourceDateStatus "unknown") is kept — never excluded, never defaulted to "recent" — and carries an explicit warning that its age cannot be assessed', async () => {
+    const web = fakeResult({ source: 'web', sourceDateStatus: 'unknown' });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [web] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect((response.results[0] as any).sourcePublishedAgeDays).toBeUndefined();
+    expect((response.results[0] as any).warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('reports no publication date')])
+    );
+  });
+
+  it('a "web" result with an INVALID/ambiguous publish date is treated exactly like "unknown" — never coerced into a fabricated date or age', async () => {
+    const web = fakeResult({ source: 'web', sourceDateStatus: 'invalid' });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [web] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect((response.results[0] as any).sourcePublishedAgeDays).toBeUndefined();
+    expect((response.results[0] as any).sourcePublishedAt).toBeUndefined();
+    expect((response.results[0] as any).warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('could not be reliably interpreted')])
+    );
+  });
+
+  it('a non-"web" provider (eBay/Etsy) never carries sourceDateStatus/sourcePublishedAt/sourcePublishedAgeDays — there is no publish-date concept for a live marketplace listing, and this must never be fabricated for it', async () => {
+    const ebayResult = fakeResult();
+    const ebay = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [ebayResult] }) });
+    getAllProvidersMock.mockReturnValue([ebay]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect((response.results[0] as any).sourceDateStatus).toBeUndefined();
+    expect((response.results[0] as any).sourcePublishedAt).toBeUndefined();
+    expect((response.results[0] as any).sourcePublishedAgeDays).toBeUndefined();
+    // retrievedAt still applies uniformly, regardless of provider:
+    expect((response.results[0] as any).retrievedAt).toBeDefined();
+  });
+
+  it('never marks a result "verified" or sets priceVerifiedAt based on freshness/recency alone — no code path performs a real live re-verification today', async () => {
+    const recentWeb = fakeResult({ source: 'web', sourceDateStatus: 'known', sourcePublishedAt: new Date().toISOString() });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [recentWeb] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].authenticityStatus).not.toBe('verified');
+    expect((response.results[0] as any).priceVerifiedAt).toBeUndefined();
+  });
+
+  it('preserves the real, exact sourceUrl through the full pipeline (dedup, annotation, freshness stamping, sort) — never altered, never regenerated', async () => {
+    const realUrl = 'https://vinted.fr/items/123456-stone-island-jacket?ref=search';
+    const web = fakeResult({ source: 'web', sourceUrl: realUrl, sourceDateStatus: 'unknown' });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [web] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].sourceUrl).toBe(realUrl);
+  });
+});
+
+/**
+ * Attribute conflict detection (Phase 2 — reliability of claims).
+ * detectAttributeConflicts itself (pure logic) is tested directly in
+ * OpportunityRankingService.test.ts — these tests cover what
+ * SourcingService.deduplicate() does with it: only ever comparing two
+ * results it has ALREADY identified as the exact same offer (same
+ * sourceUrl here, since these fakeResult()s set no sourceId), never a
+ * broader match, and never losing the existing price-conflict behavior.
+ */
+describe('SourcingService.search — attribute conflict detection (Phase 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('two exact duplicates (same sourceUrl) disagreeing on CONDITION -> one survivor, verificationStatus "conflicting", explicit warning naming both conditions, neither declared correct', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', condition: 'used' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', condition: 'new' });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBe('conflicting');
+    // First found is kept, never silently overwritten by the second — but
+    // never claimed to be "the correct one" either (see the warning text).
+    expect(response.results[0].condition).toBe('used');
+    expect(response.results[0].warnings).toEqual(expect.arrayContaining([expect.stringContaining('Condition conflict')]));
+    const warning = (response.results[0].warnings as string[]).find((w) => w.includes('Condition conflict'))!;
+    expect(warning).toContain('"used"');
+    expect(warning).toContain('"new"');
+  });
+
+  it('two exact duplicates disagreeing on AUTHENTICITY CLAIM text -> conflict reported, both claims preserved', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', authenticitySource: '100% authentic, with receipt' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', authenticitySource: 'no proof of authenticity given' });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBe('conflicting');
+    expect(response.results[0].warnings).toEqual(expect.arrayContaining([expect.stringContaining('Authenticity claim conflict')]));
+  });
+
+  it('two exact duplicates disagreeing on AVAILABILITY -> conflict reported', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', availability: 'IN_STOCK' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', availability: 'OUT_OF_STOCK' });
+    const provider = makeFakeProvider('web', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBe('conflicting');
+    expect(response.results[0].warnings).toEqual(expect.arrayContaining([expect.stringContaining('Availability conflict')]));
+  });
+
+  it('two IDENTICAL duplicates on every comparable attribute -> no artificial conflict at all', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', condition: 'used', availability: 'IN_STOCK' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', condition: 'used', availability: 'IN_STOCK' });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBeUndefined();
+  });
+
+  it('missing data on one of two duplicates (condition reported on only one) -> never a false conflict', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', condition: 'used' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', condition: undefined });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBeUndefined();
+    // The one real value that WAS reported is preserved, never discarded.
+    expect(response.results[0].condition).toBe('used');
+  });
+
+  it('two DIFFERENT listings (different sourceUrl, different seller) with different condition are never fused and never flagged as conflicting with each other', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', condition: 'used', seller: { name: 'SellerA' } });
+    const b = fakeResult({ sourceUrl: 'https://x/2', condition: 'new', seller: { name: 'SellerB' } });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(2);
+    expect(response.results.every((r) => r.verificationStatus !== 'conflicting')).toBe(true);
+    // Each listing's own condition stays its own — never blended.
+    expect(response.results.map((r) => r.condition).sort()).toEqual(['new', 'used']);
+  });
+
+  it('the existing PRICE conflict behavior is fully preserved, unchanged, alongside the new attribute checks', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', price: 100 });
+    const b = fakeResult({ sourceUrl: 'https://x/1', price: 150 });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results).toHaveLength(1);
+    expect(response.results[0].verificationStatus).toBe('conflicting');
+    expect(response.results[0].warnings).toEqual(expect.arrayContaining([expect.stringContaining('Price conflict')]));
+  });
+
+  it('a result with BOTH a price conflict and an attribute conflict reports both warnings together, never just one', async () => {
+    const a = fakeResult({ sourceUrl: 'https://x/1', price: 100, condition: 'used' });
+    const b = fakeResult({ sourceUrl: 'https://x/1', price: 150, condition: 'new' });
+    const provider = makeFakeProvider('ebay', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('Price conflict'), expect.stringContaining('Condition conflict')])
+    );
+  });
+
+  it('preserves the real sourceUrl/provenance of the surviving result exactly, even when an attribute conflict is detected', async () => {
+    const realUrl = 'https://etsy.com/listing/999-real-item';
+    const a = fakeResult({ sourceUrl: realUrl, condition: 'used' });
+    const b = fakeResult({ sourceUrl: realUrl, condition: 'new' });
+    const provider = makeFakeProvider('etsy', { searchProducts: vi.fn().mockResolvedValue({ results: [a, b] }) });
+    getAllProvidersMock.mockReturnValue([provider]);
+
+    const response = await SourcingService.search({ query: 'x' });
+
+    expect(response.results[0].sourceUrl).toBe(realUrl);
   });
 });

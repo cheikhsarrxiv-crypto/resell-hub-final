@@ -155,6 +155,14 @@ export interface NormalizedSearchQuery {
  */
 export type AuthenticityStatus = 'verified' | 'claimed' | 'unverified' | 'unknown';
 
+/**
+ * Source freshness — see NormalizedSourcingResult.sourceDateStatus's own
+ * comment for the exact meaning of each value and why a provider with no
+ * publish-date concept at all (eBay/Etsy) leaves the field undefined
+ * rather than using 'unknown' for a structurally different situation.
+ */
+export type SourceDateStatus = 'known' | 'unknown' | 'invalid';
+
 export interface NormalizedSourcingResult {
   source: string; // provider name, e.g. 'ebay'
   sourceId?: string;
@@ -461,19 +469,102 @@ export interface NormalizedSourcingResult {
    * Deep Web Sourcing Engine (mission section 13) — ONLY ever
    * 'unverified' for every provider today (the honest default: no live
    * second-confirmation request is actually made to any source). The
-   * other three values exist as real, structured outcomes of the ONE
-   * check this engine does perform — comparing two results that
-   * deduplicate to the same (provider, sourceId)/(sourceUrl) but report
-   * different prices (see SourcingService's deduplicate step): that
-   * specific, narrow case sets 'conflicting' with a warning naming both
-   * prices, rather than silently picking one. 'verified'/
-   * 'partially_verified' are reserved for a future real re-fetch
-   * confirmation step — no code path sets either today. This NEVER means
+   * other three values exist as real, structured outcomes of the checks
+   * this engine does perform — comparing two results that deduplicate to
+   * the same (provider, sourceId)/(sourceUrl) but report a different
+   * price, condition, availability, or authenticity (Phase 2 — see
+   * OpportunityRankingService.detectPriceConflict/detectAttributeConflicts,
+   * called from SourcingService's deduplicate step): that specific,
+   * narrow case — two results already identified as the exact same offer,
+   * never a broader "looks similar" match — sets 'conflicting' with a
+   * warning naming both real, disagreeing values, never silently picking
+   * one as correct. An attribute where either side reports no real signal
+   * at all is never treated as conflicting with the other side's real
+   * value. 'verified'/'partially_verified' are reserved for a future real
+   * re-fetch confirmation step — no code path sets either today. This NEVER means
    * "authenticity guaranteed" (see authenticityStatus for that, a fully
    * separate concept) — only that the DATA (price/etc.) was, or wasn't,
    * corroborated.
    */
   verificationStatus?: 'verified' | 'partially_verified' | 'unverified' | 'conflicting';
+  /**
+   * Source freshness (Phase: source freshness and reliability tests) —
+   * explicit tri-state for whether THIS result's own claimed publish date
+   * is usable at all, computed once, deterministically, from the raw
+   * source's own reported value (never guessed, never defaulted to "now"):
+   * - 'known': the source reported a real, parseable date, and it isn't
+   *   nonsensically in the future (see WebSourcingProvider.parseSourceDate)
+   *   — `sourcePublishedAt`/`sourcePublishedAgeDays` are set.
+   * - 'unknown': the source reported no date at all (the common case for
+   *   most web search hits) — `sourcePublishedAt` stays undefined. This is
+   *   a normal, honest outcome, never treated as "recent" nor as an error.
+   * - 'invalid': the source reported something date-shaped that failed to
+   *   parse as a real date, or parsed to a point further in the future
+   *   than `retrievedAt` could ever allow — treated as untrustworthy, never
+   *   silently coerced into 'known' nor into 'unknown'.
+   * Undefined entirely for a provider with no publish-date concept at all
+   * (eBay/Etsy's structured listing APIs report no such field — a live
+   * marketplace listing simply has no separate "publication date" the way
+   * an indexed web page does) — this is intentionally DIFFERENT from
+   * 'unknown' (which means "this kind of date exists for this source type,
+   * but wasn't reported for this specific item"). Only WebSourcingProvider
+   * sets this field today.
+   */
+  sourceDateStatus?: SourceDateStatus;
+  /**
+   * Source freshness — the SOURCE's own claimed publish date (e.g. when a
+   * web page was published/last updated), ISO 8601, set ONLY when
+   * `sourceDateStatus === 'known'`. This is the source's OWN claim, never
+   * independently confirmed by ADKSY, and is a fully different concept
+   * from `retrievedAt` below (when ADKSY itself fetched this result) and
+   * from `priceVerifiedAt` (when, if ever, ADKSY actually re-checked this
+   * price/stock live) — the three must never be conflated. A page being
+   * reachable right now (i.e. `retrievedAt` existing) is never, by itself,
+   * evidence that a price/stock fact dated this old is still accurate —
+   * see the search_products tool's own description for how the Agent must
+   * reason about this responsibly, without a single universal "too old"
+   * cutoff applied to every kind of question.
+   */
+  sourcePublishedAt?: string;
+  /**
+   * Source freshness — `retrievedAt` minus `sourcePublishedAt`, in whole
+   * days (>= 0; see parseSourceDate's own future-date guard), computed
+   * deterministically by SourcingService once both are known — never
+   * computed by the model itself, same "code computes the real number,
+   * the model only interprets it responsibly" rule already applied to
+   * `estimatedMargin`/`estimatedKnownCostEur`. Undefined whenever
+   * `sourceDateStatus !== 'known'`.
+   */
+  sourcePublishedAgeDays?: number;
+  /**
+   * Source freshness — the real, exact instant ADKSY's own search actually
+   * retrieved this result, ISO 8601, stamped once per search by
+   * SourcingService (the same instant for every result returned by one
+   * search_products call). This is ONLY ever "we fetched this data at this
+   * time" — it is NEVER evidence that the underlying price/stock is still
+   * accurate at that instant (a page can report outdated information while
+   * still being perfectly reachable), and it must never be described as a
+   * "verification". Always set on every result in a real search response,
+   * regardless of provider (eBay/Etsy included) — unlike `sourcePublishedAt`,
+   * every provider's result genuinely was retrieved at some real instant.
+   */
+  retrievedAt?: string;
+  /**
+   * Source freshness — reserved for a REAL, explicit re-verification step
+   * (e.g. a future live re-fetch of this exact listing to confirm its
+   * price/stock are still current) — ISO 8601, set ONLY by a code path
+   * that actually performed such a check. No code path in ADKSY performs
+   * this today (WebSourcingProvider.getProductDetails/EbayBrowseSourcingProvider.
+   * getProductDetails/EtsySourcingProvider.getProductDetails are all
+   * unimplemented — see each one's own comment), so this field is always
+   * undefined in practice right now. Its absence must never be read as
+   * "not verified recently" or any other specific claim — only as "ADKSY
+   * performed no explicit re-verification for this result". Exists now,
+   * deliberately unused, so a future real verification step has a place to
+   * record its result without a later type change, and so no earlier,
+   * unverified field is ever repurposed to mean "verified" by mistake.
+   */
+  priceVerifiedAt?: string;
   /**
    * Opportunity Classification — computed by
    * OpportunityRankingService.classifyOpportunity (see that file's own

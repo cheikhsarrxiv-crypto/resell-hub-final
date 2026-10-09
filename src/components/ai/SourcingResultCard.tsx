@@ -1,6 +1,6 @@
 import { ExternalLink, PackagePlus, Sparkles } from 'lucide-react';
 import type { NormalizedSourcingResult } from '@/services/sourcing/types';
-import { formatMarketplaceLabel, formatSourcingPrice, formatUnknownCostFactor } from '@/lib/ai/sourcingResults';
+import { formatMarketplaceLabel, formatSourcePublishedAge, formatSourcingPrice, formatUnknownCostFactor } from '@/lib/ai/sourcingResults';
 
 interface SourcingResultCardProps {
   result: NormalizedSourcingResult;
@@ -191,6 +191,10 @@ export function SourcingResultCard({ result, onCreateProduct, onSelect }: Sourci
             </>
           )}
         </div>
+
+        {result.sourceDateStatus === 'known' && result.sourcePublishedAgeDays !== undefined && (
+          <p className="text-[11px] text-gray-500">{formatSourcePublishedAge(result.sourcePublishedAgeDays)}</p>
+        )}
 
         <div className="flex flex-wrap items-center gap-1.5">
           {result.classification && (
