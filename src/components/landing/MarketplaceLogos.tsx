@@ -30,3 +30,48 @@ export function VintedLogo(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+/**
+ * IMPORTANT — provenance note (homepage logo colorization):
+ * simple-icons only vendors each brand's WORDMARK (the paths above), never
+ * a colored "app icon" mark. No verified official vector source for a
+ * colored eBay wordmark was reachable from this environment either (brand
+ * developer/press-kit domains are network-blocked here), so the component
+ * below is a CLEAN LOCAL RECONSTRUCTION, NOT a traced/official vector
+ * asset: eBay's 4-letter wordmark rebuilt with SVG text in eBay's own
+ * documented 4-color palette (red/blue/yellow/green
+ * #E53238/#0064D2/#F5AF02/#86B817 — values widely and consistently
+ * published as eBay's brand colors, but not independently re-verified
+ * against eBay's live press-kit page in this session), not a vector trace
+ * of eBay's specific logotype letterforms.
+ *
+ * Etsy/Depop/Vinted were attempted as similar local reconstructions
+ * (colored tile + a plain letterform) in an earlier iteration of this
+ * change, but were reverted: a plain letter was judged too far from each
+ * brand's real icon mark to present as a faithful replacement, and no
+ * verified official asset for those marks is reachable here either. Etsy
+ * and Vinted use their original vendored monochrome wordmarks (above);
+ * Depop keeps its original text-badge presentation (see
+ * HeroDashboardVisual.tsx) rather than any invented symbol.
+ */
+
+export function EbayWordmarkColor(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg role="img" viewBox="0 0 100 40" aria-label="eBay" {...props}>
+      <text
+        x="50"
+        y="29"
+        textAnchor="middle"
+        fontFamily="Arial, Helvetica, sans-serif"
+        fontWeight="700"
+        fontSize="32"
+        letterSpacing="-1"
+      >
+        <tspan fill="#E53238">e</tspan>
+        <tspan fill="#0064D2">b</tspan>
+        <tspan fill="#F5AF02">a</tspan>
+        <tspan fill="#86B817">y</tspan>
+      </text>
+    </svg>
+  );
+}

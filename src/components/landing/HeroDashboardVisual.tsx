@@ -1,5 +1,5 @@
 import type { ComponentType, ReactNode, SVGProps } from 'react';
-import { EbayLogo, EtsyLogo, VintedLogo } from './MarketplaceLogos';
+import { EbayWordmarkColor, EtsyLogo, VintedLogo } from './MarketplaceLogos';
 
 /**
  * Marketplace automation status mirrors the real OAuth integrations in
@@ -8,17 +8,33 @@ import { EbayLogo, EtsyLogo, VintedLogo } from './MarketplaceLogos';
  * integrations; Depop and Vinted are not yet available. Keep "live" vs
  * "soon" honest here — this is marketing copy, not the real dashboard.
  *
- * Depop has no official logo asset vendored in this project yet (it isn't
- * in simple-icons and this environment can't reach Depop's press kit), so
- * it stays a text badge rather than risk an inaccurate/invented mark.
+ * eBay uses a colored wordmark on a white tile (tileClassName/
+ * logoClassName override below) — see MarketplaceLogos.tsx's own comment
+ * for its provenance. Etsy and Vinted use their original vendored
+ * monochrome wordmarks on the original dark tile. Depop has no official
+ * logo asset vendored in this project yet (it isn't in simple-icons and
+ * this environment can't reach Depop's press kit), so it stays a text
+ * badge rather than risk an inaccurate/invented mark.
  */
 const MARKETPLACE_CHIPS: {
   label: string;
   status: 'live' | 'soon';
   position: string;
   logo?: ComponentType<SVGProps<SVGSVGElement>>;
+  tileClassName?: string;
+  logoClassName?: string;
 }[] = [
-  { label: 'eBay', status: 'live', position: 'top-[2%] left-[0%] sm:left-[4%]', logo: EbayLogo },
+  {
+    label: 'eBay',
+    status: 'live',
+    position: 'top-[2%] left-[0%] sm:left-[4%]',
+    logo: EbayWordmarkColor,
+    tileClassName: 'bg-white border-black/10',
+    // Wordmark viewBox is wide (100x40) — sizing by width (not a square
+    // box) and letting height follow keeps it legible on mobile instead
+    // of shrinking to fit a square bounding box.
+    logoClassName: 'w-[34px] h-auto sm:w-[40px]',
+  },
   { label: 'Etsy', status: 'live', position: 'top-[8%] right-[0%] sm:right-[2%]', logo: EtsyLogo },
   { label: 'Depop', status: 'soon', position: 'bottom-[16%] left-[0%]' },
   { label: 'Vinted', status: 'soon', position: 'bottom-[4%] right-[2%] sm:right-[6%]', logo: VintedLogo },
@@ -35,25 +51,33 @@ function MarketplaceChip({
   status,
   position,
   logo: Logo,
+  tileClassName,
+  logoClassName,
 }: {
   label: string;
   status: 'live' | 'soon';
   position: string;
   logo?: ComponentType<SVGProps<SVGSVGElement>>;
+  tileClassName?: string;
+  logoClassName?: string;
 }) {
-  // Wordmark logos (eBay, Etsy) need real size to stay legible — a tile,
-  // not a text-height pill. Depop has no logo asset yet, so it keeps the
-  // original text pill rather than an empty or fake icon.
+  // Wordmark logos (eBay, Etsy, Vinted) need real size to stay legible — a
+  // tile, not a text-height pill. Depop has no logo asset yet, so it keeps
+  // the original text pill rather than an empty or fake icon.
+  // tileClassName/logoClassName let eBay override the shared dark-tile
+  // default with its own white tile sized for its colored wordmark; every
+  // other chip falls back to the original monochrome styling.
   if (Logo) {
     return (
       <div
         className={`absolute ${position} w-10 h-10 sm:w-12 sm:h-12 rounded-lg border flex items-center justify-center ${
-          status === 'live'
+          tileClassName ??
+          (status === 'live'
             ? 'bg-[#0d0e11] border-white/15 text-gray-100'
-            : 'bg-[#0d0e11] border-white/10 border-dashed text-gray-500'
+            : 'bg-[#0d0e11] border-white/10 border-dashed text-gray-500')
         }`}
       >
-        <Logo className="w-6 h-6 sm:w-7 sm:h-7" />
+        <Logo className={logoClassName ?? 'w-6 h-6 sm:w-7 sm:h-7'} />
         {status === 'live' && (
           <span
             className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-[#FF5A1F] ring-2 ring-[#0d0e11]"
@@ -172,6 +196,8 @@ export function HeroDashboardVisual(): ReactNode {
           status={chip.status}
           position={chip.position}
           logo={chip.logo}
+          tileClassName={chip.tileClassName}
+          logoClassName={chip.logoClassName}
         />
       ))}
     </div>
