@@ -26,34 +26,53 @@ const realItem = {
 
 describe('EtsySourcingProvider.isConfigured', () => {
   const originalClientId = process.env.ETSY_CLIENT_ID;
+  const originalClientSecret = process.env.ETSY_CLIENT_SECRET;
 
   afterEach(() => {
     if (originalClientId === undefined) delete process.env.ETSY_CLIENT_ID;
     else process.env.ETSY_CLIENT_ID = originalClientId;
+    if (originalClientSecret === undefined) delete process.env.ETSY_CLIENT_SECRET;
+    else process.env.ETSY_CLIENT_SECRET = originalClientSecret;
   });
 
-  it('reflects whether ETSY_CLIENT_ID is set', () => {
+  // Etsy auth fix — Etsy's own Open API v3 requires BOTH halves of the
+  // credential (`x-api-key: keystring:shared_secret`) on every request,
+  // including this provider's public search endpoint — isConfigured()
+  // must require both, exactly like EbayApplicationTokenManager already
+  // requires its own client id AND secret pair, never just one.
+  it('reflects whether BOTH ETSY_CLIENT_ID and ETSY_CLIENT_SECRET are set', () => {
     delete process.env.ETSY_CLIENT_ID;
+    delete process.env.ETSY_CLIENT_SECRET;
     expect(new EtsySourcingProvider().isConfigured()).toBe(false);
 
     process.env.ETSY_CLIENT_ID = 'real-keystring';
+    expect(new EtsySourcingProvider().isConfigured()).toBe(false);
+
+    process.env.ETSY_CLIENT_SECRET = 'real-shared-secret';
     expect(new EtsySourcingProvider().isConfigured()).toBe(true);
+
+    delete process.env.ETSY_CLIENT_ID;
+    expect(new EtsySourcingProvider().isConfigured()).toBe(false);
   });
 });
 
 describe('EtsySourcingProvider.searchProducts', () => {
   let provider: EtsySourcingProvider;
   const originalClientId = process.env.ETSY_CLIENT_ID;
+  const originalClientSecret = process.env.ETSY_CLIENT_SECRET;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.ETSY_CLIENT_ID = 'real-keystring';
+    process.env.ETSY_CLIENT_SECRET = 'real-shared-secret';
     provider = new EtsySourcingProvider();
   });
 
   afterEach(() => {
     if (originalClientId === undefined) delete process.env.ETSY_CLIENT_ID;
     else process.env.ETSY_CLIENT_ID = originalClientId;
+    if (originalClientSecret === undefined) delete process.env.ETSY_CLIENT_SECRET;
+    else process.env.ETSY_CLIENT_SECRET = originalClientSecret;
   });
 
   it('simple search: returns exactly what the mocked Etsy response contained, nothing invented', async () => {
@@ -79,15 +98,72 @@ describe('EtsySourcingProvider.searchProducts', () => {
     expect(result.currency).toBe('EUR');
   });
 
-  it('sends the x-api-key header with ETSY_CLIENT_ID, never a Bearer/OAuth token (this endpoint is API-key-only)', async () => {
+  it('Etsy auth fix — sends the x-api-key header as "keystring:shared_secret" (both halves), never a Bearer/OAuth token (this endpoint is API-key-only)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
     await provider.searchProducts({ query: 'x' });
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers['x-api-key']).toBe('real-keystring');
+    // Etsy's own documented format: x-api-key: <keystring>:<shared_secret>
+    // — the keystring ALONE (the pre-fix behavior) is never sufficient.
+    expect(init.headers['x-api-key']).toBe('real-keystring:real-shared-secret');
     expect(init.headers.Authorization).toBeUndefined();
+  });
+
+  it('Etsy auth fix — ETSY_CLIENT_ID missing (ETSY_CLIENT_SECRET present) -> structured auth error, no fetch attempted', async () => {
+    delete process.env.ETSY_CLIENT_ID;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const outcome = await provider.searchProducts({ query: 'x' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(outcome.error?.kind).toBe('auth');
+    expect(outcome.error?.message).toBe('ETSY_CLIENT_ID/ETSY_CLIENT_SECRET are not set');
+  });
+
+  it('Etsy auth fix — ETSY_CLIENT_SECRET missing (ETSY_CLIENT_ID present) -> structured auth error, no fetch attempted, no value leaked', async () => {
+    delete process.env.ETSY_CLIENT_SECRET;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const outcome = await provider.searchProducts({ query: 'x' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(outcome.error?.kind).toBe('auth');
+    // Names which env vars are required, never echoes the keystring that
+    // IS actually set (process.env.ETSY_CLIENT_ID stays 'real-keystring').
+    expect(outcome.error?.message).toBe('ETSY_CLIENT_ID/ETSY_CLIENT_SECRET are not set');
+    expect(outcome.error?.message).not.toContain('real-keystring');
+  });
+
+  it('Etsy auth fix — no secret/credential value ever appears in a logged error or a returned error message, on a real request failure', async () => {
+    // createLogger() (src/lib/logger.ts) returns a fresh StructuredLogger
+    // per call, with no shared state — spying on a separately-created
+    // instance would never observe this module's own module-level
+    // `logger`. StructuredLogger ultimately writes every level via
+    // console.log (confirmed in src/lib/logger.ts), so that is the real,
+    // observable sink for what actually gets logged.
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const timeoutError = new Error('aborted');
+    timeoutError.name = 'TimeoutError';
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError));
+
+    try {
+      const outcome = await provider.searchProducts({ query: 'x' });
+
+      expect(outcome.error?.message).not.toContain('real-keystring');
+      expect(outcome.error?.message).not.toContain('real-shared-secret');
+      expect(consoleSpy).toHaveBeenCalled();
+      for (const call of consoleSpy.mock.calls) {
+        const serialized = JSON.stringify(call);
+        expect(serialized).not.toContain('real-keystring');
+        expect(serialized).not.toContain('real-shared-secret');
+      }
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 
   it('folds brand and category into free-text keywords, never sends a numeric category as taxonomy_id (different ID space from eBay)', async () => {

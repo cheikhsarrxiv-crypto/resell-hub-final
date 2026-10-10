@@ -28,17 +28,17 @@
  *   names, "API key authorization" (no OAuth) requirement, and the
  *   ShopListing/Money response shapes below are all taken from there.
  *
- * REUSES ETSY_CLIENT_ID ON PURPOSE (unlike eBay's deliberately SEPARATE
- * EBAY_BUY_API_CLIENT_ID/SECRET): eBay issues genuinely different
- * credential types for different OAuth grants (client_credentials vs
- * authorization_code), so keeping them apart avoids one grant's fix
- * affecting the other. Etsy has no such distinction — one registered
- * Etsy app has exactly one keystring, used identically as `x-api-key` for
- * both this public endpoint and every OAuth-gated one in EtsyAdapter.ts
- * (see that file's own callEtsyApi). Introducing a second, separately-
- * named env var for the exact same credential would not add any real
- * isolation — it would just be an invented distinction Etsy's own
- * architecture doesn't have.
+ * Etsy auth fix — REUSES ETSY_CLIENT_ID **and** ETSY_CLIENT_SECRET, the
+ * same pair EtsyAdapter.ts already uses for the seller OAuth flow (never
+ * a separately-named credential — Etsy issues exactly one keystring +
+ * one shared secret per registered app, there is no second "search-only"
+ * credential to invent). Etsy's own Open API v3 documentation requires
+ * `x-api-key: <keystring>:<shared_secret>` on EVERY request, including
+ * this public, OAuth-free search endpoint — EtsyAdapter.ts's own header
+ * comment already documented this exact format before this provider was
+ * written; this provider previously sent only the keystring half, which
+ * is the confirmed, literal cause of the production error "Shared secret
+ * is required in x-api-key header." (Etsy's own API error text).
  *
  * DELIBERATELY MINIMAL SCOPE — documented gaps, not silent ones:
  * - NO price filtering (`min_price`/`max_price`): Etsy's own docs were
@@ -198,15 +198,19 @@ export class EtsySourcingProvider implements SourcingProvider {
   readonly capabilities: readonly SourcingProviderCapability[] = ['keyword_search'];
 
   isConfigured(): boolean {
-    return Boolean(process.env.ETSY_CLIENT_ID);
+    return Boolean(process.env.ETSY_CLIENT_ID && process.env.ETSY_CLIENT_SECRET);
   }
 
   async searchProducts(query: NormalizedSearchQuery): Promise<SourcingProviderSearchOutcome> {
     const clientId = process.env.ETSY_CLIENT_ID;
-    if (!clientId) {
+    const clientSecret = process.env.ETSY_CLIENT_SECRET;
+    // Etsy auth fix — names which env var(s) are missing (same pattern as
+    // EbayApplicationTokenManager's own "...are not set" message), never
+    // the value of either — not even the one that IS actually set.
+    if (!clientId || !clientSecret) {
       return {
         results: [],
-        error: { provider: 'etsy', message: 'ETSY_CLIENT_ID is not configured', kind: 'auth' },
+        error: { provider: 'etsy', message: 'ETSY_CLIENT_ID/ETSY_CLIENT_SECRET are not set', kind: 'auth' },
       };
     }
 
@@ -227,8 +231,14 @@ export class EtsySourcingProvider implements SourcingProvider {
         offset: String(query.offset ?? 0),
       });
 
+      // Etsy auth fix — `x-api-key` must carry BOTH halves of the app
+      // credential (`keystring:shared_secret`), per Etsy's own Open API v3
+      // documentation and EtsyAdapter.ts's own pre-existing header comment
+      // on this exact format — never the keystring alone. This value is
+      // never logged (see the catch block below, which only ever logs the
+      // caught `error`, never `headers`/`clientSecret`).
       const response = await fetch(`${SEARCH_ENDPOINT}?${params.toString()}`, {
-        headers: { 'x-api-key': clientId },
+        headers: { 'x-api-key': `${clientId}:${clientSecret}` },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
