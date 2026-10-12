@@ -8,7 +8,7 @@ import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
 import { getWorkspaceReadiness, parseApiListResponse, getListPageState } from '@/lib/dashboardListPageState';
-import { ShoppingCart, Eye } from 'lucide-react';
+import { ShoppingCart, Eye, Download } from 'lucide-react';
 import { formatCurrency, getStatusLabel, formatDateTime } from '@/lib/utils';
 import Link from 'next/link';
 
@@ -59,7 +59,18 @@ export default function OrdersPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Orders" description="Manage and track your orders" />
+      <PageHeader
+        title="Orders"
+        description="Manage and track your orders"
+        action={
+          <Link href="/dashboard/orders/export/cdsl">
+            <DashboardButton variant="outline">
+              <Download className="w-4 h-4" />
+              Export CDSL
+            </DashboardButton>
+          </Link>
+        }
+      />
 
       {/* Filters */}
       <DashboardCard className="p-4 sm:p-5">

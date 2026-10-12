@@ -121,6 +121,14 @@ export const updateFulfillmentStatusSchema = z.object({
   status: z.enum(['pending', 'accepted', 'processing', 'shipped', 'delivered', 'failed', 'cancelled']),
 });
 
+// CDSL CSV export (Phase 1 — plain file generation, no API call, no email,
+// no dispatch). desiredDeliveryDate is an export-time input, not a stored
+// per-order field — see CdslExportService.ts's own header comment.
+export const cdslExportRequestSchema = z.object({
+  orderIds: z.array(z.string().min(1)).min(1, 'Sélectionnez au moins une commande à exporter'),
+  desiredDeliveryDate: z.string().min(1).optional(),
+});
+
 export const createShipmentSchema = z.object({
   fulfillmentOrderId: z.string().min(1),
   trackingNumber: z.string().min(5),
@@ -217,3 +225,4 @@ export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;
 export type AiAgentMessageInput = z.infer<typeof aiAgentMessageSchema>;
 export type ResetPasswordWithTokenInput = z.infer<typeof resetPasswordWithTokenSchema>;
 export type ConnectManualCredentialsInput = z.infer<typeof connectManualCredentialsSchema>;
+export type CdslExportRequestInput = z.infer<typeof cdslExportRequestSchema>;
