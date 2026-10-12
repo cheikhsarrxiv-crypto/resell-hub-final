@@ -25,6 +25,17 @@ export class StockService {
     workspaceId: string,
     quantity: number = 1
   ): Promise<StockReservationResult> {
+    // Reject non-positive/non-integer quantities before touching the
+    // database — the SQL function rejects them too (defense in depth),
+    // but failing here avoids a network round-trip and gives this exact
+    // message regardless of how the function behaves.
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      return {
+        success: false,
+        message: 'Invalid quantity',
+      };
+    }
+
     try {
       // First verify product belongs to workspace (security check)
       const product = await prisma.product.findFirst({
@@ -44,9 +55,11 @@ export class StockService {
       }
 
       // Call PostgreSQL function for atomic stock reservation
-      // This prevents race conditions via row-level locking
+      // This prevents race conditions via row-level locking. workspaceId
+      // is passed through so the function re-checks it inside the same
+      // atomic UPDATE, not only in the findFirst above.
       const result = await prisma.$queryRaw<StockReservationResult[]>`
-        SELECT * FROM reserve_product_stock(${productId}, ${quantity})
+        SELECT * FROM reserve_product_stock(${productId}, ${workspaceId}, ${quantity})
       `;
 
       if (!result || result.length === 0) {

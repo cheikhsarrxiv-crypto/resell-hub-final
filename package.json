@@ -10,6 +10,8 @@
     "postinstall": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration:postgres": "vitest run --config vitest.integration.config.ts",
+    "test:integration:postgres:docker": "bash scripts/run-stock-integration-tests.sh",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "node prisma/seed.js",
