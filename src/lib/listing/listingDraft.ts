@@ -33,20 +33,39 @@ export type AuthenticityStatus = 'verified' | 'claimed' | 'unverified' | 'unknow
  * historical record of what was actually found.
  */
 export interface ListingDraftSource {
-  /** The stable identifier used to re-find/revalidate this exact item — always sourceUrl (every NormalizedSourcingResult has one; sourceId is optional). */
+  /**
+   * Free listing creation (real photo analysis) — explicit discriminant:
+   * 'sourced' means this draft came from a real search_products result
+   * (every field below that's documented as "always"/required applies);
+   * 'free' means the reseller is listing their own, not-previously-sourced
+   * item — there is no external source at all, so sourceMarketplace/
+   * sourceUrl/price/currency/authenticityStatus are genuinely absent, not
+   * defaulted or guessed. See ListingGenerationService.buildFreeDraft.
+   */
+  kind: 'sourced' | 'free';
+  /**
+   * The stable identifier used to re-find/revalidate this exact item —
+   * sourceUrl for a 'sourced' draft (every NormalizedSourcingResult has
+   * one), or a minted draftId (`free-${randomUUID()}`) for a 'free' one.
+   */
   sourceItemId: string;
   sourceProductId?: string;
-  sourceMarketplace: string;
-  sourceUrl: string;
+  /** Absent for a 'free' draft — there is no external marketplace this item was found on. */
+  sourceMarketplace?: string;
+  /** Absent for a 'free' draft — see sourceItemId, which carries the stable identifier instead. */
+  sourceUrl?: string;
   title: string;
   brand?: string;
   condition?: string;
   images: string[];
-  price: number;
-  currency: string;
+  /** Absent for a 'free' draft — there is no external source cost to report. */
+  price?: number;
+  /** Absent for a 'free' draft — see ListingDraftFields.currency for this draft's own selling currency instead. */
+  currency?: string;
   shippingCost?: number;
   shippingCostCurrency?: string;
-  authenticityStatus: AuthenticityStatus;
+  /** Absent for a 'free' draft — no external source exists to have claimed/verified anything. */
+  authenticityStatus?: AuthenticityStatus;
   authenticitySource?: string;
   sellerName?: string;
   /**
@@ -261,6 +280,11 @@ export interface MarketplaceListingValidation {
 }
 
 function authenticityWarning(source: ListingDraftSource): string | null {
+  // Free listing creation — there is no external source to have claimed or
+  // verified anything about a self-declared item, so this concept simply
+  // does not apply; never phrase a free draft as "unverified by the
+  // source" when there never was one.
+  if (source.kind === 'free') return null;
   if (source.authenticityStatus === 'verified') return null;
   if (source.authenticityStatus === 'claimed') {
     return "Authenticité déclarée par le vendeur source uniquement — non vérifiée. Ne jamais présenter cette annonce comme authentifiée.";
@@ -280,7 +304,7 @@ function authenticityWarning(source: ListingDraftSource): string | null {
  * that doesn't set it).
  */
 function sourceVerificationWarning(source: ListingDraftSource | undefined): string | null {
-  if (!source) return null;
+  if (!source || source.kind === 'free') return null;
   if (source.classification === 'WEB_LEAD') {
     return 'Cette annonce provient d\'une piste web (WEB_LEAD) — certaines informations (couleur, taille, qualité de la source) ne sont pas entièrement confirmées. L\'annonce reste techniquement publiable ; vérifiez ces points avant de la présenter comme fiable à 100%.';
   }
@@ -342,12 +366,30 @@ export function validateEbayDraft(draft: ListingDraft): MarketplaceListingValida
   if (verificationWarning) warnings.push(verificationWarning);
 
   if (!draft.fields.size) {
-    warnings.push('No size set — the source did not report one; add it manually if relevant.');
+    // Free listing creation (P2-1 fix) — a free draft has no "source" at
+    // all; the reseller themselves simply hasn't stated a size yet. The
+    // sourced wording ("the source did not report one") would be
+    // confusing/inaccurate here, since there was never a source to report
+    // anything.
+    warnings.push(
+      draft.source.kind === 'free'
+        ? 'No size set — add it manually if relevant.'
+        : 'No size set — the source did not report one; add it manually if relevant.'
+    );
   }
   if (draft.source.images.length === 0) {
-    warnings.push('No source images available.');
+    warnings.push(draft.source.kind === 'free' ? 'No photo available for this listing.' : 'No source images available.');
   } else if (usableDraftImages(draft).length === 0) {
     warnings.push('All available images have been excluded for this listing — add at least one back before publishing.');
+  } else if (draft.source.kind === 'free') {
+    // Free listing creation (P1-2 fix) — these are the reseller's OWN
+    // photos, uploaded through ADKSY's own authenticated upload flow
+    // (StorageService.uploadConversationImage) and hosted on ADKSY's own
+    // Supabase bucket — never copied from an external listing. The sourced
+    // branch's warning below is genuinely false for this case (there is no
+    // external source listing at all), so it must never be reused
+    // unconditionally here.
+    warnings.push('Photos uploaded by the seller, hosted by ADKSY. Confirm the seller holds the rights to use these photos before publishing.');
   } else {
     // Phase 7 — mapDraftToEbayInput forwards these URLs verbatim as
     // imageUrls on a real publish (see EbayAdapter.createListing): they are

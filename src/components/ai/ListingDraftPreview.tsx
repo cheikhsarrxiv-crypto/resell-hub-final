@@ -6,10 +6,10 @@
  * dangerouslySetInnerHTML, so a source-provided title/description can
  * never inject markup.
  */
-import type { ListingDraft, MarketplaceListingValidation } from '@/lib/listing/listingDraft';
+import type { AuthenticityStatus, ListingDraft, MarketplaceListingValidation } from '@/lib/listing/listingDraft';
 import type { MarginCalculationResult } from '@/services/pricing/types';
 
-const AUTHENTICITY_LABEL: Record<ListingDraft['source']['authenticityStatus'], string> = {
+const AUTHENTICITY_LABEL: Record<AuthenticityStatus, string> = {
   verified: 'Vérifiée',
   claimed: 'Déclarée par le vendeur (non vérifiée)',
   unverified: 'Non renseignée',
@@ -17,7 +17,7 @@ const AUTHENTICITY_LABEL: Record<ListingDraft['source']['authenticityStatus'], s
   unknown: 'Non déterminable pour cette source',
 };
 
-const AUTHENTICITY_CLASSES: Record<ListingDraft['source']['authenticityStatus'], string> = {
+const AUTHENTICITY_CLASSES: Record<AuthenticityStatus, string> = {
   verified: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
   claimed: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
   unverified: 'bg-white/[0.06] text-gray-400 border-white/[0.1]',
@@ -116,7 +116,11 @@ export function ListingDraftPreview({ draft, marketplaceValidation, marginPrevie
 
       {source.images.length > 0 && (
         <div>
-          <p className="mb-1 text-xs text-gray-500">Photos ({source.images.length}) — reprises de l&apos;annonce source, jamais vérifiées ni hébergées par ADKSY</p>
+          <p className="mb-1 text-xs text-gray-500">
+            {source.kind === 'free'
+              ? `Photos (${source.images.length}) — envoyées par le vendeur, hébergées par ADKSY`
+              : `Photos (${source.images.length}) — reprises de l'annonce source, jamais vérifiées ni hébergées par ADKSY`}
+          </p>
           <div className="flex gap-2 overflow-x-auto">
             {source.images.map((imageUrl, i) => {
               const excluded = excludedImageUrls.has(imageUrl);
@@ -191,11 +195,13 @@ export function ListingDraftPreview({ draft, marketplaceValidation, marginPrevie
         <p className="text-gray-200">{fields.title}</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <p className="text-xs text-gray-500">Prix d&apos;achat (constaté à la source)</p>
-          <p className="text-gray-200">{source.price} {source.currency}</p>
-        </div>
+      <div className={source.kind === 'sourced' ? 'grid grid-cols-2 gap-3' : 'grid grid-cols-1 gap-3'}>
+        {source.kind === 'sourced' && (
+          <div>
+            <p className="text-xs text-gray-500">Prix d&apos;achat (constaté à la source)</p>
+            <p className="text-gray-200">{source.price} {source.currency}</p>
+          </div>
+        )}
         <div>
           <p className="text-xs text-gray-500">
             Prix de vente proposé {draft.editedFieldKeys.includes('price') ? '(modifié)' : ''}
@@ -223,11 +229,17 @@ export function ListingDraftPreview({ draft, marketplaceValidation, marginPrevie
 
       {marginPreview && <MarginPreview margin={marginPreview} />}
 
-      <span
-        className={`inline-flex w-fit items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${AUTHENTICITY_CLASSES[source.authenticityStatus]}`}
-      >
-        Authenticité : {AUTHENTICITY_LABEL[source.authenticityStatus]}
-      </span>
+      {source.kind === 'sourced' && source.authenticityStatus ? (
+        <span
+          className={`inline-flex w-fit items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${AUTHENTICITY_CLASSES[source.authenticityStatus]}`}
+        >
+          Authenticité : {AUTHENTICITY_LABEL[source.authenticityStatus]}
+        </span>
+      ) : (
+        <span className="inline-flex w-fit items-center rounded-full border px-2.5 py-0.5 text-xs font-medium bg-white/[0.06] text-gray-400 border-white/[0.1]">
+          Objet déclaré par le vendeur — aucune vérification tierce pour ce type d&apos;annonce
+        </span>
+      )}
 
       {/* Phase 12C-Prep: shown exactly as they'd be sent — these two
           fields are never inferred/guessed (see validateEbayDraft), so an

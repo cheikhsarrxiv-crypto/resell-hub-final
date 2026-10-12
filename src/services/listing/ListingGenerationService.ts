@@ -66,7 +66,123 @@ function computePriceForTargetMargin(purchasePrice: number, targetMarginPercent:
   return Math.round(price * 100) / 100;
 }
 
+/**
+ * Free listing creation (real photo analysis) — the reseller's own
+ * explicitly-stated facts about an item they already own, not previously
+ * sourced anywhere. Every field is optional because the "never invent"
+ * rule applies at the call site (listingDraftTools.ts), not here: this
+ * function never defaults/guesses a field that is genuinely absent.
+ */
+export interface FreeListingDraftInput {
+  title: string;
+  brand?: string;
+  condition?: string;
+  size?: string;
+  color?: string;
+  material?: string;
+  model?: string;
+  proposedPrice?: number;
+  proposedCurrency?: string;
+}
+
+export interface FreeDraftPhoto {
+  url: string;
+  storagePath: string;
+  mimeType: string;
+}
+
+function buildFreeTitle(input: FreeListingDraftInput): string {
+  // The reseller's own title, verbatim — never rewritten/embellished, only
+  // clamped to eBay's real platform-wide limit (the same defensive clamp
+  // buildGeneratedTitle already applies to a sourced draft's title).
+  return input.title.length > EBAY_TITLE_MAX_LENGTH ? input.title.slice(0, EBAY_TITLE_MAX_LENGTH) : input.title;
+}
+
+function buildFreeDescription(input: FreeListingDraftInput, photoCount: number): string {
+  const lines: string[] = [];
+  lines.push(input.title);
+  if (input.brand) lines.push(`Marque : ${input.brand}`);
+  if (input.condition) lines.push(`État : ${input.condition}`);
+  if (input.size) lines.push(`Taille : ${input.size}`);
+  if (input.color) lines.push(`Couleur : ${input.color}`);
+  if (input.material) lines.push(`Matière : ${input.material}`);
+  if (input.model) lines.push(`Modèle : ${input.model}`);
+  lines.push('');
+  lines.push(
+    photoCount > 0
+      ? `Annonce créée directement par le vendeur à partir de ${photoCount} photo(s) réelle(s) fournie(s) en conversation — aucune donnée externe sourcée.`
+      : "Annonce créée directement par le vendeur à partir des informations fournies en conversation — aucune donnée externe sourcée, aucune photo fournie pour l'instant."
+  );
+  // Deliberately never adds a fact not already in `input` — exactly the
+  // same "never fabricate" discipline buildGeneratedDescription already
+  // applies to a sourced draft.
+  return lines.join('\n');
+}
+
 export class ListingGenerationService {
+  /**
+   * Free listing creation (real photo analysis) — builds a ListingDraft
+   * with NO external source at all, from the reseller's own explicitly-
+   * stated facts and any real photo(s) they already uploaded to this
+   * conversation (see generate_listing_draft's free-mode handler, which
+   * collects those via findToolResultsByName('user_photos_uploaded') —
+   * never a second upload mechanism). `draftId` is the caller-minted
+   * stable identifier (see generateListingDraftTool's handler) used as
+   * this draft's own sourceItemId, exactly like a sourced draft's
+   * sourceItemId is its sourceUrl — both are simply "the key
+   * findLatestDraft looks up this exact draft by".
+   */
+  static buildFreeDraft(input: FreeListingDraftInput, photos: FreeDraftPhoto[], draftId: string): ListingDraft {
+    const source: ListingDraft['source'] = {
+      kind: 'free',
+      sourceItemId: draftId,
+      title: input.title,
+      brand: input.brand,
+      condition: input.condition,
+      // Real, ADKSY-hosted photo URLs the reseller themselves uploaded —
+      // never an external hotlink (contrast with a sourced draft's
+      // source.images, which are the external listing's own URLs).
+      images: photos.map((p) => p.url),
+      size: input.size,
+      color: input.color,
+      material: input.material,
+    };
+
+    const generatedFieldKeys: ListingDraftFieldKey[] = ['title', 'description', 'currency', 'quantity'];
+    if (input.condition) generatedFieldKeys.push('condition');
+    if (input.proposedPrice !== undefined) generatedFieldKeys.push('price');
+    if (input.size) generatedFieldKeys.push('size');
+    if (input.color) generatedFieldKeys.push('color');
+    if (input.material) generatedFieldKeys.push('material');
+    if (input.model) generatedFieldKeys.push('model');
+
+    return {
+      source,
+      fields: {
+        title: buildFreeTitle(input),
+        description: buildFreeDescription(input, photos.length),
+        price: input.proposedPrice,
+        // Product/ListingDraftFields have no workspace-level currency
+        // setting anywhere in this codebase (ADKSY's own Product model has
+        // no currency column at all — every price in the app is an
+        // implicit EUR figure, see the system prompt's own € examples) —
+        // defaulting to 'EUR' here matches that existing, platform-wide
+        // assumption; it is never an invented business fact about THIS
+        // item, only the same currency every other ADKSY price already is.
+        currency: input.proposedCurrency ?? 'EUR',
+        quantity: 1,
+        condition: input.condition,
+        size: input.size,
+        color: input.color,
+        material: input.material,
+        model: input.model,
+      },
+      generatedFieldKeys,
+      editedFieldKeys: [],
+      originalValues: {},
+    };
+  }
+
   static buildDraftFromSourcingResult(
     result: NormalizedSourcingResult,
     options: {
@@ -85,6 +201,7 @@ export class ListingGenerationService {
     } = {}
   ): ListingDraft {
     const source: ListingDraft['source'] = {
+      kind: 'sourced',
       sourceItemId: result.sourceUrl,
       sourceProductId: result.sourceId,
       sourceMarketplace: result.marketplace,

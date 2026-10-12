@@ -31,9 +31,12 @@ function isListingDraftShape(value: unknown): value is ListingDraft {
 
   return (
     typeof source.sourceItemId === 'string' &&
-    typeof source.sourceUrl === 'string' &&
+    // Free listing creation — a free-mode draft has no sourceUrl/currency
+    // at all (see ListingDraftSource's own `kind` discriminant); only
+    // check their type when present, never require them unconditionally.
+    (source.sourceUrl === undefined || typeof source.sourceUrl === 'string') &&
     typeof source.title === 'string' &&
-    typeof source.currency === 'string' &&
+    (source.currency === undefined || typeof source.currency === 'string') &&
     Array.isArray(source.images) &&
     typeof fields.title === 'string' &&
     typeof fields.description === 'string' &&

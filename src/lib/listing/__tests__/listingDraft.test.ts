@@ -13,6 +13,7 @@ import {
 function baseDraft(overrides: Partial<ListingDraft['fields']> = {}, sourceOverrides: Partial<ListingDraft['source']> = {}): ListingDraft {
   return {
     source: {
+      kind: 'sourced',
       sourceItemId: 'https://ebay.example/item/1',
       sourceProductId: 'v1|1|0',
       sourceMarketplace: 'EBAY_GB',
@@ -381,5 +382,120 @@ describe('mapDraftToEtsyInput', () => {
     expect(input).not.toHaveProperty('condition');
     expect(input).not.toHaveProperty('images');
     expect(input).not.toHaveProperty('ebay');
+  });
+});
+
+/**
+ * Free listing creation (real photo analysis) — a 'free' draft has no
+ * external source at all (no sourceUrl/price/currency/authenticityStatus
+ * — see ListingDraftSource's own `kind` field). These prove the
+ * validators/mappers behave sensibly for that shape too, never crashing
+ * or emitting a confusing "unverified by the source" warning for an item
+ * that was never sourced anywhere.
+ */
+function freeDraft(overrides: Partial<ListingDraft['fields']> = {}, sourceOverrides: Partial<ListingDraft['source']> = {}): ListingDraft {
+  return {
+    source: {
+      kind: 'free',
+      sourceItemId: 'free-test-draft-1',
+      title: 'Sac à main vintage',
+      images: [],
+      ...sourceOverrides,
+    },
+    fields: {
+      title: 'Sac à main vintage',
+      description: 'A description.',
+      currency: 'EUR',
+      quantity: 1,
+      ebayCategoryId: 15709,
+      ebayMarketplaceId: 'EBAY_FR',
+      ...overrides,
+    },
+    generatedFieldKeys: ['title', 'description', 'currency', 'quantity'],
+    editedFieldKeys: [],
+    originalValues: {},
+  };
+}
+
+describe('free-mode drafts (kind: "free") — no external source at all', () => {
+  it('validateEbayDraft never emits an authenticity/source-verification warning for a free draft', () => {
+    const result = validateEbayDraft(freeDraft({ price: 89 }));
+    expect(result.warnings.join(' ')).not.toMatch(/authenticité|vérifiée par la source|WEB_LEAD/i);
+  });
+
+  it('validateEtsyDraft never emits an authenticity/source-verification warning for a free draft either', () => {
+    const result = validateEtsyDraft(freeDraft({ price: 89, etsyTaxonomyId: 1234, etsyWhenMade: '2020_2025', etsyWhoMade: 'i_did' }));
+    expect(result.warnings.join(' ')).not.toMatch(/authenticité|vérifiée par la source|WEB_LEAD/i);
+  });
+
+  it('a free draft missing price/quantity/category is still reported NOT ready, with the same real missingFields as a sourced draft', () => {
+    const result = validateEbayDraft(freeDraft({ price: undefined, ebayCategoryId: undefined }));
+    expect(result.ready).toBe(false);
+    expect(result.missingFields).toContain('price');
+    expect(result.missingFields).toContain('ebayCategoryId');
+  });
+
+  it('a fully-filled free draft is ready for eBay, exactly like a sourced one', () => {
+    const result = validateEbayDraft(freeDraft({ price: 89, condition: 'bon état' }));
+    expect(result.ready).toBe(true);
+  });
+
+  it('mapDraftToEbayInput works identically for a free draft once ready — same shape, no sourceUrl needed anywhere in it', () => {
+    const draft = freeDraft({ price: 89, condition: 'bon état' });
+    const input = mapDraftToEbayInput(draft) as any;
+    expect(input).not.toBeNull();
+    expect(input.title).toBe(draft.fields.title);
+    expect(input.ebay).toEqual({ categoryId: 15709, marketplaceId: 'EBAY_FR' });
+  });
+
+  it('applyDraftEdit works identically on a free draft (no sourceUrl dependency anywhere in the pure edit logic)', () => {
+    const edited = applyDraftEdit(freeDraft(), { price: 120, color: 'Noir' });
+    expect(edited.fields.price).toBe(120);
+    expect(edited.fields.color).toBe('Noir');
+    expect(edited.source.kind).toBe('free');
+  });
+
+  /**
+   * P1-2 fix (final review finding) — a free draft's photos are the
+   * reseller's OWN uploads, hosted by ADKSY (StorageService.
+   * uploadConversationImage), never "copied from an external source
+   * listing". The pre-fix code emitted the SOURCED warning unconditionally
+   * for any draft with usable images, which was factually false for a free
+   * draft. These assertions check the EXACT warning string each mode gets
+   * — not just "no mention of X" — so a regression that reintroduces the
+   * wrong string for the wrong mode cannot silently pass.
+   */
+  it('P1-2: a free draft with real uploaded photos gets the "uploaded by the seller, hosted by ADKSY" warning, NEVER the sourced "external source listing" one', () => {
+    const result = validateEbayDraft(freeDraft({ price: 89, condition: 'bon état' }, { images: ['https://supabase.example/ws-1/_draft-uploads/conv-1/photo1.jpg'] }));
+    expect(result.warnings).toContain('Photos uploaded by the seller, hosted by ADKSY. Confirm the seller holds the rights to use these photos before publishing.');
+    expect(result.warnings).not.toContain('Images are copied directly from the external source listing — not reviewed or re-hosted by ADKSY. Verify you have the right to use them before publishing.');
+  });
+
+  it('P1-2: a SOURCED draft with real images still gets the EXACT pre-existing "external source listing" warning, unchanged — no regression', () => {
+    const result = validateEbayDraft(baseDraft());
+    expect(result.warnings).toContain('Images are copied directly from the external source listing — not reviewed or re-hosted by ADKSY. Verify you have the right to use them before publishing.');
+    expect(result.warnings).not.toContain('Photos uploaded by the seller, hosted by ADKSY. Confirm the seller holds the rights to use these photos before publishing.');
+  });
+
+  it('P1-2: a free draft with NO photo at all gets a free-mode-worded "no photo" warning, never "No source images available"', () => {
+    const result = validateEbayDraft(freeDraft({ price: 89, condition: 'bon état' }, { images: [] }));
+    expect(result.warnings).toContain('No photo available for this listing.');
+    expect(result.warnings).not.toContain('No source images available.');
+  });
+
+  it('P1-2: a SOURCED draft with no images still gets the exact pre-existing "No source images available." warning, unchanged', () => {
+    const result = validateEbayDraft(baseDraft({}, { images: [] }));
+    expect(result.warnings).toContain('No source images available.');
+  });
+
+  it('P2-1: a free draft with no size gets free-mode wording, never "the source did not report one"', () => {
+    const result = validateEbayDraft(freeDraft({ price: 89, condition: 'bon état', size: undefined }));
+    expect(result.warnings).toContain('No size set — add it manually if relevant.');
+    expect(result.warnings).not.toContain('No size set — the source did not report one; add it manually if relevant.');
+  });
+
+  it('P2-1: a SOURCED draft with no size still gets the exact pre-existing wording, unchanged', () => {
+    const result = validateEbayDraft(baseDraft({ size: undefined }));
+    expect(result.warnings).toContain('No size set — the source did not report one; add it manually if relevant.');
   });
 });

@@ -15,6 +15,7 @@ import type { MarginCalculationResult } from '@/services/pricing/types';
 
 const baseDraft: ListingDraft = {
   source: {
+    kind: 'sourced',
     sourceItemId: 'https://ebay.example/item/1',
     sourceMarketplace: 'EBAY_GB',
     sourceUrl: 'https://ebay.example/item/1',
@@ -344,5 +345,86 @@ describe('ListingDraftList', () => {
       <ListingDraftList toolCalls={[{ name: 'generate_listing_draft', result: { error: 'This product was not found among this conversation\'s own search results.' } }]} />
     );
     expect(html).toContain('not found among this conversation');
+  });
+});
+
+/**
+ * Free listing creation (real photo analysis) — Phase E of the
+ * implementation: proves a free-mode draft (no sourceUrl/price/currency/
+ * authenticityStatus at all) renders correctly across the same three
+ * components, instead of silently being dropped (the pre-fix
+ * isListingDraftShape required source.sourceUrl unconditionally) or
+ * rendering "undefined" for the absent source price/authenticity fields.
+ */
+const freeDraft: ListingDraft = {
+  source: {
+    kind: 'free',
+    sourceItemId: 'free-test-draft-1',
+    title: 'Sac à main vintage',
+    images: ['https://supabase.example/ws-1/_draft-uploads/conv-1/photo1.jpg'],
+  },
+  fields: {
+    title: 'Sac à main vintage',
+    description: 'Annonce créée directement par le vendeur.',
+    price: 89,
+    currency: 'EUR',
+    quantity: 1,
+    condition: 'bon état',
+  },
+  generatedFieldKeys: ['title', 'description', 'currency', 'quantity'],
+  editedFieldKeys: [],
+  originalValues: {},
+};
+
+describe('ListingDraftPreview — free mode (no external source)', () => {
+  it('renders without crashing and never shows "undefined" for the absent source price/currency', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={freeDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />
+    );
+    expect(html).not.toContain('undefined');
+    expect(html).toContain('89 EUR');
+  });
+
+  it('labels the photo as uploaded by the seller, never as "reprise de l\'annonce source"', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={freeDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />
+    );
+    expect(html).toContain('envoyées par le vendeur');
+    expect(html).not.toContain("reprises de l'annonce source");
+  });
+
+  it('never renders an authenticity badge claiming anything was "Déclarée par le vendeur source" (no such source exists)', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={freeDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />
+    );
+    expect(html).not.toContain('Authenticité : Déclarée par le vendeur');
+    expect(html).toContain('Objet déclaré par le vendeur');
+  });
+
+  it('never shows a "Prix d\'achat (constaté à la source)" line — there is no source cost for a free draft', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftPreview draft={freeDraft} marketplaceValidation={{ ebay: readyValidation, etsy: notReadyEtsy }} />
+    );
+    expect(html).not.toContain("Prix d'achat");
+  });
+});
+
+describe('ListingDraftEditor — free mode', () => {
+  it('hides "Générer une image IA" for a free-mode draft (not wired for a free draftId)', () => {
+    const html = renderToStaticMarkup(<ListingDraftEditor draft={freeDraft} onSend={() => {}} />);
+    expect(html).toContain('Valider ce brouillon');
+    expect(html).not.toContain('Générer une image IA');
+    expect(html).toContain('Annuler');
+  });
+});
+
+describe('ListingDraftList — free mode', () => {
+  it('renders a free-mode draft outcome exactly like a sourced one', () => {
+    const html = renderToStaticMarkup(
+      <ListingDraftList
+        toolCalls={[{ name: 'generate_listing_draft', result: { draft: freeDraft, marketplaceValidation: { ebay: readyValidation, etsy: notReadyEtsy } } }]}
+      />
+    );
+    expect(html).toContain('Sac à main vintage');
   });
 });

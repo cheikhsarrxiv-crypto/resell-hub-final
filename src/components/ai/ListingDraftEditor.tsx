@@ -50,10 +50,14 @@ export function ListingDraftEditor({ draft: initialDraft, onSend, marginPreview 
   // with what actually gets published. Never deletes the image itself.
   const handleToggleImageExclusion = (imageUrl: string, excluded: boolean) => {
     setDraft((current) => setImageExcluded(current, imageUrl, excluded));
+    // sourceItemId is the stable identifier for EITHER mode (a sourced
+    // draft's sourceUrl, or a free draft's minted draftId — see
+    // ListingDraftSource's own comment) — never draft.source.sourceUrl
+    // directly, which is absent for a free draft.
     onSend?.(
       excluded
-        ? `Retire cette photo (${imageUrl}) du brouillon pour ce produit (${draft.source.sourceUrl}) — ne l'utilise pas pour cette annonce.`
-        : `Remets cette photo (${imageUrl}) dans le brouillon pour ce produit (${draft.source.sourceUrl}).`
+        ? `Retire cette photo (${imageUrl}) du brouillon pour ce produit (${draft.source.sourceItemId}) — ne l'utilise pas pour cette annonce.`
+        : `Remets cette photo (${imageUrl}) dans le brouillon pour ce produit (${draft.source.sourceItemId}).`
     );
   };
 
@@ -210,7 +214,7 @@ export function ListingDraftEditor({ draft: initialDraft, onSend, marginPreview 
             type="button"
             onClick={() =>
               onSend(
-                `Confirme la création du produit à partir de ce brouillon (${draft.source.sourceUrl}) et propose la publication sur les marketplaces disponibles.`
+                `Confirme la création du produit à partir de ce brouillon (${draft.source.sourceItemId}) et propose la publication sur les marketplaces disponibles.`
               )
             }
             className="inline-flex items-center gap-1.5 rounded-xl bg-[#FF5A1F] px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-[#e64f18] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
@@ -218,17 +222,25 @@ export function ListingDraftEditor({ draft: initialDraft, onSend, marginPreview 
             <Check className="w-4 h-4" aria-hidden="true" />
             Valider ce brouillon
           </button>
+          {draft.source.kind === 'sourced' && (
+            // Free listing creation — AI-generated images remain reserved
+            // for the sourced pipeline (see SYSTEM_PROMPT_INSTRUCTIONS: a
+            // free draft's own real, reseller-uploaded photos are never
+            // replaced by a generated stand-in), and generate_listing_draft_image
+            // is not wired for a free-mode draftId — hidden here rather
+            // than offering an action that would just fail.
+            <button
+              type="button"
+              onClick={() => onSend(`Génère une image IA pour ce produit (${draft.source.sourceItemId}).`)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] px-3.5 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
+            >
+              <ImagePlus className="w-4 h-4" aria-hidden="true" />
+              Générer une image IA
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => onSend(`Génère une image IA pour ce produit (${draft.source.sourceUrl}).`)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] px-3.5 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
-          >
-            <ImagePlus className="w-4 h-4" aria-hidden="true" />
-            Générer une image IA
-          </button>
-          <button
-            type="button"
-            onClick={() => onSend(`Annule, je ne veux pas continuer avec ce produit pour le moment (${draft.source.sourceUrl}).`)}
+            onClick={() => onSend(`Annule, je ne veux pas continuer avec ce produit pour le moment (${draft.source.sourceItemId}).`)}
             className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] px-3.5 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60"
           >
             <X className="w-4 h-4" aria-hidden="true" />

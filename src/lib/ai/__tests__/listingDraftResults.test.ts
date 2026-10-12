@@ -5,6 +5,7 @@ import type { ListingDraft } from '@/lib/listing/listingDraft';
 function validDraft(overrides: Partial<ListingDraft> = {}): ListingDraft {
   return {
     source: {
+      kind: 'sourced',
       sourceItemId: 'https://ebay.example/item/1',
       sourceMarketplace: 'EBAY_GB',
       sourceUrl: 'https://ebay.example/item/1',
@@ -132,5 +133,24 @@ describe('extractListingDraftOutcomes', () => {
       toolCall('generate_listing_draft', { draft, marketplaceValidation }),
     ]);
     expect(outcomes[0].toolCallIndex).toBe(1);
+  });
+
+  it('Free listing creation: a free-mode draft (no sourceUrl/currency on source at all) is still recognized as a real "ok" outcome, never silently dropped', () => {
+    const freeDraftShape: ListingDraft = {
+      source: { kind: 'free', sourceItemId: 'free-abc', title: 'Sac à main vintage', images: [] },
+      fields: { title: 'Sac à main vintage', description: 'desc', currency: 'EUR', quantity: 1 },
+      generatedFieldKeys: ['title', 'description'],
+      editedFieldKeys: [],
+      originalValues: {},
+    };
+    const marketplaceValidation = {
+      ebay: { marketplace: 'ebay', ready: false, errors: ['x'], warnings: [], missingFields: ['price'] },
+      etsy: { marketplace: 'etsy', ready: false, errors: ['x'], warnings: [], missingFields: ['price'] },
+    };
+    const outcomes = extractListingDraftOutcomes([toolCall('generate_listing_draft', { draft: freeDraftShape, marketplaceValidation })]);
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].status).toBe('ok');
+    expect(outcomes[0].draft).toEqual(freeDraftShape);
   });
 });

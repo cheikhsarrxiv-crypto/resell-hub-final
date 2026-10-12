@@ -82,6 +82,23 @@ function pushDraftToolCall(conversationId: string, toolUseId: string, toolName: 
   rows.push(toolResultRow(conversationId, toolUseId, resultPayload));
 }
 
+/**
+ * Free listing creation (real photo analysis) — simulates the synthetic
+ * 'user_photos_uploaded' tool_use/tool_result pair AiAgentService.sendMessage
+ * actually persists for a real attachment (see that method's own
+ * comment). generate_listing_draft's free mode reads these back via
+ * findToolResultsByName, exactly like it already does for search_products.
+ */
+function pushPhotoUploadCall(conversationId: string, toolUseId: string, photos: Array<{ url: string; storagePath: string; mimeType: string }>) {
+  rows.push(assistantToolUseRow(conversationId, toolUseId, 'user_photos_uploaded', { count: photos.length }));
+  rows.push(
+    toolResultRow(conversationId, toolUseId, {
+      photos: photos.map((p) => ({ ...p, uploadedAt: new Date().toISOString(), status: 'attached' })),
+      count: photos.length,
+    })
+  );
+}
+
 const sourcedItem: NormalizedSourcingResult = {
   source: 'ebay',
   sourceId: 'v1|111|0',
@@ -478,5 +495,227 @@ describe('edit_listing_draft', () => {
       expect(bothReady.draft.fields.ebayCategoryId).toBe(15709);
       expect(bothReady.draft.fields.etsyTaxonomyId).toBe(1234);
     });
+  });
+});
+
+/**
+ * Free listing creation (real photo analysis) — generate_listing_draft/
+ * edit_listing_draft's FREE mode: no sourceUrl at all, for an item the
+ * reseller already owns. Proves the mode is actually implemented (not
+ * just described in the system prompt — see the readiness audit's P0
+ * finding), without ever regressing the sourced mode proven above.
+ */
+describe('generate_listing_draft — FREE mode (no sourceUrl, self-declared item)', () => {
+  beforeEach(() => {
+    rows = [];
+    rowIdCounter = 0;
+    clock = 0;
+    createNotificationMock.mockClear();
+  });
+
+  it('1. generates a draft with no sourceUrl at all, from the reseller\'s own stated title', async () => {
+    const result: any = await generateListingDraftTool.handler(
+      'ws-1',
+      { title: 'Sac à main vintage' },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.draft.source.kind).toBe('free');
+    expect(result.draft.source.sourceUrl).toBeUndefined();
+    expect(result.draft.fields.title).toBe('Sac à main vintage');
+    expect(result.draftId).toBe(result.draft.source.sourceItemId);
+    expect(result.draftId).toMatch(/^free-/);
+  });
+
+  it('2. a free draft automatically attaches a real photo already uploaded to this conversation', async () => {
+    pushPhotoUploadCall('conv-1', 'photo-tu1', [
+      { url: 'https://supabase.example/ws-1/_draft-uploads/conv-1/photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+    ]);
+
+    const result: any = await generateListingDraftTool.handler(
+      'ws-1',
+      { title: 'Montre vintage', condition: 'bon état' },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.draft.source.images).toEqual(['https://supabase.example/ws-1/_draft-uploads/conv-1/photo1.jpg']);
+  });
+
+  it('3. a free draft attaches MULTIPLE real photos, in the order they were uploaded', async () => {
+    pushPhotoUploadCall('conv-1', 'photo-tu1', [
+      { url: 'https://supabase.example/a.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/a.jpg', mimeType: 'image/jpeg' },
+      { url: 'https://supabase.example/b.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/b.jpg', mimeType: 'image/jpeg' },
+    ]);
+
+    const result: any = await generateListingDraftTool.handler('ws-1', { title: 'Veste en cuir' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.draft.source.images).toEqual(['https://supabase.example/a.jpg', 'https://supabase.example/b.jpg']);
+  });
+
+  it('4. a free draft with NO photo at all still generates from text information alone', async () => {
+    const result: any = await generateListingDraftTool.handler('ws-1', { title: 'Livre ancien', condition: 'bon état' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.error).toBeUndefined();
+    expect(result.draft.source.images).toEqual([]);
+    expect(result.draft.fields.title).toBe('Livre ancien');
+  });
+
+  it('5. missing the one indispensable field (title) is rejected by input validation before the handler ever runs — the "insufficient information" control', () => {
+    const parsed = generateListingDraftTool.inputSchema.safeParse({ condition: 'bon état' });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('6. edit_listing_draft edits a free draft by draftId, never a sourceUrl (which a free draft never has)', async () => {
+    const generated: any = await generateListingDraftTool.handler('ws-1', { title: 'Sac à main vintage' }, { conversationId: 'conv-1', userId: 'user-1' });
+    pushDraftToolCall('conv-1', 'tu1', 'generate_listing_draft', { title: 'Sac à main vintage' }, generated);
+
+    const edited: any = await editListingDraftTool.handler(
+      'ws-1',
+      { draftId: generated.draftId, patch: { price: 89, ebayCategoryId: 15709, ebayMarketplaceId: 'EBAY_FR' } },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(edited.error).toBeUndefined();
+    expect(edited.draft.fields.price).toBe(89);
+    expect(edited.draft.source.kind).toBe('free');
+    expect(edited.draftId).toBe(generated.draftId);
+  });
+
+  it('7. a patch with an invalid field (e.g. a non-Etsy-accepted etsyWhenMade) is rejected by validation, in free mode exactly like sourced mode', () => {
+    const parsed = editListingDraftTool.inputSchema.safeParse({
+      draftId: 'free-abc',
+      patch: { etsyWhenMade: 'not-a-real-value' },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('8. never invents brand/condition/size/color/material/model the reseller did not state — every omitted field stays genuinely absent, never defaulted', async () => {
+    const result: any = await generateListingDraftTool.handler('ws-1', { title: 'Sac à main vintage' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(result.draft.fields.brand).toBeUndefined();
+    expect(result.draft.fields.condition).toBeUndefined();
+    expect(result.draft.fields.size).toBeUndefined();
+    expect(result.draft.fields.color).toBeUndefined();
+    expect(result.draft.fields.material).toBeUndefined();
+    expect(result.draft.fields.model).toBeUndefined();
+  });
+
+  it('never computes a marginPreview for a free draft — there is no sourced purchase cost to base one on', async () => {
+    const result: any = await generateListingDraftTool.handler(
+      'ws-1',
+      { title: 'Sac à main vintage', proposedPrice: 89 },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.marginPreview).toBeNull();
+  });
+
+  it('rejects editing a draftId with no prior draft in this conversation — never fabricates one', async () => {
+    const result: any = await editListingDraftTool.handler(
+      'ws-1',
+      { draftId: 'free-never-generated', patch: { price: 89 } },
+      { conversationId: 'conv-1', userId: 'user-1' }
+    );
+
+    expect(result.draft).toBeUndefined();
+    expect(result.error).toMatch(/no listing draft found/i);
+  });
+
+  it('still triggers the same in-app notification as the sourced mode', async () => {
+    await generateListingDraftTool.handler('ws-1', { title: 'Sac à main vintage' }, { conversationId: 'conv-1', userId: 'user-1' });
+
+    expect(createNotificationMock).toHaveBeenCalledTimes(1);
+    const [workspaceId, type] = createNotificationMock.mock.calls[0];
+    expect(workspaceId).toBe('ws-1');
+    expect(type).toBe('listing_draft_ready');
+  });
+
+  /**
+   * P1-1 fix (final review finding) — generate_listing_draft's own
+   * description is sent VERBATIM to Anthropic (see AgentToolDefinition's
+   * own comment in tools/types.ts) and must never tell the model to pass
+   * a free-mode draftId to create_product, which has no such field and
+   * only ever accepts a real sourceMarketplace/sourceId/sourceUrl triple
+   * (see actionTools.ts's createProductInputSchema, untouched by free
+   * listing creation). Contradicting SYSTEM_PROMPT_INSTRUCTIONS' own
+   * explicit "create_product does not support free mode" note would
+   * confuse the model into attempting a call that can only ever fail
+   * Zod validation.
+   */
+  it('P1-1: the tool description never instructs the model to pass draftId to create_product, and explicitly says create_product does not accept one', () => {
+    // The old, contradictory phrasing this fix removed — must never
+    // reappear verbatim.
+    expect(generateListingDraftTool.description).not.toContain('edit_listing_draft/create_product');
+    // The corrective phrasing this fix added — proves the description now
+    // explicitly rules out the misuse, not just omits the old wording.
+    expect(generateListingDraftTool.description).toMatch(/NEVER to create_product/);
+    expect(generateListingDraftTool.description).toMatch(/create_product, which does not accept a draftId/);
+  });
+
+  it('P1-1: create_product\'s own schema genuinely has no draftId field — confirms the corrected description matches reality, and that create_product itself was never touched by free listing creation', async () => {
+    const { createProductTool } = await import('@/services/ai/tools/actionTools');
+    expect(createProductTool.category).toBe('engage');
+    const parsed = createProductTool.inputSchema.safeParse({ draftId: 'free-abc', title: 'x', sellingPrice: 1, purchasePrice: 1 });
+    expect(parsed.success).toBe(false);
+  });
+});
+
+/**
+ * P2-2 fix (final review finding) — before this fix, generate_listing_draft's
+ * z.union tried the sourced schema first; since it was non-strict, a call
+ * mixing {sourceUrl, title} together matched the sourced branch silently
+ * and dropped `title` with no error at all — an ambiguous call could
+ * produce a draft in a mode the model didn't necessarily intend, with
+ * nothing telling it so. `.strict()` on both top-level branches now makes
+ * BOTH branches reject the mix, so the whole union fails explicitly.
+ */
+describe('generate_listing_draft / edit_listing_draft — mode exclusivity (P2-2 fix)', () => {
+  it('mixing sourceUrl (sourced) and title (free) together is REJECTED, never silently treated as sourced mode with title dropped', () => {
+    const parsed = generateListingDraftTool.inputSchema.safeParse({
+      sourceUrl: 'https://www.ebay.co.uk/itm/111',
+      title: 'Sac à main vintage',
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('a pure sourced call (sourceUrl only) still parses successfully — no regression from .strict()', () => {
+    const parsed = generateListingDraftTool.inputSchema.safeParse({ sourceUrl: 'https://www.ebay.co.uk/itm/111', proposedPrice: 449 });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('a pure free call (title only) still parses successfully — no regression from .strict()', () => {
+    const parsed = generateListingDraftTool.inputSchema.safeParse({ title: 'Sac à main vintage', condition: 'bon état' });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('edit_listing_draft: mixing sourceUrl and draftId together is REJECTED, never silently treated as sourced mode', () => {
+    const parsed = editListingDraftTool.inputSchema.safeParse({
+      sourceUrl: 'https://www.ebay.co.uk/itm/111',
+      draftId: 'free-abc123',
+      patch: { price: 89 },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('edit_listing_draft: a pure sourced call (sourceUrl only) still parses successfully — no regression from .strict()', () => {
+    const parsed = editListingDraftTool.inputSchema.safeParse({ sourceUrl: 'https://www.ebay.co.uk/itm/111', patch: { price: 449 } });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('edit_listing_draft: a pure free call (draftId only) still parses successfully — no regression from .strict()', () => {
+    const parsed = editListingDraftTool.inputSchema.safeParse({ draftId: 'free-abc123', patch: { price: 89 } });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('edit_listing_draft: the nested patch object still silently strips unknown keys exactly as before (.strict() only applies to the TOP level)', () => {
+    const parsed = editListingDraftTool.inputSchema.safeParse({
+      draftId: 'free-abc123',
+      patch: { price: 89, workspaceId: 'ws-ATTACKER' },
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect((parsed.data as any).patch).not.toHaveProperty('workspaceId');
+    }
   });
 });

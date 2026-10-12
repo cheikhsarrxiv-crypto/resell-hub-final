@@ -52,6 +52,117 @@ describe('aiAgentMessageSchema', () => {
   });
 });
 
+/**
+ * Bug fix (AI agent readiness audit, photo-transfer fix): this schema
+ * previously had no `attachments` field at all, so Zod silently stripped
+ * it from result.data before /api/ai/agent/route.ts ever saw it — a real
+ * photo the reseller uploaded via POST /api/ai/agent/photos (and that
+ * buildAgentRequestBody genuinely includes in the next message's JSON
+ * body) never reached AiAgentService.sendMessage. These tests cover the
+ * new field directly, matching the exact shape
+ * POST /api/ai/agent/photos returns ({url, storagePath, mimeType}).
+ */
+describe('aiAgentMessageSchema — attachments (AI-first "free listing creation" photo transfer)', () => {
+  const validAttachment = {
+    url: 'https://example.supabase.co/storage/v1/object/public/conversation-images/ws-1/_draft-uploads/conv-1/photo1.jpg',
+    storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg',
+    mimeType: 'image/jpeg',
+  };
+
+  it('accepts a message with one valid attachment, and attachments round-trips unchanged', () => {
+    const result = aiAgentMessageSchema.safeParse({ message: 'Voici une photo.', attachments: [validAttachment] });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.attachments).toEqual([validAttachment]);
+    }
+  });
+
+  it('accepts a message with several valid attachments', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Voici deux photos.',
+      attachments: [validAttachment, { ...validAttachment, storagePath: 'ws-1/_draft-uploads/conv-1/photo2.jpg' }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.attachments).toHaveLength(2);
+  });
+
+  it('accepts a message with attachments entirely omitted (unchanged regression for a plain text turn)', () => {
+    const result = aiAgentMessageSchema.safeParse({ message: 'Juste du texte.' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.attachments).toBeUndefined();
+  });
+
+  it.each(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])(
+    'accepts every mimeType StorageService.ALLOWED_MIME_TYPES actually allows (%s)',
+    (mimeType) => {
+      const result = aiAgentMessageSchema.safeParse({ message: 'Photo.', attachments: [{ ...validAttachment, mimeType }] });
+      expect(result.success).toBe(true);
+    }
+  );
+
+  it('rejects an attachment with an unsupported mimeType', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Photo.',
+      attachments: [{ ...validAttachment, mimeType: 'application/pdf' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with a malformed url', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Photo.',
+      attachments: [{ ...validAttachment, url: 'not-a-real-url' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with a missing/empty storagePath', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Photo.',
+      attachments: [{ ...validAttachment, storagePath: '' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment missing a required field entirely', () => {
+    const { url, ...withoutUrl } = validAttachment;
+    const result = aiAgentMessageSchema.safeParse({ message: 'Photo.', attachments: [withoutUrl] });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects more than 10 attachments on one message', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Beaucoup de photos.',
+      attachments: Array.from({ length: 11 }, (_, i) => ({ ...validAttachment, storagePath: `ws-1/_draft-uploads/conv-1/photo${i}.jpg` })),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts exactly 10 attachments (the documented limit)', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Dix photos.',
+      attachments: Array.from({ length: 10 }, (_, i) => ({ ...validAttachment, storagePath: `ws-1/_draft-uploads/conv-1/photo${i}.jpg` })),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('an unexpected extra field inside an attachment is silently stripped, never causes a validation error', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Photo.',
+      attachments: [{ ...validAttachment, uploaderIsAdmin: true }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data.attachments?.[0] as Record<string, unknown>).uploaderIsAdmin).toBeUndefined();
+    }
+  });
+
+  it('rejects attachments that is not an array at all', () => {
+    const result = aiAgentMessageSchema.safeParse({ message: 'Photo.', attachments: 'not-an-array' });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('RateLimiterService.checkAiAgent — reuses the existing rate limiter, no new system', () => {
   it('allows up to 12 requests per hour for a workspace, then blocks the 13th', async () => {
     process.env.RATE_LIMIT_BACKEND = 'memory';

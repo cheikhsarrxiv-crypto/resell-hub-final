@@ -150,9 +150,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { message, conversationId } = result.data;
+    // Bug fix (AI agent readiness audit): attachments was previously
+    // declared on AiAgentService.sendMessage's own signature but never
+    // actually read here — aiAgentMessageSchema had no `attachments`
+    // field, so Zod silently stripped it from result.data and every real
+    // photo upload was dropped before ever reaching sendMessage, even
+    // though the frontend (buildAgentRequestBody) genuinely sends it.
+    const { message, conversationId, attachments } = result.data;
 
-    const turn = await AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId);
+    const turn = await AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId, attachments);
 
     return NextResponse.json({ success: true, ...turn });
   } catch (error) {
