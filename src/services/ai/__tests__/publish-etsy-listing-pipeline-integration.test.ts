@@ -160,6 +160,24 @@ vi.mock('@/services/ListingService', () => ({
   getAuthenticatedAdapter: getAuthenticatedAdapterMock,
 }));
 
+// SSRF fix (downloadImageForEtsyUpload) — the real handler now downloads
+// each usable image's bytes through fetchSafely (src/services/
+// ssrfSafeFetch.ts) instead of a bare fetch(); mocked at this exact
+// boundary so this file's own "ZERO real network calls" guarantee still
+// holds. @/services/StorageService itself is NOT mocked in this file, so
+// matchesImageSignature stays the real implementation — the buffer
+// returned below must therefore be a genuine image (see
+// ETSY_TEST_PNG_BUFFER), never an arbitrary placeholder.
+const { fetchSafelyMock } = vi.hoisted(() => ({ fetchSafelyMock: vi.fn() }));
+vi.mock('@/services/ssrfSafeFetch', () => ({
+  fetchSafely: (...args: unknown[]) => fetchSafelyMock(...args),
+}));
+
+// A real, valid 1x1 transparent PNG (67 bytes) — same fixture used by
+// storage-rehost-image.test.ts / actionTools.test.ts.
+const ETSY_TEST_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const ETSY_TEST_PNG_BUFFER = Buffer.from(ETSY_TEST_PNG_BASE64, 'base64');
+
 // This file proves publish_etsy_listing's own propose -> confirm -> execute
 // pipeline — entitlement refusal is a separate, already-tested concern
 // (see ai-entitlement-service.test.ts). Real
@@ -270,8 +288,6 @@ async function proposeEtsyPublish(workspaceId: string, conversationId: string, t
 }
 
 describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionService', () => {
-  const originalFetch = global.fetch;
-
   beforeEach(() => {
     messageRows.length = 0; // messageRows is a const binding (from vi.hoisted) — clear in place, never reassign
     actionStore.clear();
@@ -286,19 +302,18 @@ describe('publish_etsy_listing — end-to-end pipeline via the REAL AiActionServ
     vi.clearAllMocks();
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
     // The real handler downloads each usable image's bytes before
-    // uploading to Etsy (see actionTools.ts's own downloadImageForEtsyUpload)
-    // — stubbed here so this file's own "ZERO real network calls" guarantee
-    // still holds now that publish_etsy_listing makes this extra fetch.
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      headers: { get: () => 'image/jpeg' },
-      arrayBuffer: async () => new ArrayBuffer(10),
-    }) as any;
+    // uploading to Etsy (see actionTools.ts's own downloadImageForEtsyUpload,
+    // now SSRF-hardened via fetchSafely) — stubbed here so this file's own
+    // "ZERO real network calls" guarantee still holds.
+    fetchSafelyMock.mockReset().mockResolvedValue({
+      buffer: ETSY_TEST_PNG_BUFFER,
+      contentType: 'image/png',
+      finalUrl: 'https://img.ebay.com/main.jpg',
+    });
   });
 
   afterEach(() => {
     delete process.env.ENABLE_REAL_ETSY_PUBLISH;
-    global.fetch = originalFetch;
   });
 
   it('propose -> confirm (real publish disabled, the default) -> COMPLETED with a simulated result, adapter never called', async () => {

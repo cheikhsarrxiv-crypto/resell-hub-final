@@ -15,7 +15,8 @@ import { ProductService, PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_M
 import { createProductSchema } from '@/lib/validations';
 import { findToolResultsByName } from './conversationToolResults';
 import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
-import { StorageService, ALLOWED_MIME_TYPES, MAX_FILE_SIZE } from '@/services/StorageService';
+import { StorageService, ALLOWED_MIME_TYPES, MAX_FILE_SIZE, matchesImageSignature } from '@/services/StorageService';
+import { fetchSafely } from '@/services/ssrfSafeFetch';
 import { createLogger } from '@/lib/logger';
 
 const logger = createLogger('action-tools');
@@ -35,32 +36,50 @@ const CONTENT_TYPE_EXTENSION: Record<string, string> = {
   'image/gif': 'gif',
 };
 
+// SSRF hardening (downloadImageForEtsyUpload) — see
+// src/services/ssrfSafeFetch.ts for exactly what fetchSafely does and does
+// not guarantee. Same value as StorageService's own
+// REHOST_FETCH_TIMEOUT_MS, not imported from there to avoid coupling two
+// otherwise-independent callers to one shared constant.
+const ETSY_IMAGE_FETCH_TIMEOUT_MS = 15_000;
+
 /**
  * Downloads one draft image's bytes for a real Etsy upload — Etsy's own
  * API takes actual file bytes, never a hotlinked URL (see
  * EtsyAdapter.uploadListingImage). Reuses StorageService's own real
  * format/size rule (ALLOWED_MIME_TYPES/MAX_FILE_SIZE) — never a second,
  * Etsy-specific limit invented here. Throws on any failure (network,
- * disallowed type, oversized) — the caller treats each image as
- * best-effort and never lets one failed download fail the whole publish.
+ * SSRF-unsafe URL, disallowed/forged type, oversized, timeout) — the
+ * caller treats each image as best-effort and never lets one failed
+ * download fail the whole publish.
+ *
+ * SSRF hardening: `url` comes from usableDraftImages(draft), which
+ * includes draft.source.images — itself sometimes populated from
+ * arbitrary web-sourced content (see WebResultExtractionService's own
+ * imageUrl field, extracted verbatim from scraped page text), never a
+ * trusted first-party URL. The download goes through the exact same real
+ * guard as StorageService.rehostImageFromUrl, never a second,
+ * independently-drifting implementation: fetchSafely
+ * (src/services/ssrfSafeFetch.ts) — https-only, private/reserved/
+ * loopback/link-local addresses blocked (including DNS-rebinding and
+ * redirect-to-internal attempts), streamed with a byte cap and an
+ * explicit timeout. The declared Content-Type is never trusted for the
+ * accept/reject decision — matchesImageSignature verifies the actual
+ * bytes, the same real check rehostImageFromUrl already applies.
  */
-async function downloadImageForEtsyUpload(url: string): Promise<{ data: Buffer; contentType: string }> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
+export async function downloadImageForEtsyUpload(url: string): Promise<{ data: Buffer; contentType: string }> {
+  const downloaded = await fetchSafely(url, {
+    maxBytes: MAX_FILE_SIZE,
+    timeoutMs: ETSY_IMAGE_FETCH_TIMEOUT_MS,
+  });
+
+  const actualMimeType = ALLOWED_MIME_TYPES.find((mime) => matchesImageSignature(downloaded.buffer, mime));
+  if (!actualMimeType) {
+    const declared = (downloaded.contentType ?? '').split(';')[0].trim() || 'unknown';
+    throw new Error(`Image content-type not allowed for Etsy upload: ${declared}`);
   }
 
-  const contentType = (response.headers.get('content-type') || '').split(';')[0].trim();
-  if (!ALLOWED_MIME_TYPES.includes(contentType)) {
-    throw new Error(`Image content-type not allowed for Etsy upload: ${contentType || 'unknown'}`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > MAX_FILE_SIZE) {
-    throw new Error('Image too large for Etsy upload');
-  }
-
-  return { data: buffer, contentType };
+  return { data: downloaded.buffer, contentType: actualMimeType };
 }
 
 /**

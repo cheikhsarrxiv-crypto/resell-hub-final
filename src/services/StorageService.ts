@@ -83,7 +83,7 @@ export interface RehostedImage {
  * a truncated/corrupted upload) does not and is rejected before it can
  * ever reach a vision content block.
  */
-function matchesImageSignature(buffer: Buffer, mimeType: string): boolean {
+export function matchesImageSignature(buffer: Buffer, mimeType: string): boolean {
   if (buffer.length < 4) return false;
   switch (mimeType) {
     case 'image/jpeg':

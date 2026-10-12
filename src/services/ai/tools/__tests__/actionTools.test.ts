@@ -263,7 +263,45 @@ vi.mock('@/services/StorageService', () => ({
   // publish test exercising the real-adapter path.
   ALLOWED_MIME_TYPES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
   MAX_FILE_SIZE: 10 * 1024 * 1024,
+  // SSRF fix (downloadImageForEtsyUpload) — a byte-for-byte copy of the
+  // real matchesImageSignature (StorageService.ts), never the real
+  // module's instance (the whole module is mocked above). Kept in sync by
+  // hand is an accepted, already-established convention in this exact
+  // mock (see ALLOWED_MIME_TYPES/MAX_FILE_SIZE above) — the function
+  // itself is small, stable, and checks only fixed magic bytes.
+  matchesImageSignature: (buffer: Buffer, mimeType: string): boolean => {
+    if (buffer.length < 4) return false;
+    switch (mimeType) {
+      case 'image/jpeg':
+        return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      case 'image/png':
+        return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+      case 'image/gif':
+        return buffer.slice(0, 6).toString('ascii') === 'GIF87a' || buffer.slice(0, 6).toString('ascii') === 'GIF89a';
+      case 'image/webp':
+        return buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+      default:
+        return false;
+    }
+  },
 }));
+
+// SSRF fix (downloadImageForEtsyUpload) — the function now downloads
+// through fetchSafely instead of a bare fetch(); mocked at this boundary
+// so these tests never make a real network/DNS call, same pattern as
+// storage-rehost-image.test.ts's own fetchSafely mock for
+// rehostImageFromUrl.
+const { fetchSafelyMock } = vi.hoisted(() => ({ fetchSafelyMock: vi.fn() }));
+vi.mock('@/services/ssrfSafeFetch', () => ({
+  fetchSafely: (...args: unknown[]) => fetchSafelyMock(...args),
+}));
+
+// A real, valid 1x1 transparent PNG (67 bytes) — same fixture used by
+// storage-rehost-image.test.ts — so matchesImageSignature's real
+// (duplicated-above) check actually accepts these fixtures, instead of a
+// fake all-zero buffer that no real signature would ever match.
+const ETSY_TEST_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const ETSY_TEST_PNG_BUFFER = Buffer.from(ETSY_TEST_PNG_BASE64, 'base64');
 
 vi.mock('@/services/ProductService', async () => {
   // vi.importActual pulls in the REAL PRODUCT_SKU_CONFLICT_MESSAGE /
@@ -275,7 +313,7 @@ vi.mock('@/services/ProductService', async () => {
 });
 
 import { AiToolRegistry } from '@/services/ai/AiToolRegistry';
-import { simulateEngageActionTool, createProductTool, publishListingTool, publishEtsyListingTool } from '@/services/ai/tools/actionTools';
+import { simulateEngageActionTool, createProductTool, publishListingTool, publishEtsyListingTool, downloadImageForEtsyUpload } from '@/services/ai/tools/actionTools';
 import { generateListingDraftTool, editListingDraftTool } from '@/services/ai/tools/listingDraftTools';
 import { PRODUCT_SKU_CONFLICT_MESSAGE, PRODUCT_SOURCE_CONFLICT_MESSAGE } from '@/services/ProductService';
 import type { NormalizedSourcingResult } from '@/services/sourcing/types';
@@ -1672,8 +1710,6 @@ describe('publish_listing tool definition (Phase 12C-Offline)', () => {
 });
 
 describe('publish_etsy_listing tool definition (Etsy publication parity)', () => {
-  const originalFetch = global.fetch;
-
   beforeEach(() => {
     rows = [];
     rowIdCounter = 0;
@@ -1691,13 +1727,14 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
     // Etsy images fix — the real handler downloads each usable image's
     // bytes before uploading to Etsy (see actionTools.ts's own
-    // downloadImageForEtsyUpload); stubbed so this suite's real-adapter
-    // tests never make a real network call for it either.
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      headers: { get: () => 'image/jpeg' },
-      arrayBuffer: async () => new ArrayBuffer(10),
-    }) as any;
+    // downloadImageForEtsyUpload, now SSRF-hardened via fetchSafely);
+    // stubbed so this suite's real-adapter tests never make a real
+    // network/DNS call for it either.
+    fetchSafelyMock.mockReset().mockResolvedValue({
+      buffer: ETSY_TEST_PNG_BUFFER,
+      contentType: 'image/png',
+      finalUrl: 'https://img.example/1.jpg',
+    });
   });
 
   afterEach(() => {
@@ -1705,7 +1742,6 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
     dbDownFlag.value = false;
     failNextListingUpdate.value = false;
     concurrentCreateGate.armed = false;
-    global.fetch = originalFetch;
   });
 
   const withProduct = { productId: DEFAULT_PRODUCT_ID };
@@ -2137,7 +2173,6 @@ describe('publish_etsy_listing tool definition (Etsy publication parity)', () =>
 });
 
 describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
-  const originalFetch = global.fetch;
   const withProduct = { productId: DEFAULT_PRODUCT_ID };
 
   beforeEach(() => {
@@ -2156,11 +2191,11 @@ describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
     productStore.set(DEFAULT_PRODUCT_ID, { id: DEFAULT_PRODUCT_ID, workspaceId: 'ws-1', sku: DEFAULT_PRODUCT_SKU, deletedAt: null });
     connectionStore.set('ws-1:etsy', { id: 'conn-etsy-1' });
     createListingMock.mockResolvedValue({ externalId: 'ETSY-IMG-1', status: 'active' });
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      headers: { get: () => 'image/jpeg' },
-      arrayBuffer: async () => new ArrayBuffer(10),
-    }) as any;
+    fetchSafelyMock.mockReset().mockImplementation(async (url: string) => ({
+      buffer: ETSY_TEST_PNG_BUFFER,
+      contentType: 'image/png',
+      finalUrl: url,
+    }));
   });
 
   afterEach(() => {
@@ -2168,7 +2203,6 @@ describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
     dbDownFlag.value = false;
     failNextListingUpdate.value = false;
     concurrentCreateGate.armed = false;
-    global.fetch = originalFetch;
   });
 
   it('1. a draft with exactly one usable image uploads it at rank 1', async () => {
@@ -2211,7 +2245,7 @@ describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
     expect(uploadListingImageMock).toHaveBeenCalledTimes(1);
     expect(uploadListingImageMock).toHaveBeenCalledWith('ETSY-IMG-1', expect.objectContaining({}));
     // The excluded url itself must never appear in what was fetched/uploaded.
-    expect((global.fetch as any).mock.calls.some((c: any) => c[0] === 'https://img.example/1.jpg')).toBe(false);
+    expect(fetchSafelyMock.mock.calls.some((c: any) => c[0] === 'https://img.example/1.jpg')).toBe(false);
   });
 
   it('4. no usable image at all -> refused BEFORE any Etsy API call, in both preview() and handler()', async () => {
@@ -2229,11 +2263,11 @@ describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
 
   it('5. an invalid/undownloadable image never fails the whole publish — reported honestly, other images still upload', async () => {
     await seedReadyEtsyDraftWithImages('conv-1', ['https://img.example/bad.jpg', 'https://img.example/good.jpg']);
-    (global.fetch as any).mockImplementation(async (url: string) => {
+    fetchSafelyMock.mockImplementation(async (url: string) => {
       if (url === 'https://img.example/bad.jpg') {
-        return { ok: false, status: 404, statusText: 'Not Found' };
+        throw new Error('Failed to download image: 404 Not Found');
       }
-      return { ok: true, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new ArrayBuffer(10) };
+      return { buffer: ETSY_TEST_PNG_BUFFER, contentType: 'image/png', finalUrl: url };
     });
 
     const result: any = await publishEtsyListingTool.handler('ws-1', { sourceUrl: sourcedItem.sourceUrl, ...withProduct }, { conversationId: 'conv-1', userId: 'user-1' });
@@ -2273,6 +2307,110 @@ describe('publish_etsy_listing — image upload (Etsy images fix)', () => {
     expect(retry.externalId).toBe(first.externalId);
     expect(createListingMock).toHaveBeenCalledTimes(1); // never called again
     expect(uploadListingImageMock).toHaveBeenCalledTimes(1); // never re-uploaded
+  });
+});
+
+/**
+ * SSRF fix — downloadImageForEtsyUpload (actionTools.ts) used to call a
+ * bare fetch(url): no SSRF protection, no streaming size cap (buffered
+ * the full response before checking length), and trusted the declared
+ * Content-Type instead of the real bytes. It now goes through the exact
+ * same fetchSafely (src/services/ssrfSafeFetch.ts) guard as
+ * StorageService.rehostImageFromUrl — these tests exercise
+ * downloadImageForEtsyUpload's OWN wrapper logic at that boundary
+ * (fetchSafely mocked, same pattern as storage-rehost-image.test.ts for
+ * rehostImageFromUrl): that it hands `url` straight to fetchSafely with
+ * no second, drifting SSRF implementation, that it never trusts a
+ * declared Content-Type over the real byte signature, and that it
+ * faithfully propagates — never swallows or fabricates past — whatever
+ * fetchSafely reports. fetchSafely's OWN SSRF internals (DNS/private-IP
+ * blocking, redirect re-validation, DNS pinning, streaming cap, timeout)
+ * are exhaustively covered by their own dedicated suite,
+ * ssrfSafeFetch.test.ts, and are deliberately not re-tested here.
+ */
+describe('downloadImageForEtsyUpload (SSRF fix)', () => {
+  beforeEach(() => {
+    fetchSafelyMock.mockReset();
+  });
+
+  it('passes the url straight through to fetchSafely, with a maxBytes/timeoutMs contract — never a second, independent SSRF implementation', async () => {
+    fetchSafelyMock.mockResolvedValue({ buffer: ETSY_TEST_PNG_BUFFER, contentType: 'image/png', finalUrl: 'https://img.example/1.jpg' });
+
+    await downloadImageForEtsyUpload('https://img.example/1.jpg');
+
+    expect(fetchSafelyMock).toHaveBeenCalledWith(
+      'https://img.example/1.jpg',
+      expect.objectContaining({ maxBytes: expect.any(Number), timeoutMs: expect.any(Number) })
+    );
+  });
+
+  it('a non-https URL rejected by fetchSafely (protocol check) propagates — never silently retried or downgraded', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('Refusing to fetch a non-https URL (protocol was "http:")'));
+
+    await expect(downloadImageForEtsyUpload('http://img.example/1.jpg')).rejects.toThrow(/non-https/i);
+  });
+
+  it('a private/reserved-address URL rejected by fetchSafely propagates — never falls back to a fabricated image', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('Refusing to fetch from a private/reserved address: 169.254.169.254'));
+
+    await expect(downloadImageForEtsyUpload('https://169.254.169.254/latest/meta-data/')).rejects.toThrow(/private\/reserved/i);
+  });
+
+  it('a redirect to a private address rejected by fetchSafely propagates, never followed to completion', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('Refusing to fetch "evil.example.com": it resolves to a private/reserved address.'));
+
+    await expect(downloadImageForEtsyUpload('https://evil.example.com/redirector')).rejects.toThrow(/private\/reserved/i);
+  });
+
+  it('a timeout from fetchSafely propagates, never reaches Etsy upload with partial/corrupted bytes', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('Request timed out after 15000ms'));
+
+    await expect(downloadImageForEtsyUpload('https://img.example/slow.jpg')).rejects.toThrow(/timed out/i);
+  });
+
+  it('a streaming size-limit rejection from fetchSafely propagates, never a partially-buffered image', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('File too large. Maximum size: 10485760 bytes'));
+
+    await expect(downloadImageForEtsyUpload('https://img.example/huge.jpg')).rejects.toThrow(/too large/i);
+  });
+
+  it('a forged Content-Type (declared image/jpeg, real bytes are not an image) is rejected — the declared header is never trusted', async () => {
+    fetchSafelyMock.mockResolvedValue({
+      buffer: Buffer.from('<html>not an image</html>'),
+      contentType: 'image/jpeg', // lies — real bytes below don't match any real signature
+      finalUrl: 'https://img.example/not-an-image',
+    });
+
+    await expect(downloadImageForEtsyUpload('https://img.example/not-an-image')).rejects.toThrow(/content-type not allowed/i);
+  });
+
+  it('bytes with no real signature match are rejected even when fetchSafely reports no Content-Type at all', async () => {
+    fetchSafelyMock.mockResolvedValue({
+      buffer: Buffer.from([0x00, 0x01, 0x02, 0x03]),
+      contentType: null,
+      finalUrl: 'https://img.example/corrupted',
+    });
+
+    await expect(downloadImageForEtsyUpload('https://img.example/corrupted')).rejects.toThrow(/content-type not allowed.*unknown/i);
+  });
+
+  it('a genuinely valid image is accepted, returning {data, contentType} derived from the REAL verified signature, never the declared header', async () => {
+    fetchSafelyMock.mockResolvedValue({
+      buffer: ETSY_TEST_PNG_BUFFER,
+      contentType: 'image/png; charset=binary', // declared header may carry extra params — never passed through verbatim
+      finalUrl: 'https://img.example/real.png',
+    });
+
+    const result = await downloadImageForEtsyUpload('https://img.example/real.png');
+
+    expect(result.contentType).toBe('image/png');
+    expect(result.data).toEqual(ETSY_TEST_PNG_BUFFER);
+  });
+
+  it('a raw network error from fetchSafely (e.g. ECONNRESET) propagates as-is', async () => {
+    fetchSafelyMock.mockRejectedValue(new Error('ECONNRESET'));
+
+    await expect(downloadImageForEtsyUpload('https://img.example/img.jpg')).rejects.toThrow(/ECONNRESET/);
   });
 });
 
