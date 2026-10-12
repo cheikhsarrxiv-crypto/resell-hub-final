@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import prisma from '@/lib/prisma';
+import { fetchSafely } from '@/services/ssrfSafeFetch';
 
 // Initialize Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -46,6 +47,10 @@ export const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'ima
  * 'unavailable', exactly like any other download failure.
  */
 export const MAX_VISION_IMAGE_BYTES = Math.floor((10 * 1024 * 1024 * 3) / 4); // 7.5MB raw -> <=10MB base64
+
+// SSRF hardening (rehostImageFromUrl) — see src/services/ssrfSafeFetch.ts
+// for exactly what fetchSafely does and does not guarantee.
+const REHOST_FETCH_TIMEOUT_MS = 15_000;
 
 export interface UploadImageData {
   workspaceId: string;
@@ -192,39 +197,43 @@ export class StorageService {
    * ones.
    *
    * Best-effort by design and never retried here: a failed download
-   * (network error, non-2xx, disallowed content-type, oversized) simply
-   * throws — the caller (create_product) already treats a single image's
-   * failure as non-fatal to the product itself, exactly like it does for
-   * the batch insert today.
+   * (network error, non-2xx, disallowed/forged content-type, oversized,
+   * SSRF-unsafe URL, timeout) simply throws — the caller (create_product)
+   * already treats a single image's failure as non-fatal to the product
+   * itself, exactly like it does for the batch insert today.
+   *
+   * SSRF hardening: the actual download goes through fetchSafely
+   * (src/services/ssrfSafeFetch.ts) — https-only, private/reserved/
+   * loopback/link-local addresses blocked (including DNS-rebinding and
+   * redirect-to-internal attempts), streamed with a byte cap and an
+   * explicit timeout. The declared Content-Type is never trusted for the
+   * accept/reject decision — matchesImageSignature verifies the actual
+   * bytes, the same real check downloadConversationImageBytes already
+   * applies to a different upload path.
    */
   static async rehostImageFromUrl(data: RehostImageData): Promise<RehostedImage> {
     if (!supabase) {
       throw new Error('Storage service not configured. Please configure Supabase.');
     }
 
-    const response = await fetch(data.sourceUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
-    }
+    const downloaded = await fetchSafely(data.sourceUrl, {
+      maxBytes: MAX_FILE_SIZE,
+      timeoutMs: REHOST_FETCH_TIMEOUT_MS,
+    });
 
-    const contentType = response.headers.get('content-type') || 'image/png';
-    const normalizedContentType = contentType.split(';')[0].trim();
-    if (!ALLOWED_MIME_TYPES.includes(normalizedContentType)) {
-      throw new Error(`File type not allowed: ${normalizedContentType}`);
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > MAX_FILE_SIZE) {
-      throw new Error('File too large. Maximum size: 10MB');
+    const actualMimeType = ALLOWED_MIME_TYPES.find((mime) => matchesImageSignature(downloaded.buffer, mime));
+    if (!actualMimeType) {
+      const declared = (downloaded.contentType ?? '').split(';')[0].trim() || 'unknown';
+      throw new Error(`File type not allowed: ${declared}`);
     }
 
     const timestamp = Date.now();
     const random = Math.random().toString(36).substring(7);
-    const ext = this.getFileExtension(normalizedContentType);
+    const ext = this.getFileExtension(actualMimeType);
     const storagePath = `${data.workspaceId}/${data.productId}/generated-${timestamp}-${random}.${ext}`;
 
-    const { error: uploadError } = await supabase.storage.from(BUCKET_NAME).upload(storagePath, buffer, {
-      contentType: normalizedContentType,
+    const { error: uploadError } = await supabase.storage.from(BUCKET_NAME).upload(storagePath, downloaded.buffer, {
+      contentType: actualMimeType,
       upsert: false,
     });
 
