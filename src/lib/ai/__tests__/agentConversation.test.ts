@@ -14,6 +14,7 @@ import {
   cancelAgentAction,
   shouldStickToBottom,
   resolveKnownConversationId,
+  resultHasImageAttachmentWarning,
   MAX_AGENT_MESSAGE_LENGTH,
   AUTO_SCROLL_THRESHOLD_PX,
   type AgentUiMessage,
@@ -503,6 +504,54 @@ describe('agentConversationReducer — ACTION_UPDATE (Phase 12A)', () => {
 
     expect(updated.messages).toEqual(state.messages);
   });
+
+  it('a warning on one COMPLETED action never leaks onto another message\'s own COMPLETED action', () => {
+    const state: typeof initialAgentConversationState = {
+      ...initialAgentConversationState,
+      messages: [
+        { id: 'm1', role: 'assistant', content: 'ok', pendingAction: { ...pendingAction, status: 'COMPLETED', result: { success: true } } },
+        { id: 'm2', role: 'assistant', content: 'ok', pendingAction: { ...pendingAction, status: 'PENDING_CONFIRMATION' } },
+      ],
+    };
+
+    const updated = agentConversationReducer(state, {
+      type: 'ACTION_UPDATE',
+      messageId: 'm2',
+      pendingAction: { ...pendingAction, status: 'COMPLETED', result: { success: true, imageAttachmentWarning: 'x' } },
+    });
+
+    // Only m2 changed; m1's own already-COMPLETED action (with no warning)
+    // is byte-for-byte untouched by m2's update.
+    expect(updated.messages[0]).toEqual(state.messages[0]);
+    expect(resultHasImageAttachmentWarning(updated.messages[0].pendingAction?.result)).toBe(false);
+    expect(resultHasImageAttachmentWarning(updated.messages[1].pendingAction?.result)).toBe(true);
+  });
+});
+
+describe('resultHasImageAttachmentWarning (image-attach warning surfacing)', () => {
+  it('is true only for a non-empty string imageAttachmentWarning field', () => {
+    expect(resultHasImageAttachmentWarning({ imageAttachmentWarning: '1 image(s) could not be attached...' })).toBe(true);
+  });
+
+  it('is false when the field is absent (the common, fully-successful case)', () => {
+    expect(resultHasImageAttachmentWarning({ success: true, attachedImages: 2, imagesTotal: 2 })).toBe(false);
+  });
+
+  it('is false for a missing/undefined result — never crashes, never invents a warning', () => {
+    expect(resultHasImageAttachmentWarning(undefined)).toBe(false);
+    expect(resultHasImageAttachmentWarning(null)).toBe(false);
+  });
+
+  it('is false for a malformed result (not an object, or a non-string value)', () => {
+    expect(resultHasImageAttachmentWarning('imageAttachmentWarning: yes')).toBe(false);
+    expect(resultHasImageAttachmentWarning(42)).toBe(false);
+    expect(resultHasImageAttachmentWarning({ imageAttachmentWarning: 123 })).toBe(false);
+    expect(resultHasImageAttachmentWarning({ imageAttachmentWarning: '' })).toBe(false);
+  });
+
+  it('is false for a different action\'s error result — an {error} shape is never mistaken for a warning', () => {
+    expect(resultHasImageAttachmentWarning({ error: 'Tool execution failed' })).toBe(false);
+  });
 });
 
 describe('mapAgentActionErrorToMessage (Phase 12A)', () => {
@@ -609,6 +658,72 @@ describe('confirmAgentAction / cancelAgentAction (Phase 12A)', () => {
     const outcome = await confirmAgentAction('action-1');
 
     expect(outcome).toEqual({ status: 'error', error: 'Impossible de contacter ADKSY. Vérifiez votre connexion.' });
+  });
+
+  it('a create_product result carrying imageAttachmentWarning survives the real confirm response → deserialization pipeline unchanged — not just an isolated rendering fixture', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          action: {
+            id: 'action-1',
+            type: 'create_product',
+            status: 'COMPLETED',
+            expiresAt: '2026-01-01T12:15:00.000Z',
+            summary: {},
+            result: {
+              success: true,
+              productId: 'product-1',
+              attachedImages: 0,
+              imagesTotal: 1,
+              imageAttachmentWarning:
+                '1 image(s) could not be attached to this product due to a storage error. The product itself was created successfully and can be edited afterward to add images manually.',
+            },
+          },
+        }),
+      })
+    );
+
+    const outcome = await confirmAgentAction('action-1');
+
+    expect(outcome.status).toBe('ok');
+    if (outcome.status === 'ok') {
+      expect(outcome.pendingAction.status).toBe('COMPLETED');
+      // The exact same object real confirmAndExecute/toView would produce
+      // for this case — verifying the real pipeline, not a hand-built fixture.
+      expect(resultHasImageAttachmentWarning(outcome.pendingAction.result)).toBe(true);
+    }
+  });
+
+  it('a create_product result with no imageAttachmentWarning (full success) also survives the pipeline unchanged', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          action: {
+            id: 'action-2',
+            type: 'create_product',
+            status: 'COMPLETED',
+            expiresAt: '2026-01-01T12:15:00.000Z',
+            summary: {},
+            result: { success: true, productId: 'product-2', attachedImages: 2, imagesTotal: 2 },
+          },
+        }),
+      })
+    );
+
+    const outcome = await confirmAgentAction('action-2');
+
+    expect(outcome.status).toBe('ok');
+    if (outcome.status === 'ok') {
+      expect(resultHasImageAttachmentWarning(outcome.pendingAction.result)).toBe(false);
+    }
   });
 });
 

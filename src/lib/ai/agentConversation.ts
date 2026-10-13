@@ -280,6 +280,24 @@ export function mapAgentActionErrorToMessage(status: number | null, backendMessa
   return 'Une erreur est survenue. Veuillez réessayer.';
 }
 
+/**
+ * Phase 12A warning extension — the only extra signal AgentConfirmation
+ * reads out of a COMPLETED action's own `result`, and only to decide
+ * WHETHER to show a partial-success message, never to echo its content:
+ * the backend's own `imageAttachmentWarning` string (see actionTools.ts)
+ * is an internal/English message meant for logs, not reseller-facing
+ * copy — the UI always shows its own fixed, French, user-facing text
+ * instead (see AgentConfirmation). Returns false for a missing,
+ * non-object, or malformed result — never throws, and never infers a
+ * warning from anything else (the model's own text, conversation
+ * history, or a previous action's result).
+ */
+export function resultHasImageAttachmentWarning(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const warning = (result as Record<string, unknown>).imageAttachmentWarning;
+  return typeof warning === 'string' && warning.length > 0;
+}
+
 function deserializePendingAction(raw: unknown): AgentPendingAction | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;

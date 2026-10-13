@@ -880,7 +880,7 @@ describe('create_product tool definition', () => {
       expect(preview.message).toMatch(/1 real photo/i);
     });
 
-    it('a source item with no images attaches none, never fabricates a placeholder image', async () => {
+    it('a source item with no images attaches none, never fabricates a placeholder image — and is honestly distinguished from a failure (imagesTotal:0, no warning)', async () => {
       const noImageItem = { ...sourcedItem, images: [] };
       pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [noImageItem], providerErrors: [] });
       createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
@@ -888,6 +888,8 @@ describe('create_product tool definition', () => {
       const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.attachedImages).toBe(0);
+      expect(result.imagesTotal).toBe(0);
+      expect(result.imageAttachmentWarning).toBeUndefined();
       expect(productImageRows).toHaveLength(0);
     });
 
@@ -907,6 +909,8 @@ describe('create_product tool definition', () => {
       const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
 
       expect(result.attachedImages).toBe(2); // 1 real + 1 generated
+      expect(result.imagesTotal).toBe(2);
+      expect(result.imageAttachmentWarning).toBeUndefined();
       expect(productImageRows).toHaveLength(2);
       const generatedRow = productImageRows.find((r) => r.sourceType === 'GENERATED');
       expect(generatedRow).toMatchObject({ url: 'https://oaidalleapi.example/img1.png', productId: 'product-1', sourceUrl: null });
@@ -982,7 +986,7 @@ describe('create_product tool definition', () => {
       expect(preview.message).toMatch(/AI-generated photo/i);
     });
 
-    it('a failure while attaching images never undoes or fails the already-created product', async () => {
+    it('a failure while attaching images never undoes or fails the already-created product, and the result honestly distinguishes this from "no images provided"', async () => {
       pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
       createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
       const { prisma } = await import('@/lib/prisma');
@@ -993,6 +997,65 @@ describe('create_product tool definition', () => {
       expect(result.success).toBe(true);
       expect(result.productId).toBe('product-1');
       expect(result.attachedImages).toBe(0);
+      // imagesTotal>0 while attachedImages===0 is exactly what tells a
+      // caller apart "none were provided" from "attaching them failed" —
+      // the old result shape left these indistinguishable.
+      expect(result.imagesTotal).toBe(1);
+      expect(result.imageAttachmentWarning).toMatch(/could not be attached.*storage error/i);
+      expect(result.imageAttachmentWarning).toMatch(/product itself was created successfully/i);
+    });
+
+    it('logs the image-attach failure (never silently swallowed), with a structured context limited to workspaceId/productId/imagesTotal — never the image URL itself', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+      const { prisma } = await import('@/lib/prisma');
+      (prisma.productImage.createMany as any).mockRejectedValueOnce(new Error('storage down'));
+      const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+      await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(consoleLogSpy).toHaveBeenCalled();
+      const loggedLines = consoleLogSpy.mock.calls.map((call) => String(call[0]));
+      const imageFailureLine = loggedLines.find((line) => line.includes('Failed to attach images to newly created product'));
+      expect(imageFailureLine).toBeDefined();
+      // Structured context (workspaceId/productId/imagesTotal) is present;
+      // this handler never passes the sourced item's own image URL (or any
+      // other image data) to the logger's context in the first place.
+      expect(imageFailureLine).toContain('ws-1');
+      expect(imageFailureLine).toContain('product-1');
+      expect(imageFailureLine).toContain('imagesTotal');
+      expect(imageFailureLine).not.toContain(sourcedItem.images[0]);
+
+      consoleLogSpy.mockRestore();
+    });
+
+    it("a raw error message matching an already-redacted secret pattern (e.g. an embedded token=...) is still masked by the project's existing logger redaction — this handler's new logging call goes through the same pipeline, not a bypass", async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+      const { prisma } = await import('@/lib/prisma');
+      (prisma.productImage.createMany as any).mockRejectedValueOnce(new Error('upstream rejected: token=sk-should-be-redacted-123'));
+      const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+      await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      const loggedLines = consoleLogSpy.mock.calls.map((call) => String(call[0]));
+      const imageFailureLine = loggedLines.find((line) => line.includes('Failed to attach images to newly created product'));
+      expect(imageFailureLine).toBeDefined();
+      expect(imageFailureLine).toContain('token=[REDACTED]');
+      expect(imageFailureLine).not.toContain('sk-should-be-redacted-123');
+
+      consoleLogSpy.mockRestore();
+    });
+
+    it('a successful image attach never includes imageAttachmentWarning in the result — the field only ever appears on a real failure', async () => {
+      pushToolCall('conv-1', 'tu-search', 'search_products', {}, { status: 'ok', results: [sourcedItem], providerErrors: [] });
+      createProductMock.mockResolvedValue({ id: 'product-1', sku: 'SKU-X', title: validInput.title, sourceMarketplace: 'ebay', sourceId: sourcedItem.sourceId, sourceUrl: sourcedItem.sourceUrl, sellingPrice: 449, purchasePrice: 200 });
+
+      const result: any = await createProductTool.handler('ws-1', validInput, { conversationId: 'conv-1', userId: 'user-1' });
+
+      expect(result.attachedImages).toBe(1);
+      expect(result.imagesTotal).toBe(1);
+      expect('imageAttachmentWarning' in result).toBe(false);
     });
   });
 

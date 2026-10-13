@@ -698,7 +698,21 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
           generationMetadata: JSON.stringify({ provider: image.provider, model: image.model, prompt: image.prompt, generatedAt: image.generatedAt }),
         })),
       ];
-      if (imageRows.length > 0) {
+      // Image-attach failure fix — previously a silent, unlogged `catch {}`
+      // collapsed "no images were ever provided" and "images were
+      // provided but the DB insert failed" into the exact same
+      // attachedImages:0, leaving the reseller with no way to tell them
+      // apart and no record anywhere that anything went wrong. `imagesTotal`
+      // (how many rows were actually attempted) now always distinguishes
+      // the two: attachedImages===imagesTotal is a real success,
+      // attachedImages===0 with imagesTotal>0 is a real failure — never a
+      // fabricated "it just has no images" story. Mirrors the exact
+      // imagesAttached/imagesTotal/imageUploadWarning convention
+      // publish_etsy_listing's own handler already uses below for the
+      // same "best-effort, product/listing already real either way" shape.
+      const imagesTotal = imageRows.length;
+      let imageAttachmentWarning: string | undefined;
+      if (imagesTotal > 0) {
         try {
           const created = await prisma.productImage.createMany({
             data: imageRows.map((row, index) => ({
@@ -709,8 +723,19 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
             })),
           });
           attachedImages = created.count;
-        } catch {
+        } catch (error) {
           attachedImages = 0;
+          imageAttachmentWarning = `${imagesTotal} image(s) could not be attached to this product due to a storage error. The product itself was created successfully and can be edited afterward to add images manually.`;
+          // Never logs image URLs/metadata themselves (no sensitive/private
+          // data in them either way — real images are the source's own
+          // already-public listing photos — but kept to ids/counts only,
+          // consistent with this file's own existing logger.error call
+          // for the Etsy image-upload failure path below).
+          logger.error('Failed to attach images to newly created product', error instanceof Error ? error : String(error), {
+            workspaceId,
+            productId: product.id,
+            imagesTotal,
+          });
         }
       }
 
@@ -726,6 +751,8 @@ export const createProductTool: AgentToolDefinition<CreateProductToolInput> = {
         purchasePrice: product.purchasePrice,
         inventoryQuantity: parsed.data.quantity,
         attachedImages,
+        imagesTotal,
+        ...(imageAttachmentWarning ? { imageAttachmentWarning } : {}),
       };
     } catch (error) {
       if (error instanceof Error && error.message === PRODUCT_SOURCE_CONFLICT_MESSAGE) {

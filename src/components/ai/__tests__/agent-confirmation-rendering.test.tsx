@@ -155,6 +155,138 @@ describe('AgentConfirmation', () => {
     const componentSource = AgentConfirmation.toString();
     expect(componentSource).not.toContain('dangerouslySetInnerHTML');
   });
+
+  describe('image-attach partial-success warning (create_product)', () => {
+    it('shows the partial-success message when COMPLETED and the result carries imageAttachmentWarning', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{
+            ...basePendingAction,
+            toolName: 'create_product',
+            status: 'COMPLETED',
+            result: {
+              success: true,
+              productId: 'product-1',
+              attachedImages: 0,
+              imagesTotal: 1,
+              imageAttachmentWarning:
+                '1 image(s) could not be attached to this product due to a storage error. The product itself was created successfully and can be edited afterward to add images manually.',
+            },
+          }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).toContain('images n&#x27;ont pas pu être ajoutées');
+      // The fixed, French, user-facing message is shown instead of the
+      // generic one — never both at once.
+      expect(html).not.toContain('confirmée et exécutée');
+    });
+
+    it('a fully successful create_product (no imageAttachmentWarning) still shows the generic success message — no regression', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{
+            ...basePendingAction,
+            toolName: 'create_product',
+            status: 'COMPLETED',
+            result: { success: true, productId: 'product-1', attachedImages: 2, imagesTotal: 2 },
+          }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).toContain('confirmée et exécutée');
+      expect(html).not.toContain('images n&#x27;ont pas pu être ajoutées');
+    });
+
+    it('a different action type (e.g. an engage error result) never triggers the image warning just because a field happens to be truthy', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{ ...basePendingAction, status: 'COMPLETED', result: { simulated: true } }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).toContain('confirmée et exécutée');
+      expect(html).not.toContain('images n&#x27;ont pas pu être ajoutées');
+    });
+
+    it('a FAILED action never shows the image warning, even if a stale/malformed result object were somehow attached — the existing error UI is untouched', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{
+            ...basePendingAction,
+            status: 'FAILED',
+            error: 'Action execution failed',
+            result: { imageAttachmentWarning: 'should never be read for a FAILED action' },
+          }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).toContain('Action execution failed');
+      expect(html).not.toContain('images n&#x27;ont pas pu être ajoutées');
+    });
+
+    it('a missing result on a COMPLETED action never crashes and never fabricates the warning', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{ ...basePendingAction, status: 'COMPLETED', result: undefined }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).toContain('confirmée et exécutée');
+    });
+
+    it('never reveals the real image URL or the backend\'s own internal/technical warning text, even when present in the result', () => {
+      const html = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{
+            ...basePendingAction,
+            status: 'COMPLETED',
+            result: {
+              success: true,
+              imagesTotal: 1,
+              imageAttachmentWarning: '1 image(s) could not be attached due to a storage error at https://img.ebay.com/main.jpg',
+            },
+          }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(html).not.toContain('https://img.ebay.com/main.jpg');
+      expect(html).not.toContain('storage error');
+    });
+
+    it('two independent pendingActions never bleed their warning state into one another', () => {
+      const htmlWithWarning = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{ ...basePendingAction, status: 'COMPLETED', result: { imageAttachmentWarning: 'x' } }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+      const htmlWithoutWarning = renderToStaticMarkup(
+        <AgentConfirmation
+          pendingAction={{ ...basePendingAction, status: 'COMPLETED', result: { success: true } }}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      );
+
+      expect(htmlWithWarning).toContain('images n&#x27;ont pas pu être ajoutées');
+      expect(htmlWithoutWarning).toContain('confirmée et exécutée');
+      expect(htmlWithoutWarning).not.toContain('images n&#x27;ont pas pu être ajoutées');
+    });
+  });
 });
 
 describe('AgentMessageList — Phase 12A wiring', () => {

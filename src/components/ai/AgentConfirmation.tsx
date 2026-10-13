@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { AgentPendingAction } from '@/lib/ai/agentConversation';
+import { resultHasImageAttachmentWarning, type AgentPendingAction } from '@/lib/ai/agentConversation';
 import { AgentActionPreview } from './AgentActionPreview';
 import { AgentActionStatus } from './AgentActionStatus';
 
@@ -24,6 +24,14 @@ interface AgentConfirmationProps {
 export function AgentConfirmation({ pendingAction, onConfirm, onCancel }: AgentConfirmationProps) {
   const [busy, setBusy] = useState<'confirm' | 'cancel' | null>(null);
   const isPending = pendingAction.status === 'PENDING_CONFIRMATION';
+  // Gated strictly on THIS action's own, just-received result — never on
+  // the model's text, conversation history, or any other action's result
+  // (pendingAction is replaced wholesale per-message on every
+  // confirm/cancel response, so there is nothing here to leak from a
+  // prior action). Checked only when COMPLETED: a FAILED/CANCELLED/
+  // EXPIRED action's own error/status handling below is untouched.
+  const hasImageAttachmentWarning =
+    pendingAction.status === 'COMPLETED' && resultHasImageAttachmentWarning(pendingAction.result);
 
   const handleConfirm = async () => {
     if (busy) return;
@@ -91,7 +99,14 @@ export function AgentConfirmation({ pendingAction, onConfirm, onCancel }: AgentC
         </>
       )}
 
-      {pendingAction.status === 'COMPLETED' && <p className="text-xs text-emerald-400">Action confirmée et exécutée.</p>}
+      {pendingAction.status === 'COMPLETED' && hasImageAttachmentWarning && (
+        <p className="text-xs text-amber-400">
+          Produit créé, mais les images n&apos;ont pas pu être ajoutées. Vous devrez les joindre manuellement.
+        </p>
+      )}
+      {pendingAction.status === 'COMPLETED' && !hasImageAttachmentWarning && (
+        <p className="text-xs text-emerald-400">Action confirmée et exécutée.</p>
+      )}
       {pendingAction.status === 'FAILED' && (
         <p className="text-xs text-red-300">{pendingAction.error ?? "L'exécution a échoué."}</p>
       )}
