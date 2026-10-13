@@ -1,4 +1,7 @@
+import { createLogger } from '@/lib/logger';
 import { SubscriptionService } from '@/services/SubscriptionService';
+
+const logger = createLogger('ai-entitlement');
 
 /**
  * Every capability the AI Agent can gate a tool behind. This is a closed
@@ -218,7 +221,7 @@ export class AiEntitlementService {
         capabilities,
       };
     } catch (error) {
-      console.error('[AiEntitlementService] Error computing plan entitlements:', error);
+      logger.error('Error computing plan entitlements', error instanceof Error ? error : String(error), { workspaceId });
       return { planId: null, planName: null, subscriptionStatus: null, capabilities: allFalseCapabilities() };
     }
   }
@@ -278,7 +281,7 @@ export class AiEntitlementService {
 
       return { capability, status: 'refused_plan_insufficient' };
     } catch (error) {
-      console.error('[AiEntitlementService] Error computing capability status:', error);
+      logger.error('Error computing capability status', error instanceof Error ? error : String(error), { workspaceId, capability });
       return { capability, status: 'refused_plan_insufficient' };
     }
   }

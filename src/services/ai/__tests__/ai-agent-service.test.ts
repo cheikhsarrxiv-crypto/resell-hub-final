@@ -638,6 +638,66 @@ describe('AiAgentService — AiUsageService reserve/finalize/release wiring (rac
     expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
   });
 
+  describe('quota-message fix — genuine exhaustion vs. infrastructure failure', () => {
+    const createProductInput = {
+      sourceMarketplace: 'ebay',
+      sourceId: 'src-1',
+      sourceUrl: 'https://example.com/item-1',
+      title: 'Test Item',
+      sellingPrice: 10,
+      purchasePrice: 5,
+    };
+
+    it.each(['period_unavailable', 'no_quota_configured', 'error'] as const)(
+      'reserveUsage REJECTED with reason=%s (infrastructure failure, read/write tool) -> an honest "temporarily unavailable" message, never the "quota" wording, and the handler still never runs (fail-closed unchanged)',
+      async (reason) => {
+        (AiUsageService.reserveUsage as any).mockResolvedValueOnce({ status: 'REJECTED', eventId: null, units: 1, reason });
+        createMock
+          .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
+          .mockResolvedValueOnce(textOnlyResponse('Service unavailable.'));
+
+        const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1');
+
+        const message = (turn.toolCalls[0].result as any).error;
+        expect(message).toMatch(/temporarily unavailable/i);
+        expect(message).not.toMatch(/quota/i);
+        // Still refused — an infrastructure failure must never implicitly
+        // authorize the handler, only the MESSAGE differs from a genuine
+        // quota_exceeded refusal.
+        expect(prismaMock.order.findFirst).not.toHaveBeenCalled();
+        expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+        expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+      }
+    );
+
+    it('hasQuotaRemaining allowed:false with reason=quota_exceeded (engage tool proposal pre-check) -> the quota message, exactly like the read/write path', async () => {
+      (AiUsageService.hasQuotaRemaining as any).mockResolvedValueOnce({ allowed: false, reason: 'quota_exceeded' });
+      createMock
+        .mockResolvedValueOnce(toolUseResponse('create_product', createProductInput))
+        .mockResolvedValueOnce(textOnlyResponse('Quota exceeded.'));
+
+      const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'list this item');
+
+      expect((turn.toolCalls[0].result as any).error).toMatch(/quota/i);
+    });
+
+    it.each(['period_unavailable', 'no_quota_configured'] as const)(
+      'hasQuotaRemaining allowed:false with reason=%s (engage tool proposal pre-check, infrastructure failure) -> the honest "temporarily unavailable" message, never "quota", and the action is never proposed',
+      async (reason) => {
+        (AiUsageService.hasQuotaRemaining as any).mockResolvedValueOnce({ allowed: false, reason });
+        createMock
+          .mockResolvedValueOnce(toolUseResponse('create_product', createProductInput))
+          .mockResolvedValueOnce(textOnlyResponse('Service unavailable.'));
+
+        const turn = await AiAgentService.sendMessage('ws-1', 'user-1', 'list this item');
+
+        const message = (turn.toolCalls[0].result as any).error;
+        expect(message).toMatch(/temporarily unavailable/i);
+        expect(message).not.toMatch(/quota/i);
+      }
+    );
+  });
+
   it('P7 (missing-tests audit) — AI Units exhausted during generate_listing_draft_image: reservation REJECTED -> the real, paid image provider is NEVER called, no image is fabricated or appended to the draft', async () => {
     prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
     const existingDraft = {

@@ -101,16 +101,90 @@ class StructuredLogger {
       context: Object.keys(safeContext).length > 0 ? safeContext : undefined,
     };
 
+    // Redaction fix — error.message/error.stack used to go into the log
+    // entry verbatim, bypassing filterSensitiveData/maskSensitiveStrings
+    // entirely (only `context`, above, ever went through them). A caught
+    // error's own message (e.g. a raw provider/DB error string) or stack
+    // can just as easily carry a leaked secret as anything in `context` —
+    // see this.redactErrorFields's own comment for exactly what is and
+    // isn't covered. Deliberately narrow: only the 3 existing plain-string
+    // fields (name/message/stack) are extracted and masked, never the
+    // error object itself — never passed through filterSensitiveData
+    // (built for plain data objects, not Error instances, and no reason to
+    // risk it recursing into exotic/non-standard error shapes) and never
+    // JSON.stringify'd as a fallback (that could produce an unbounded or
+    // circular-reference-unsafe blob for a non-standard error).
     if (error) {
-      logEntry.error = {
-        name: error.name,
-        message: error.message,
-        stack: error.stack,
-      };
+      logEntry.error = this.redactErrorFields(error);
     }
 
     // Output log
     this.outputLog(logEntry);
+  }
+
+  /**
+   * Extracts and masks the 3 plain-string fields logEntry.error has always
+   * carried (name/message/stack) — never more, so this can never grow into
+   * an unbounded serialized dump of an arbitrary error-like value.
+   *
+   * Defensive by construction, not just by assumption: `error` is typed as
+   * `Error` at the call site, but a caught `error` is `unknown` by nature
+   * (anyone can `throw` anything), and AiAgentService.ts's own callers
+   * already pass `error instanceof Error ? error : String(error)` — so a
+   * non-Error can still reach here as a plain string wrapped upstream, or
+   * in principle as some other error-like shape (a non-Error class, a
+   * plain object with a `message` property, null-prototype objects, a
+   * Proxy with a throwing getter). `.name`/`.message`/`.stack` are read
+   * through optional chaining and never assumed to be strings — each is
+   * passed through safeToString first, which itself never throws (a
+   * throwing/circular `.toString()` is caught and replaced with a fixed
+   * placeholder, never left to crash the logger or produce a runaway
+   * string). No recursion anywhere in this path — safeToString and
+   * maskSensitiveStrings are both single-pass, so a self-referential or
+   * deeply-aliased error object can never cause unbounded recursion here.
+   */
+  private redactErrorFields(error: unknown): { name: string; message: string; stack?: string } {
+    try {
+      const name = this.safeToString((error as { name?: unknown } | null)?.name) || 'Error';
+      const message = this.maskSensitiveStrings(this.safeToString((error as { message?: unknown } | null)?.message));
+      const rawStack = (error as { stack?: unknown } | null)?.stack;
+      // A missing/absent stack (common for a non-Error thrown value, or an
+      // Error constructed in an environment that never populated one)
+      // stays absent rather than becoming the literal string
+      // "undefined" — matches this field's own pre-existing
+      // `stack?: string` optionality.
+      const stack = typeof rawStack === 'string' && rawStack.length > 0 ? this.maskSensitiveStrings(rawStack) : undefined;
+      return { name, message, stack };
+    } catch {
+      // Belt-and-suspenders: safeToString itself never throws, but merely
+      // READING `.name`/`.message`/`.stack` off a hostile value (a Proxy
+      // or a plain object with a throwing getter for one of these) can —
+      // and that throw happens before safeToString is ever reached.
+      // Logging a request's own failure must never itself become a second,
+      // unhandled failure — degrade to a fixed, non-sensitive placeholder
+      // rather than propagate.
+      return { name: 'Error', message: '[error could not be read]' };
+    }
+  }
+
+  /**
+   * Never throws, never returns anything but a string. `null`/`undefined`
+   * become `''` (an absent message is not the same as the 4-character
+   * string "null"/"undefined"); anything already a string passes through
+   * untouched; anything else is coerced via `String(...)`, itself wrapped
+   * in try/catch since a hostile/malformed `.toString()` (throws, or is
+   * not even a function) must never crash logging — the fallback is a
+   * fixed, non-sensitive placeholder, never the raw value re-attempted a
+   * different way.
+   */
+  private safeToString(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (value === null || value === undefined) return '';
+    try {
+      return String(value);
+    } catch {
+      return '[unserializable value]';
+    }
   }
 
   /**

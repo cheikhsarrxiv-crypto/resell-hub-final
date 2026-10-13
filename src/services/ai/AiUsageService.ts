@@ -1,8 +1,11 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
+import { createLogger } from '@/lib/logger';
 import { SubscriptionService } from '@/services/SubscriptionService';
 import { getRequiredCapabilityForTool } from './AiEntitlementService';
 import { getToolUsageUnits, getDefaultMonthlyUnitsForPlan } from './aiUsageConfig';
+
+const logger = createLogger('ai-usage');
 
 /**
  * AiUsageService — the commercial "budget" layer for the AI Agent.
@@ -182,7 +185,7 @@ export class AiUsageService {
         };
       }
     } catch (error) {
-      console.error('[AiUsageService] Error resolving subscription period:', error);
+      logger.error('Error resolving subscription period', error instanceof Error ? error : String(error), { workspaceId });
       return null;
     }
 
@@ -213,7 +216,7 @@ export class AiUsageService {
       const override = await prisma.workspaceAiOverride.findUnique({ where: { workspaceId } });
       if (override) {
         if (!Number.isInteger(override.monthlyUnitsLimit) || override.monthlyUnitsLimit <= 0) {
-          console.error(`[AiUsageService] Invalid WorkspaceAiOverride for workspace ${workspaceId}: monthlyUnitsLimit=${override.monthlyUnitsLimit}`);
+          logger.error('Invalid WorkspaceAiOverride monthlyUnitsLimit', undefined, { workspaceId, monthlyUnitsLimit: override.monthlyUnitsLimit });
           return null;
         }
         return override.monthlyUnitsLimit;
@@ -224,7 +227,7 @@ export class AiUsageService {
       if (!planName) return null;
       return getDefaultMonthlyUnitsForPlan(planName);
     } catch (error) {
-      console.error('[AiUsageService] Error resolving monthly AI Units limit:', error);
+      logger.error('Error resolving monthly AI Units limit', error instanceof Error ? error : String(error), { workspaceId });
       return null;
     }
   }
@@ -273,7 +276,11 @@ export class AiUsageService {
         throw error;
       }
     } catch (error) {
-      console.error('[AiUsageService] Error resolving AiUsagePeriod row:', error);
+      logger.error('Error resolving AiUsagePeriod row', error instanceof Error ? error : String(error), {
+        workspaceId,
+        periodStart: period.periodStart,
+        periodEnd: period.periodEnd,
+      });
       return null;
     }
   }
@@ -373,7 +380,7 @@ export class AiUsageService {
         }
         return { status: 'REJECTED', eventId: null, units, reason: 'error' };
       }
-      console.error('[AiUsageService] Error creating AiUsageEvent reservation:', error);
+      logger.error('Error creating AiUsageEvent reservation', error instanceof Error ? error : String(error), { workspaceId, toolName: params.toolName });
       return { status: 'REJECTED', eventId: null, units, reason: 'error' };
     }
 
@@ -413,7 +420,7 @@ export class AiUsageService {
 
       return { status: 'RESERVED', eventId: event.id, units };
     } catch (error) {
-      console.error('[AiUsageService] Error reserving usage:', error);
+      logger.error('Error reserving usage', error instanceof Error ? error : String(error), { workspaceId, toolName: params.toolName, eventId: event.id });
       await this.claimTerminalStatus(event.id, 'REJECTED').catch(() => undefined);
       return { status: 'REJECTED', eventId: event.id, units, reason: 'error' };
     }
@@ -460,7 +467,7 @@ export class AiUsageService {
 
       return { status: 'RECORDED' };
     } catch (error) {
-      console.error('[AiUsageService] Error finalizing usage:', error);
+      logger.error('Error finalizing usage', error instanceof Error ? error : String(error), { workspaceId, idempotencyKey });
       return { status: 'error' };
     }
   }
@@ -493,7 +500,7 @@ export class AiUsageService {
 
       return { status: 'RELEASED' };
     } catch (error) {
-      console.error('[AiUsageService] Error releasing usage:', error);
+      logger.error('Error releasing usage', error instanceof Error ? error : String(error), { workspaceId, idempotencyKey });
       return { status: 'error' };
     }
   }

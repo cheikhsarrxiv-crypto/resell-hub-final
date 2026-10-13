@@ -7,7 +7,7 @@ import { StorageService } from '@/services/StorageService';
 import { AiToolRegistry } from './AiToolRegistry';
 import { AiActionService } from './AiActionService';
 import { AiEntitlementService, getRequiredCapabilityForTool } from './AiEntitlementService';
-import { AiUsageService } from './AiUsageService';
+import { AiUsageService, type QuotaCheckResult, type ReserveUsageResult } from './AiUsageService';
 import { AgentToolCategory } from './tools/types';
 import { formatAgentProfileForPrompt } from '@/lib/ai/agentProfile';
 
@@ -57,6 +57,30 @@ const AI_REQUEST_TIMEOUT_MS = 60_000;
 // duplicate of, so letting the SDK retry a handful of genuinely transient
 // network blips here is safe, not a second, uncontrolled retry layer.
 const ANTHROPIC_SDK_MAX_RETRIES = 2;
+
+// Quota-message fix — AiUsageService.hasQuotaRemaining/reserveUsage both
+// fail CLOSED (refuse the tool call) for every non-'allowed'/non-'RESERVED'
+// outcome, whether that's a genuine quota exhaustion ('quota_exceeded') or
+// the quota-checking infrastructure itself failing ('period_unavailable',
+// 'no_quota_configured', or a caught DB/SubscriptionService 'error' — see
+// that file's own try/catch on every sub-step). The refusal itself must
+// stay identical either way (never implicitly allow IA usage just because
+// the DB hiccuped) — but the two call sites below used to show the exact
+// same "you've used your quota" text for BOTH cases, which is simply false
+// when the real cause was an infrastructure failure. This picks the right,
+// honest message for each, without changing which cases get refused.
+function describeQuotaRefusal(reason: QuotaCheckResult['reason'] | ReserveUsageResult['reason']): string {
+  if (reason === 'quota_exceeded') {
+    return 'This workspace has used its AI usage quota for the current billing period.';
+  }
+  // 'period_unavailable' | 'no_quota_configured' | 'error' | undefined —
+  // none of these mean the workspace actually exhausted anything; they
+  // mean the budget itself could not be resolved. Defaulting here (rather
+  // than only on an exact match) means an unrecognized/future reason value
+  // is never mistaken for "you're out of quota" — the safer of the two
+  // messages to show when the real cause is unknown.
+  return 'The AI usage service is temporarily unavailable. Please try again in a moment.';
+}
 
 const SYSTEM_PROMPT_INSTRUCTIONS = `
 You are the ADKSY Agent — a tool-using assistant that helps a reseller source, list, sell and fulfill products through ADKSY.
@@ -235,10 +259,15 @@ export class AiAgentService {
    * right before the handler runs — never here. A tool with no commercial
    * cost (aiUsageConfig.ts) is never flagged here, exactly like a tool
    * with no capability mapping is never refused by isCapabilityRefused.
+   *
+   * Quota-message fix — returns the full result (not just a boolean) so
+   * the caller can tell a GENUINE quota exhaustion apart from the
+   * quota-checking infrastructure itself failing (DB/SubscriptionService
+   * error) and show an honest message for each — see
+   * describeQuotaRefusal's own comment.
    */
-  private static async isQuotaLikelyExceeded(workspaceId: string, toolName: string): Promise<boolean> {
-    const result = await AiUsageService.hasQuotaRemaining(workspaceId, toolName);
-    return !result.allowed;
+  private static async checkQuotaForProposal(workspaceId: string, toolName: string): Promise<QuotaCheckResult> {
+    return AiUsageService.hasQuotaRemaining(workspaceId, toolName);
   }
 
   /**
@@ -625,6 +654,11 @@ export class AiAgentService {
         for (const block of toolUseBlocks) {
           const tool = AiToolRegistry.get(block.name);
           let resultPayload: unknown;
+          // Quota-message fix — populated by the `else if` below, at most
+          // once per tool call, so the branch body can read the SAME
+          // result's `.reason` that the condition itself just checked
+          // (never a second, redundant call to checkQuotaForProposal).
+          let quotaCheck: QuotaCheckResult | undefined;
 
           if (!tool) {
             resultPayload = { error: `Unknown tool "${block.name}"` };
@@ -655,15 +689,21 @@ export class AiAgentService {
               // on why the two are not yet merged into one check.
               resultPayload = { error: `The "${getRequiredCapabilityForTool(tool.name)}" capability is not available on this workspace's current plan.` };
               toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
-            } else if (await this.isQuotaLikelyExceeded(workspaceId, tool.name)) {
-              // Advisory only (see isQuotaLikelyExceeded's own comment) —
+            } else if (!(quotaCheck = await this.checkQuotaForProposal(workspaceId, tool.name)).allowed) {
+              // Advisory only (see checkQuotaForProposal's own comment) —
               // avoids proposing an action the workspace almost certainly
               // can't afford. The real, atomic authorization for this
               // tool's actual execution happens later, in
               // AiActionService.confirmAndExecute's own reserveUsage()
               // call, right before the handler runs — never here, and
               // nothing is ever reserved/consumed at this step.
-              resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
+              //
+              // Quota-message fix — describeQuotaRefusal distinguishes a
+              // genuine quota_exceeded from the quota-checking
+              // infrastructure itself failing (period_unavailable/
+              // no_quota_configured/error); the refusal itself is
+              // unchanged either way (still fail-closed).
+              resultPayload = { error: describeQuotaRefusal(quotaCheck.reason) };
               toolCalls.push({ name: tool.name, category: tool.category, input: parsed.data, result: resultPayload });
             } else {
               // 'engage' — Phase 12A: a real, backend-computed preview
@@ -736,7 +776,15 @@ export class AiAgentService {
               });
 
               if (reservation.status !== 'RESERVED') {
-                resultPayload = { error: 'This workspace has used its AI usage quota for the current billing period.' };
+                // Quota-message fix — same distinction as
+                // checkQuotaForProposal's own call site above: reservation.reason
+                // is 'quota_exceeded' only for a genuine budget exhaustion;
+                // every other reason here ('period_unavailable',
+                // 'no_quota_configured', 'error') means reserveUsage's own
+                // DB/SubscriptionService step failed, not that the
+                // workspace actually used anything. Still refused either
+                // way (fail-closed unchanged) — only the message differs.
+                resultPayload = { error: describeQuotaRefusal(reservation.reason) };
               } else {
                 try {
                   resultPayload = await tool.handler(workspaceId, parsed.data, { conversationId: resolvedConversationId, userId });

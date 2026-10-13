@@ -43,7 +43,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { verifyWorkspaceAccess, errorResponse } from '@/lib/security';
 import { prisma } from '@/lib/prisma';
+import { createLogger } from '@/lib/logger';
 import { StorageService } from '@/services/StorageService';
+
+const logger = createLogger('ai-agent-photos-route');
 
 export const dynamic = 'force-dynamic';
 
@@ -96,7 +99,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, conversationId, ...uploaded });
   } catch (error) {
-    console.error('[AI agent photo upload] Error:', error);
+    // No context object here — workspaceId/session are declared inside the
+    // try block above and out of scope in this catch, same as the sibling
+    // GET handler in ../route.ts's own catch.
+    logger.error('AI agent photo upload failed', error instanceof Error ? error : String(error));
     return errorResponse(error);
   }
 }
