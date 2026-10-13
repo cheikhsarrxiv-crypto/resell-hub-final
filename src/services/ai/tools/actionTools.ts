@@ -308,9 +308,20 @@ async function markListingFailed(listingId: string, marketplaceDisplayName: stri
  * independently confirms is ever trusted. Only when no real externalId was
  * ever obtained (the adapter call itself is what failed) does this fall
  * back to the original, unchanged 'failed' classification.
+ *
+ * Retry-publish safety fix: the same "never conclude failure, defer to
+ * reconciliation" treatment now also applies when the adapter's own
+ * createListing() tagged its thrown error `ambiguousPublish: true` (see
+ * EbayAdapter.createListing / EtsyAdapter.createListing's own header
+ * comments) — a retryable-class error at the adapter's real "point of no
+ * return" call means the marketplace's real state is genuinely unknown,
+ * exactly the same uncertainty `knownExternalId` already handles, just
+ * discovered a different way (the call threw instead of returning). Never
+ * trusted as proof of success either — only what reconciliation
+ * independently confirms is.
  */
-async function handlePublishFailure(listingId: string, marketplaceDisplayName: string, knownExternalId: string | undefined) {
-  if (knownExternalId) {
+async function handlePublishFailure(listingId: string, marketplaceDisplayName: string, knownExternalId: string | undefined, caughtError?: unknown) {
+  if (knownExternalId || (caughtError as { ambiguousPublish?: boolean } | undefined)?.ambiguousPublish) {
     return;
   }
   await markListingFailed(listingId, marketplaceDisplayName);
@@ -984,7 +995,7 @@ export const publishListingTool: AgentToolDefinition<{ sourceUrl: string; produc
         status: result.status,
       };
     } catch (error) {
-      await handlePublishFailure(reserveResult.listing.id, 'eBay', ebayExternalId);
+      await handlePublishFailure(reserveResult.listing.id, 'eBay', ebayExternalId, error);
       throw error;
     }
   },
@@ -1248,7 +1259,7 @@ export const publishEtsyListingTool: AgentToolDefinition<{ sourceUrl: string; pr
           : {}),
       };
     } catch (error) {
-      await handlePublishFailure(reserveResult.listing.id, 'Etsy', etsyExternalId);
+      await handlePublishFailure(reserveResult.listing.id, 'Etsy', etsyExternalId, error);
       throw error;
     }
   },

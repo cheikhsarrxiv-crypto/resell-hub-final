@@ -38,9 +38,18 @@ export class RetrySystem {
           throw error
         }
 
-        // Wait before retry
-        const jitter = Math.random() * 1000 // 0-1s jitter
-        const waitTime = Math.min(delay + jitter, this.MAX_DELAY_MS)
+        // Wait before retry — prefer the marketplace's own stated
+        // Retry-After (seconds, surfaced as NormalizedError.retryAfter by
+        // ErrorNormalizer) over the generic exponential backoff, but never
+        // beyond this system's own safety ceiling (MAX_DELAY_MS): an
+        // unreasonably large or malformed Retry-After must never stall a
+        // publish attempt far longer than the rest of this system allows.
+        const retryAfterMs = this.getRetryAfterMs(error)
+        const waitTime =
+          retryAfterMs !== undefined
+            ? Math.min(retryAfterMs, this.MAX_DELAY_MS)
+            : Math.min(delay + Math.random() * 1000, this.MAX_DELAY_MS) // 0-1s jitter
+
         await this.sleep(waitTime)
 
         delay *= 2
@@ -48,6 +57,32 @@ export class RetrySystem {
     }
 
     throw lastError
+  }
+
+  /**
+   * Extracts a valid Retry-After wait time (converted to ms), preferring a
+   * NormalizedError's own `retryAfter` (seconds) field when present
+   * (Etsy's own callEtsyApi already normalizes before throwing), and
+   * falling back to a raw `retry-after` response header otherwise (eBay's
+   * own callEbayApi deliberately never pre-normalizes — see that method's
+   * own comment — so this is the only place that value is ever read for
+   * an eBay error). Returns undefined for anything not a finite,
+   * non-negative value — never trusts a malformed value as if it were a
+   * real instruction from the marketplace.
+   */
+  private static getRetryAfterMs(error: any): number | undefined {
+    const direct = error?.retryAfter
+    if (typeof direct === 'number' && Number.isFinite(direct) && direct >= 0) {
+      return direct * 1000
+    }
+    const headerValue = error?.headers?.['retry-after'] ?? error?.headers?.['Retry-After']
+    if (typeof headerValue === 'string') {
+      const seconds = parseInt(headerValue, 10)
+      if (!Number.isNaN(seconds) && seconds >= 0) {
+        return seconds * 1000
+      }
+    }
+    return undefined
   }
 
   /**

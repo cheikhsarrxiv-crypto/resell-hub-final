@@ -193,6 +193,28 @@ export class AiActionService {
   }
 
   /**
+   * Retry-publish safety fix — the FAILED error message stored for the
+   * reseller to read. Never the raw error/stack (same rule the rest of
+   * this method's own catch already enforces) — only ever one of a small
+   * number of fixed, safe strings, picked by checking a NormalizedError's
+   * own duck-typed shape (never assumed present; any other tool's plain
+   * Error falls through to the original generic message, unchanged).
+   */
+  private static describeActionFailure(error: unknown): string {
+    const normalized = error as { ambiguousPublish?: boolean; retryable?: boolean } | null | undefined;
+    if (normalized?.ambiguousPublish) {
+      return "This publish could not be confirmed due to a temporary marketplace issue. ADKSY will verify the real status before allowing a new attempt — please check back shortly.";
+    }
+    if (normalized?.retryable) {
+      // Reaching here means RetrySystem already exhausted its own
+      // attempts (see EbayAdapter/EtsyAdapter.createListing) — this is
+      // never shown after just one failed try.
+      return "This action could not be completed after multiple attempts due to a temporary issue (rate limit or connectivity). Please try again in a few minutes.";
+    }
+    return 'Action execution failed';
+  }
+
+  /**
    * Confirms and, if (and only if) the confirmation actually wins the
    * race, executes the action — the handler that actually publishes/buys/
    * mutates something external runs here, inside the backend, never in
@@ -337,7 +359,7 @@ export class AiActionService {
       });
       const failed = await prisma.agentAction.update({
         where: { id: actionId },
-        data: { status: 'FAILED', error: 'Action execution failed', executedAt: new Date() },
+        data: { status: 'FAILED', error: this.describeActionFailure(error), executedAt: new Date() },
       });
       return toView(failed);
     }

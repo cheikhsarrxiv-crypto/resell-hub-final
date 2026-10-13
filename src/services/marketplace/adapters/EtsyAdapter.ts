@@ -34,6 +34,7 @@ import {
   OAuthConnectable,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
+import { RetrySystem } from '@/services/marketplace/RetrySystem'
 import crypto from 'crypto'
 
 // Multi-marketplace auth architecture (Option B): Etsy uses OAuth 2.0 +
@@ -243,6 +244,16 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
    * data. This adapter no longer defaults them — a missing `listing.etsy`
    * is a caller bug (ListingService is expected to have already blocked
    * the publish before reaching here), not something to guess at.
+   *
+   * Retry-publish safety fix: creating the draft (below) is never visible
+   * on Etsy and is safe to retry on a transient failure via RetrySystem.
+   * The PATCH to state:'active' is the real point of no return — it is
+   * what actually makes the listing live — so it is deliberately never
+   * automatically retried here. A retryable-class error at or after that
+   * call is tagged `ambiguousPublish: true` instead, exactly like
+   * EbayAdapter.createListing's own publish step (see that method's
+   * header comment for the full reasoning) — the caller defers to
+   * reconciliation rather than a blind second publish.
    */
   async createListing(listing: MarketplaceListingInput): Promise<MarketplaceListing> {
     if (!listing.etsy) {
@@ -254,6 +265,7 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
 
     const shopId = await this.requireShopId()
 
+    let activateAttempted = false
     try {
       const draftBody = {
         quantity: listing.quantity,
@@ -266,13 +278,17 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
         sku: listing.sku ? [listing.sku] : undefined,
       }
 
-      const draft = await this.callEtsyApi(
-        'POST',
-        `/shops/${shopId}/listings`,
-        draftBody
+      // Step 1 — safe to retry: a draft listing is never visible on Etsy
+      // until explicitly activated below.
+      const draft = await RetrySystem.withRetry(
+        () => this.callEtsyApi('POST', `/shops/${shopId}/listings`, draftBody),
+        'Etsy create draft listing'
       )
 
-      // Draft listings are not visible on Etsy until published (state: active)
+      // Step 2: the point of no return — activating the draft is what
+      // actually makes it visible. Deliberately a single attempt, never
+      // wrapped in RetrySystem (see this method's own header comment).
+      activateAttempted = true
       const published = await this.callEtsyApi(
         'PATCH',
         `/shops/${shopId}/listings/${draft.listing_id}`,
@@ -281,7 +297,11 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
 
       return this.mapListing(published)
     } catch (error) {
-      throw ErrorNormalizer.normalize(error, 'etsy')
+      const normalized = ErrorNormalizer.normalize(error, 'etsy')
+      if (activateAttempted && normalized.retryable) {
+        normalized.ambiguousPublish = true
+      }
+      throw normalized
     }
   }
 
@@ -665,11 +685,16 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({}))
+        // Retry-publish safety fix: a real Etsy 429 carries its own
+        // Retry-After, read by ErrorNormalizer.parseRetryAfter — never
+        // captured before this fix. Defensive against a test double that
+        // stubs only {ok, status, json, text} with no .headers at all.
         throw {
           status: response.status,
           statusCode: response.status,
           message: error.error || error.message || `Etsy API error: ${response.statusText}`,
           error,
+          headers: typeof response.headers?.entries === 'function' ? Object.fromEntries(response.headers.entries()) : undefined,
         }
       }
 

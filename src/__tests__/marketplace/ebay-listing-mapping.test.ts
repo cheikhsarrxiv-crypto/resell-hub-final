@@ -3,7 +3,7 @@
  * Network is always mocked (global.fetch stubbed) — no real eBay call is
  * ever made, matching this phase's absolute "no real publication" rule.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { EbayAdapter } from '@/services/marketplace/adapters/EbayAdapter'
 import { ErrorType } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
@@ -244,10 +244,16 @@ describe('F. EbayAdapter — API error categorization (network always mocked)', 
     expect(typeof caught.type).toBe('string')
   })
 
-  it('a network-level failure (fetch itself throws, e.g. timeout) is categorized as NETWORK_ERROR', async () => {
+  it('a network-level failure (fetch itself throws, e.g. timeout) is categorized as NETWORK_ERROR, after RetrySystem genuinely exhausts its own retries on this still-pre-publish step', async () => {
+    // Retry-publish safety fix: step 1 (createOrReplaceInventoryItem) is
+    // now wrapped in RetrySystem — a persistent ETIMEDOUT here is retried
+    // (real exponential backoff, same as architecture.test.ts's own
+    // RetrySystem "gives up after max retries" case) before finally
+    // surfacing as NETWORK_ERROR, never retried forever.
     const timeoutError = new Error('timeout') as any
     timeoutError.code = 'ETIMEDOUT'
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError))
+    const fetchMock = vi.fn().mockRejectedValue(timeoutError)
+    vi.stubGlobal('fetch', fetchMock)
 
     let caught: any
     try {
@@ -257,7 +263,10 @@ describe('F. EbayAdapter — API error categorization (network always mocked)', 
     }
     expect(caught.type).toBe(ErrorType.NETWORK_ERROR)
     expect(caught.retryable).toBe(true)
-  })
+    // Genuinely retried (RetrySystem.MAX_RETRIES = 5), never auto-retried
+    // forever, and never silently given up after a single attempt either.
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+  }, 25000) // Real exponential backoff (1s+2s+4s+8s+jitter) exceeds default 5s timeout — same precedent as architecture.test.ts's own RetrySystem test
 
   it('a 403 is categorized as AUTH_INVALID, distinct from a 401 AUTH_EXPIRED', async () => {
     const fetchMock = mockFetchSequence([{ ok: false, status: 403, json: {} }])
@@ -278,5 +287,101 @@ describe('F. EbayAdapter — API error categorization (network always mocked)', 
       const normalized = ErrorNormalizer.normalize({ status }, 'ebay')
       expect(knownTypes).toContain(normalized.type)
     }
+  })
+})
+
+/**
+ * Retry-publish safety fix — EbayAdapter.createListing() now retries its
+ * two pre-publish steps (createOrReplaceInventoryItem, createOffer) on a
+ * transient failure via RetrySystem, and tags a transient failure at the
+ * final publish step (the real point of no return) as
+ * `ambiguousPublish: true` instead of ever retrying it automatically. See
+ * that method's own header comment for the full reasoning. Fake timers
+ * are used so a genuine retry wait is exercised without a real delay.
+ */
+describe('G. EbayAdapter.createListing — retry-publish safety fix', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('a 429 at step 1 (createOrReplaceInventoryItem) followed by a success results in exactly one successful publish, never a duplicate', async () => {
+    const fetchMock = mockFetchSequence([
+      { ok: false, status: 429, json: { message: 'Rate limited' } }, // step 1, attempt 1
+      { ok: true, json: { sku: 'ADKSY-SKU-1' } }, // step 1, attempt 2 (retried)
+      { ok: true, json: { offerId: 'OFFER-1' } }, // step 2
+      { ok: true, json: { listingId: 'LISTING-1' } }, // step 3 (publish)
+    ])
+    vi.stubGlobal('fetch', fetchMock)
+
+    const promise = makeAdapter().createListing(fullListing)
+    await vi.advanceTimersByTimeAsync(2000) // past step 1's own retry wait
+
+    const result = await promise
+    expect(result.externalId).toBe('LISTING-1')
+    // Exactly 4 real calls — step 1 retried once, step 2 and step 3 each
+    // called exactly once. Never a 5th call: the publish step itself is
+    // never retried, and a successful publish is never repeated.
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('a 401 (permanent auth failure) at step 1 is never retried — exactly one fetch call, immediate failure', async () => {
+    const fetchMock = mockFetchSequence([{ ok: false, status: 401, json: { message: 'Invalid token' } }])
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(makeAdapter().createListing(fullListing)).rejects.toMatchObject({ type: ErrorType.AUTH_EXPIRED })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('a 400 (permanent validation failure) at step 1 is never retried — exactly one fetch call, immediate failure', async () => {
+    const fetchMock = mockFetchSequence([{ ok: false, status: 400, json: { message: 'Bad category' } }])
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(makeAdapter().createListing(fullListing)).rejects.toMatchObject({ type: ErrorType.VALIDATION_ERROR })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('a 429 at the FINAL publish step (the point of no return) is never automatically retried, and is tagged ambiguousPublish — eBay\'s real state is unknown, never assumed failed', async () => {
+    const fetchMock = mockFetchSequence([
+      { ok: true, json: { sku: 'ADKSY-SKU-1' } }, // step 1
+      { ok: true, json: { offerId: 'OFFER-1' } }, // step 2
+      { ok: false, status: 429, json: { message: 'Rate limited' } }, // step 3 (publish) — never retried
+    ])
+    vi.stubGlobal('fetch', fetchMock)
+
+    let caught: any
+    try {
+      await makeAdapter().createListing(fullListing)
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught.type).toBe(ErrorType.RATE_LIMIT_EXCEEDED)
+    expect(caught.ambiguousPublish).toBe(true)
+    // Exactly 3 calls — the publish step's own transient failure is never
+    // retried automatically, unlike steps 1-2.
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('a 400 (definitive rejection, not a transient error) at the FINAL publish step is NOT tagged ambiguousPublish — a real, confirmed rejection', async () => {
+    const fetchMock = mockFetchSequence([
+      { ok: true, json: { sku: 'ADKSY-SKU-1' } },
+      { ok: true, json: { offerId: 'OFFER-1' } },
+      { ok: false, status: 400, json: { message: 'Offer already published' } },
+    ])
+    vi.stubGlobal('fetch', fetchMock)
+
+    let caught: any
+    try {
+      await makeAdapter().createListing(fullListing)
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught.type).toBe(ErrorType.VALIDATION_ERROR)
+    expect(caught.ambiguousPublish).toBeFalsy()
   })
 })

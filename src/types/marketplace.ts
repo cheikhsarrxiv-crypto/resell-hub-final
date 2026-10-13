@@ -405,6 +405,25 @@ export interface NormalizedError {
   retryable: boolean;
   retryAfter?: number; // seconds
   originalError?: unknown;
+  /**
+   * Retry-publish safety fix — set only when this error surfaced during or
+   * after the single "point of no return" call of a marketplace adapter's
+   * createListing() (the step that makes a listing actually visible: eBay's
+   * offer-publish call, Etsy's draft-to-active PATCH), AND the error is of
+   * a retryable class (rate limit/server/network). In that exact case the
+   * marketplace's real state is genuinely unknown — the request may have
+   * been processed before the error surfaced — so this must never be
+   * treated as a plain failure safe to retry from scratch. Callers (see
+   * actionTools.ts's handlePublishFailure) treat this the same as a known
+   * successful externalId: the Listing row stays at syncStatus 'syncing'
+   * rather than 'failed', so the existing reconciliation pipeline
+   * (ListingReconciliationService) resolves it against the real
+   * marketplace state before any second publish attempt is ever made.
+   * Never set for a non-retryable error (e.g. a definitive 400 rejection)
+   * at the same step — that case is a real, confirmed failure, not an
+   * ambiguous one.
+   */
+  ambiguousPublish?: boolean;
 }
 
 export interface MarketplaceError extends Error {

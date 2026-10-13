@@ -66,12 +66,21 @@ vi.mock('@/lib/prisma', () => {
 
 const publishHandler = vi.fn().mockResolvedValue({ simulated: true, message: 'ok' });
 const failingHandler = vi.fn().mockRejectedValue(new Error('boom — a raw internal detail that must never leak'));
+// Retry-publish safety fix — these two mimic exactly what
+// EbayAdapter/EtsyAdapter.createListing now throws after RetrySystem
+// exhausts its own retries (retryable, never a raw Error instance) and
+// after a transient failure at the real "point of no return" publish
+// call (ambiguousPublish) — see AiActionService.describeActionFailure.
+const retryExhaustedHandler = vi.fn().mockRejectedValue({ type: 'RATE_LIMIT_EXCEEDED', statusCode: 429, retryable: true, message: 'eBay rate limit exceeded.' });
+const ambiguousPublishHandler = vi.fn().mockRejectedValue({ type: 'SERVER_ERROR', statusCode: 503, retryable: true, ambiguousPublish: true, message: 'eBay server error.' });
 
 vi.mock('@/services/ai/AiToolRegistry', () => ({
   AiToolRegistry: {
     get: (name: string) => {
       if (name === 'publish_listing') return { name, category: 'engage', handler: publishHandler };
       if (name === 'failing_tool') return { name, category: 'engage', handler: failingHandler };
+      if (name === 'retry_exhausted_tool') return { name, category: 'engage', handler: retryExhaustedHandler };
+      if (name === 'ambiguous_publish_tool') return { name, category: 'engage', handler: ambiguousPublishHandler };
       return undefined;
     },
   },
@@ -227,6 +236,27 @@ describe('AiActionService.confirmAndExecute — the real pipeline', () => {
     expect(result?.error).toBe('Action execution failed');
     expect(result?.error).not.toContain('boom');
     expect(result?.error).not.toContain('raw internal detail');
+  });
+
+  it('Retry-publish safety fix — retries genuinely exhausted (a retryable-class NormalizedError) lands on FAILED with a distinct, explicit, still-sanitized message, never the plain generic one', async () => {
+    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'retry_exhausted_tool' }));
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(result?.error).toMatch(/temporary issue/i);
+    expect(result?.error).toMatch(/try again/i);
+    expect(result?.error).not.toBe('Action execution failed');
+    expect(result?.error).not.toContain('eBay rate limit exceeded');
+  });
+
+  it("Retry-publish safety fix — an ambiguousPublish error (a transient failure at the real point of no return) lands on FAILED with a message that never implies a confirmed failure safe to blindly retry", async () => {
+    const proposed = await AiActionService.proposeAction(baseParams({ toolName: 'ambiguous_publish_tool' }));
+    const result = await AiActionService.confirmAndExecute('ws-1', 'user-1', proposed.id);
+
+    expect(result?.status).toBe('FAILED');
+    expect(result?.error).toMatch(/could not be confirmed/i);
+    expect(result?.error).not.toBe('Action execution failed');
+    expect(result?.error).not.toContain('eBay server error');
   });
 
   it('cross-tenant: workspace B cannot confirm workspace A\'s action', async () => {

@@ -18,6 +18,7 @@ import {
   OAuthConnectable,
 } from '@/types/marketplace'
 import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
+import { RetrySystem } from '@/services/marketplace/RetrySystem'
 import { logger } from '@/lib/logger'
 
 // Multi-marketplace auth architecture (Option B): eBay uses a real OAuth
@@ -281,6 +282,22 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
   /**
    * REAL: Create new listing on eBay
    * https://developer.ebay.com/docs/sell/inventory/create-item
+   *
+   * Retry-publish safety fix: the two steps before the real "point of no
+   * return" (creating/replacing the inventory item, creating the
+   * unpublished offer — neither one is ever visible to a buyer) are each
+   * retried on a transient failure via RetrySystem, which only retries a
+   * rate-limit/server/network-class error and respects a real Retry-After
+   * when eBay sends one. The FINAL step — publishing the offer, which is
+   * what actually makes the listing live — is deliberately NEVER
+   * automatically retried here: if that one specific call fails with a
+   * retryable-class error, eBay's real state is unknown (the publish may
+   * have been processed before the error surfaced back to us), so the
+   * thrown error is tagged `ambiguousPublish: true` instead of silently
+   * retried. The caller (actionTools.ts's handlePublishFailure) reads that
+   * flag and defers to the existing reconciliation pipeline
+   * (findPublishedOfferBySku) rather than ever sending a second, blind
+   * publish attempt.
    */
   async createListing(
     listing: MarketplaceListingInput
@@ -289,6 +306,7 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
       throw new Error('Access token required')
     }
 
+    let publishAttempted = false
     try {
       // A pre-flight validation failure must be normalized exactly like
       // any other eBay error (see this method's own try/catch), so it's
@@ -335,12 +353,12 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
         condition,
       }
 
-      const createResponse = await this.callEbayApi(
-        'POST',
-        '/sell/inventory/v1/inventory_item',
-        this.accessToken,
-        inventoryBody,
-        marketplaceId
+      // Step 1 — safe to retry on a transient failure: eBay's own
+      // createOrReplaceInventoryItem is an upsert keyed by sku, never a
+      // visible listing by itself.
+      const createResponse = await RetrySystem.withRetry(
+        () => this.callEbayApi('POST', '/sell/inventory/v1/inventory_item', this.accessToken!, inventoryBody, marketplaceId),
+        'eBay createOrReplaceInventoryItem'
       )
 
       const sku = createResponse.sku || inventoryBody.sku
@@ -360,12 +378,13 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
         },
       }
 
-      const offerResponse = await this.callEbayApi(
-        'POST',
-        '/sell/inventory/v1/offer',
-        this.accessToken,
-        offerBody,
-        marketplaceId
+      // Step 2 — also safe to retry: still an unpublished offer, never
+      // visible to a buyer even if a retry ends up creating a second one
+      // (worst case: a harmless duplicate draft offer, never a duplicate
+      // live listing).
+      const offerResponse = await RetrySystem.withRetry(
+        () => this.callEbayApi('POST', '/sell/inventory/v1/offer', this.accessToken!, offerBody, marketplaceId),
+        'eBay createOffer'
       )
 
       const offerId = offerResponse.offerId
@@ -378,7 +397,10 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
 
       // Step 3: Publish the offer. Without this call the offer remains in
       // eBay's unpublished/draft state and is never visible to buyers,
-      // even though steps 1-2 above succeeded.
+      // even though steps 1-2 above succeeded. This is the point of no
+      // return — deliberately a single attempt, never wrapped in
+      // RetrySystem (see this method's own header comment).
+      publishAttempted = true
       const publishResponse = await this.callEbayApi(
         'POST',
         `/sell/inventory/v1/offer/${offerId}/publish`,
@@ -399,7 +421,15 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
         marketplace: Marketplace.EBAY,
       }
     } catch (error) {
-      throw ErrorNormalizer.normalize(error, 'ebay')
+      const normalized = ErrorNormalizer.normalize(error, 'ebay')
+      // See this method's own header comment: a retryable-class error at
+      // or after the publish call itself is ambiguous (eBay's real state
+      // is unknown), never a confirmed failure — flagged so the caller
+      // defers to reconciliation instead of a blind second publish.
+      if (publishAttempted && normalized.retryable) {
+        normalized.ambiguousPublish = true
+      }
+      throw normalized
     }
   }
 
@@ -882,11 +912,21 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({}))
+        // Retry-publish safety fix: a real eBay 429 carries its own
+        // Retry-After, read by ErrorNormalizer.parseRetryAfter — never
+        // captured before this fix, silently making that field always
+        // undefined regardless of what eBay actually sent. fetch's own
+        // Headers iteration always yields lowercase names, matching
+        // parseRetryAfter's own lookup.
         throw {
           status: response.status,
           statusCode: response.status,
           message: error.message || `eBay API error: ${response.statusText}`,
           error: error,
+          // Defensive: a real fetch Response always has .headers, but
+          // existing/future test doubles that stub only {ok, status,
+          // json, text} must never crash here just for lacking one.
+          headers: typeof response.headers?.entries === 'function' ? Object.fromEntries(response.headers.entries()) : undefined,
         }
       }
 
