@@ -227,6 +227,24 @@ class StructuredLogger {
    * second visit — accepted because it is a logging utility, and being
    * slightly over-cautious about a repeated non-sensitive reference is a
    * far smaller cost than the infinite recursion it prevents.
+   *
+   * Hostile-getter fix (functional-validation follow-up) — this used to
+   * build `filtered` via `{...obj}`/`[...obj]` up front, which READS
+   * (and so invokes) every enumerable property in one go; a single
+   * throwing getter anywhere on `obj` crashed that one spread, which
+   * crashed this whole call, which crashed the original logger.error/
+   * warn/info/debug call trying to log an unrelated failure. Rebuilt to
+   * iterate key NAMES first (via `for...in obj`, which enumerates without
+   * reading any value) and read each value through its OWN `try/catch`
+   * — so one hostile property degrades to `'[UNREADABLE]'` in place
+   * without taking any sibling field down with it, preserving every
+   * other field exactly as before. A sensitive key is redacted WITHOUT
+   * ever reading its real value at all (never needed, since it is
+   * replaced either way) — so a hostile getter on a field that was going
+   * to be redacted anyway never even gets a chance to throw. Never
+   * surfaces the getter's own exception message (which could itself
+   * echo back whatever the getter was hiding) — only the fixed,
+   * non-sensitive `'[UNREADABLE]'` marker.
    */
   private filterSensitiveData(obj: any, seen: Set<any> = new Set()): any {
     if (typeof obj !== 'object' || obj === null) {
@@ -241,7 +259,7 @@ class StructuredLogger {
     }
     seen.add(obj);
 
-    const filtered = Array.isArray(obj) ? [...obj] : { ...obj };
+    const filtered: any = Array.isArray(obj) ? [] : {};
     const sensitiveKeys = [
       'password',
       'token',
@@ -262,19 +280,33 @@ class StructuredLogger {
       'sentry_dsn',
     ];
 
-    for (const key in filtered) {
+    for (const key in obj) {
       const lowerKey = key.toLowerCase();
 
-      // Check if key is sensitive
+      // Check if key is sensitive — redacted without ever reading the
+      // real value (see this method's own comment on why).
       if (sensitiveKeys.some((sensitive) => lowerKey.includes(sensitive))) {
         filtered[key] = '[REDACTED]';
-      } else if (typeof filtered[key] === 'object' && filtered[key] !== null) {
+        continue;
+      }
+
+      let value: unknown;
+      try {
+        value = obj[key];
+      } catch {
+        filtered[key] = '[UNREADABLE]';
+        continue;
+      }
+
+      if (typeof value === 'object' && value !== null) {
         // Recursively filter nested objects — same `seen` Set passed
         // through, never a fresh one, or the cycle guard above would
         // never see a repeat.
-        filtered[key] = this.filterSensitiveData(filtered[key], seen);
-      } else if (typeof filtered[key] === 'string') {
-        filtered[key] = this.maskSensitiveStrings(filtered[key]);
+        filtered[key] = this.filterSensitiveData(value, seen);
+      } else if (typeof value === 'string') {
+        filtered[key] = this.maskSensitiveStrings(value);
+      } else {
+        filtered[key] = value;
       }
     }
 
