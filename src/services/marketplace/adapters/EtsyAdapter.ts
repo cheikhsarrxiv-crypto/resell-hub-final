@@ -37,6 +37,45 @@ import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
 import { RetrySystem } from '@/services/marketplace/RetrySystem'
 import crypto from 'crypto'
 
+/**
+ * Bounded-timeout fix — every real fetch() in this adapter used to have
+ * no timeout at all, relying entirely on the runtime's own (unbounded, or
+ * very long and platform-dependent) default. A hung Etsy call — most
+ * importantly createListing's own activation PATCH, the real point of no
+ * return — could then stay pending indefinitely, or be killed by the
+ * hosting platform mid-flight before this adapter's own catch block ever
+ * ran, which is strictly worse than a clean, bounded timeout error: it
+ * widens the exact "ambiguous publish" window ListingReconciliationService
+ * already has to account for, without ever surfacing a timely signal of
+ * its own. 15s matches this exact pipeline's own existing convention for
+ * Etsy-related I/O (see actionTools.ts's own ETSY_IMAGE_FETCH_TIMEOUT_MS
+ * and StorageService's REHOST_FETCH_TIMEOUT_MS) — generous enough for a
+ * plain JSON call or a small multipart image upload, bounded enough to
+ * never leave a confirm request hanging far longer than the rest of this
+ * pipeline allows. Not imported from either of those (same reasoning as
+ * actionTools.ts's own comment on ETSY_IMAGE_FETCH_TIMEOUT_MS): a
+ * different concern (this adapter's own API calls, not downloading an
+ * arbitrary source image), kept deliberately uncoupled.
+ *
+ * AbortSignal.timeout(ms) is used instead of a hand-rolled
+ * `new AbortController() + setTimeout(...) + clearTimeout(...)`: it is a
+ * platform primitive that starts, fires, and is garbage-collected on its
+ * own — there is no timer handle for this adapter to leak or to remember
+ * to clear in a finally block, on any code path (success, a real HTTP
+ * error, or the timeout itself).
+ *
+ * This NEVER changes what already counts as "safe to retry" vs "the real
+ * point of no return": RetrySystem.withRetry only ever wraps
+ * createListing's own draft-creation step (never visible on Etsy); the
+ * activation PATCH stays a single attempt. A timeout at or after
+ * activation is tagged `ambiguousPublish: true` by createListing's own
+ * existing logic, exactly like any other retryable-class error already
+ * was — it is never treated as Etsy-side confirmation of failure, and
+ * never unblocks a second, blind publish attempt (ListingReconciliationService's
+ * own Etsy-always-fails-closed policy is untouched by this fix).
+ */
+const ETSY_API_TIMEOUT_MS = 15_000
+
 // Multi-marketplace auth architecture (Option B): Etsy uses OAuth 2.0 +
 // PKCE, so it implements OAuthConnectable — the PKCE-specific extra
 // methods below (getCodeVerifier/setCodeVerifier) stay exactly as they
@@ -140,6 +179,7 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
           code,
           code_verifier: this.codeVerifier,
         }).toString(),
+        signal: AbortSignal.timeout(ETSY_API_TIMEOUT_MS),
       })
 
       if (!response.ok) {
@@ -183,6 +223,7 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
           client_id: this.config.clientId,
           refresh_token: refreshToken,
         }).toString(),
+        signal: AbortSignal.timeout(ETSY_API_TIMEOUT_MS),
       })
 
       if (!response.ok) {
@@ -366,6 +407,7 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
             'x-api-key': this.config.clientId,
           },
           body: form,
+          signal: AbortSignal.timeout(ETSY_API_TIMEOUT_MS),
         }
       )
 
@@ -681,6 +723,7 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(ETSY_API_TIMEOUT_MS),
       })
 
       if (!response.ok) {

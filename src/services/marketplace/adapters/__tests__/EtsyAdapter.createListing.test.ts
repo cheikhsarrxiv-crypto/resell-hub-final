@@ -139,3 +139,126 @@ describe('EtsyAdapter.createListing — retry-publish safety fix', () => {
     expect(caught.ambiguousPublish).toBeFalsy();
   });
 });
+
+/**
+ * Bounded-timeout fix — every real fetch() in EtsyAdapter now carries
+ * `signal: AbortSignal.timeout(ETSY_API_TIMEOUT_MS)`. These tests mock
+ * `fetch` to reject with the exact error shape `AbortSignal.timeout()`
+ * produces (a DOMException-like Error named 'TimeoutError') — the same
+ * pattern already used project-wide for this (see e.g.
+ * EtsySourcingProvider.test.ts) — rather than driving a real timer, since
+ * only the adapter's own handling of that rejection is under test here,
+ * never the platform's own timeout mechanics.
+ */
+describe('EtsyAdapter.createListing — bounded-timeout fix', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeTimeoutError(): Error {
+    const error = new Error('The operation was aborted due to timeout');
+    error.name = 'TimeoutError';
+    return error;
+  }
+
+  it('every real fetch() call in createListing is given an AbortSignal (the bounded-timeout wiring itself)', async () => {
+    const adapter = await makeAdapterWithShop();
+    const fetchMock = mockFetchSequence([
+      { ok: true, json: { listing_id: 12345, state: 'draft' } },
+      { ok: true, json: { listing_id: 12345, state: 'active', title: listing.title, description: listing.description, price: { amount: 44900, divisor: 100, currency_code: 'USD' }, quantity: 1 } },
+    ]);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await adapter.createListing(listing);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const init = call[1] as any;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it('a timeout at step 1 (create draft listing) is treated exactly like any other retryable network error and is retried, never surfaced as a confirmed failure', async () => {
+    const adapter = await makeAdapterWithShop();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(makeTimeoutError()) // step 1, attempt 1 — times out
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: 'OK', json: async () => ({ listing_id: 12345, state: 'draft' }), text: async () => JSON.stringify({ listing_id: 12345, state: 'draft' }) }) // step 1, attempt 2 (retried)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ listing_id: 12345, state: 'active', title: listing.title, description: listing.description, price: { amount: 44900, divisor: 100, currency_code: 'USD' }, quantity: 1 }),
+        text: async () => JSON.stringify({ listing_id: 12345, state: 'active', title: listing.title, description: listing.description, price: { amount: 44900, divisor: 100, currency_code: 'USD' }, quantity: 1 }),
+      }); // step 2 (activate)
+    vi.stubGlobal('fetch', fetchMock);
+
+    const promise = adapter.createListing(listing);
+    await vi.advanceTimersByTimeAsync(2000); // past step 1's own retry wait
+
+    const result = await promise;
+    expect(result.id).toBe('12345');
+    // Exactly 3 real calls — the timed-out first attempt was retried
+    // (never treated as a confirmed Etsy-side rejection), and the
+    // activation step was still called exactly once.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it(
+    'a timeout at the FINAL activation step (the point of no return) is never automatically retried, and is tagged ambiguousPublish — never treated as proof Etsy rejected the listing',
+    async () => {
+      const adapter = await makeAdapterWithShop();
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, status: 200, statusText: 'OK', json: async () => ({ listing_id: 12345, state: 'draft' }), text: async () => JSON.stringify({ listing_id: 12345, state: 'draft' }) }) // step 1
+        .mockRejectedValueOnce(makeTimeoutError()); // step 2 (activate) — times out, never retried
+      vi.stubGlobal('fetch', fetchMock);
+
+      let caught: any;
+      try {
+        await adapter.createListing(listing);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught.type).toBe(ErrorType.NETWORK_ERROR);
+      expect(caught.retryable).toBe(true);
+      expect(caught.ambiguousPublish).toBe(true);
+      // Never a message implying Etsy itself rejected the listing — a
+      // timeout is Etsy's real state being unknown, not a confirmed
+      // failure.
+      expect(caught.message).toMatch(/timed out/i);
+      expect(caught.message).not.toMatch(/reject|invalid|denied/i);
+      // Exactly 2 calls — the activation step's own timeout is never
+      // retried automatically, exactly like the 429 case above.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it('a genuine network error (ECONNRESET) at the activation step is also tagged ambiguousPublish, distinguished from a timeout only by its message', async () => {
+    const adapter = await makeAdapterWithShop();
+    const networkError: any = new Error('socket hang up');
+    networkError.code = 'ECONNRESET';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: 'OK', json: async () => ({ listing_id: 12345, state: 'draft' }), text: async () => JSON.stringify({ listing_id: 12345, state: 'draft' }) })
+      .mockRejectedValueOnce(networkError);
+    vi.stubGlobal('fetch', fetchMock);
+
+    let caught: any;
+    try {
+      await adapter.createListing(listing);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught.type).toBe(ErrorType.NETWORK_ERROR);
+    expect(caught.ambiguousPublish).toBe(true);
+    expect(caught.message).toMatch(/network error/i);
+    expect(caught.message).not.toMatch(/timed out/i);
+  });
+});

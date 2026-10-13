@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EtsyAdapter } from '@/services/marketplace/adapters/EtsyAdapter';
+import { ErrorType } from '@/types/marketplace';
 
 function mockFetchOnce(response: { ok: boolean; status?: number; json: any }) {
   return vi.fn(async (_url: string, _init?: any) => ({
@@ -93,5 +94,37 @@ describe('EtsyAdapter.uploadListingImage', () => {
     expect(init.body.has('image_url')).toBe(false);
     expect(init.body.has('url')).toBe(false);
     expect(init.body.get('image')).toBeInstanceOf(Blob);
+  });
+
+  describe('bounded-timeout fix', () => {
+    it('is given a bounded AbortSignal, never an unbounded fetch', async () => {
+      const { adapter } = await makeAdapterWithShop();
+      const uploadFetch = mockFetchOnce({ ok: true, json: { listing_image_id: 1, rank: 1 } });
+      vi.stubGlobal('fetch', uploadFetch);
+
+      await adapter.uploadListingImage('12345', { data: Buffer.from([1]), filename: 'x.jpg', contentType: 'image/jpeg', rank: 1 });
+
+      const [, init] = uploadFetch.mock.calls[0];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('a timed-out upload throws a normalized, retryable NETWORK_ERROR — never reported as a confirmed Etsy rejection, never a raw/secret-carrying error', async () => {
+      const { adapter } = await makeAdapterWithShop();
+      const timeoutError = new Error('The operation was aborted due to timeout');
+      timeoutError.name = 'TimeoutError';
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError));
+
+      let caught: any;
+      try {
+        await adapter.uploadListingImage('12345', { data: Buffer.from([1]), filename: 'x.jpg', contentType: 'image/jpeg', rank: 1 });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught.type).toBe(ErrorType.NETWORK_ERROR);
+      expect(caught.retryable).toBe(true);
+      expect(caught.message).toMatch(/timed out/i);
+      expect(JSON.stringify(caught)).not.toContain('fake-access-token');
+    });
   });
 });

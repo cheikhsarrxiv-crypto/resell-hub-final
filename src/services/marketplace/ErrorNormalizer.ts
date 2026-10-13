@@ -15,6 +15,29 @@ export class ErrorNormalizer {
    * This makes it agnostic to which marketplace errored
    */
   static normalize(error: any, marketplace: string): NormalizedError {
+    // Idempotency fix — EtsyAdapter's own callEtsyApi already normalizes
+    // once internally (unlike EbayAdapter's callEbayApi, which
+    // deliberately re-throws raw — see that method's own comment), and
+    // every one of its callers (createListing, updateListing,
+    // deleteListing, updateInventory, updateOrderStatus, ...) then calls
+    // normalize() again on what callEtsyApi already returned. Re-deriving
+    // from scratch on that second pass silently drops any field a
+    // specific branch depended on that isn't preserved on NormalizedError
+    // itself (e.g. the original error's own `.name`/`.code`, used below
+    // to recognize a timeout/network error) — a real NormalizedError is
+    // already in the final, canonical shape every caller needs, so
+    // passing it through unchanged here is strictly more correct than
+    // re-normalizing it, for any marketplace.
+    if (
+      error &&
+      typeof error === 'object' &&
+      typeof error.type === 'string' &&
+      typeof error.retryable === 'boolean' &&
+      typeof error.message === 'string'
+    ) {
+      return error as NormalizedError
+    }
+
     // Extract status code
     const statusCode = error?.status || error?.statusCode || error?.response?.status || 500
 
@@ -178,6 +201,38 @@ export class ErrorNormalizer {
         message: "Etsy resource not found",
         statusCode: 404,
         retryable: false,
+        originalError: error,
+      }
+    }
+
+    // Timeout/network errors — checked BEFORE the 5xx fallback below,
+    // mirroring normalizeEbayError's own placement and the same reason
+    // given there: a network-level failure or a bounded-timeout abort
+    // (see EtsyAdapter's own ETSY_API_TIMEOUT_MS / AbortSignal.timeout)
+    // carries no real HTTP status at all, so the top-level statusCode
+    // extraction above defaults to 500 — which would otherwise make this
+    // branch unreachable dead code behind the 5xx fallback, exactly the
+    // miscategorization normalizeEbayError's own comment documents and
+    // fixes for eBay. `AbortSignal.timeout()` aborts with a DOMException
+    // named 'TimeoutError' (distinct from a manually-aborted request,
+    // which would be 'AbortError') — distinguished from a generic network
+    // failure only by its own message here; both are equally
+    // `retryable: true`, and a timeout is never treated as Etsy-side
+    // confirmation that an activation call actually failed (createListing's
+    // own ambiguousPublish tagging already depends only on `retryable`,
+    // never on which specific message/type produced it).
+    if (
+      error?.name === 'TimeoutError' ||
+      error?.code === 'ECONNREFUSED' ||
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET'
+    ) {
+      return {
+        type: ErrorType.NETWORK_ERROR,
+        message: error?.name === 'TimeoutError' ? "Etsy request timed out. Will retry." : "Network error connecting to Etsy. Will retry.",
+        statusCode: 503,
+        retryable: true,
         originalError: error,
       }
     }
