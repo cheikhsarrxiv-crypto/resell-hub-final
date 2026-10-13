@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Prisma } from '@prisma/client';
+import { EventEmitter } from 'events';
 
 interface FakeRow {
   id: string;
@@ -319,6 +320,29 @@ vi.mock('https', () => ({
   default: { request: (...args: unknown[]) => realFetchSafelyHttpsRequestMock(...args) },
   request: (...args: unknown[]) => realFetchSafelyHttpsRequestMock(...args),
 }));
+
+// Combined-integration redirect scenario only — a minimal fake of the
+// http.ClientRequest/IncomingMessage pair the REAL fetchSafely drives,
+// same shape and same synchronous-callback technique as
+// src/services/__tests__/ssrfSafeFetch.test.ts's own FakeReq/FakeRes (see
+// that file's own comment on why the callback must fire synchronously,
+// inside the same call https.request() is invoked from — deferring it
+// would race fetchSafely's own internal DNS-lookup await).
+class CombinedFakeReq extends EventEmitter {
+  destroy = vi.fn();
+  end = vi.fn();
+}
+class CombinedFakeRes extends EventEmitter {
+  statusCode: number;
+  headers: Record<string, string>;
+  resume = vi.fn();
+  destroy = vi.fn();
+  constructor(statusCode: number, headers: Record<string, string> = {}) {
+    super();
+    this.statusCode = statusCode;
+    this.headers = headers;
+  }
+}
 
 // A real, valid 1x1 transparent PNG (67 bytes) — same fixture used by
 // storage-rehost-image.test.ts — so matchesImageSignature's real
@@ -2518,6 +2542,57 @@ describe('downloadImageForEtsyUpload — combined integration with the REAL fetc
     // independent, not accidentally sharing state.
     expect(fetchSafelyMock).not.toHaveBeenCalled();
   });
+
+  it(
+    "an Etsy image URL that redirects (302) to a forbidden private destination is rejected by the REAL fetchSafely — the redirect target's HTTPS transport never opens, no image data returned, no real network call, and the rejection is a normal catchable Error (exactly the shape publish_etsy_listing's own per-image try/catch already handles)",
+    async () => {
+      // Hop 1 — the Etsy image URL itself resolves to a safe public
+      // address (its own DNS check must pass, or the redirect response
+      // below would never even be reached).
+      realFetchSafelyDnsLookupMock.mockImplementationOnce(
+        (_hostname: string, _opts: unknown, cb: (err: Error | null, addresses?: Array<{ address: string; family: number }>) => void) =>
+          cb(null, [{ address: '93.184.216.34', family: 4 }])
+      );
+      // Hop 2 — the REAL fetchSafely re-runs DNS resolution on the
+      // redirect's Location target from scratch (never auto-trusted); it
+      // resolves to the cloud-metadata/link-local address.
+      realFetchSafelyDnsLookupMock.mockImplementationOnce(
+        (_hostname: string, _opts: unknown, cb: (err: Error | null, addresses?: Array<{ address: string; family: number }>) => void) =>
+          cb(null, [{ address: '169.254.169.254', family: 4 }])
+      );
+
+      const redirectRes = new CombinedFakeRes(302, { location: 'https://internal.example.com/secret.png' });
+      realFetchSafelyHttpsRequestMock.mockImplementationOnce((_options: unknown, callback: (res: CombinedFakeRes) => void) => {
+        callback(redirectRes);
+        return new CombinedFakeReq();
+      });
+
+      vi.doUnmock('@/services/ssrfSafeFetch');
+      vi.resetModules();
+      const { downloadImageForEtsyUpload: realDownloadImageForEtsyUpload } = await import('@/services/ai/tools/actionTools');
+
+      // Mirrors EXACTLY the per-image try/catch shape publish_etsy_listing's
+      // own handler uses in production (actionTools.ts) — proving not just
+      // that the promise rejects, but that the rejection is a normal,
+      // cleanly-catchable Error the real pipeline's own error handling
+      // already absorbs without crashing the whole publish.
+      let caughtError: unknown = null;
+      try {
+        await realDownloadImageForEtsyUpload('https://etsy-image-host.example/listing-photo.jpg');
+      } catch (err) {
+        caughtError = err;
+      }
+      expect(caughtError).toBeInstanceOf(Error);
+      expect((caughtError as Error).message).toMatch(/private\/reserved/i);
+
+      // Only the first hop's HTTPS request was ever made — the redirect
+      // target itself was never actually requested, matching
+      // ssrfSafeFetch.test.ts's own "rejects a redirect whose target
+      // resolves to a private address" assertion.
+      expect(realFetchSafelyHttpsRequestMock).toHaveBeenCalledTimes(1);
+      expect(fetchSafelyMock).not.toHaveBeenCalled();
+    }
+  );
 });
 
 /**
