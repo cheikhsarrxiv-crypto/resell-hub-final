@@ -432,4 +432,79 @@ describe('logger — redaction', () => {
       expect(loggerSource).not.toMatch(/require\(['"]http/);
     });
   });
+
+  describe('public API surface — .info()/.debug() coverage (previously 0 calls in this file), and extending Authorization/URL-userinfo checks beyond logger.error()', () => {
+    it('logger.info redacts a quoted JSON sensitive key (apiKey) in context, keeping a non-sensitive field intact — .info() was never exercised by any test before this', () => {
+      const logger = createLogger('test-service');
+      logger.info('Diagnostic info', { rawPayload: '{"apiKey":"FAKE_INFO_SECRET_1"}', workspaceId: 'ws-1' });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.level).toBe('info');
+      expect(entry.context.rawPayload).toContain('"apiKey":"[REDACTED]"');
+      expect(entry.context.workspaceId).toBe('ws-1');
+      const raw = JSON.stringify(entry);
+      expect(raw).not.toContain('FAKE_INFO_SECRET_1');
+    });
+
+    it('logger.debug redacts a quoted JSON sensitive key (token) in context, keeping a non-sensitive field intact — .debug() was never exercised by any test before this', () => {
+      const logger = createLogger('test-service');
+      logger.debug('Diagnostic debug', { rawPayload: '{"token":"FAKE_DEBUG_SECRET_2"}', note: 'fine' });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.level).toBe('debug');
+      expect(entry.context.rawPayload).toContain('"token":"[REDACTED]"');
+      expect(entry.context.note).toBe('fine');
+      const raw = JSON.stringify(entry);
+      expect(raw).not.toContain('FAKE_DEBUG_SECRET_2');
+    });
+
+    it('logger.info redacts an "Authorization: Bearer <fake>" header embedded in a context string — previously only verified through logger.error', () => {
+      const logger = createLogger('test-service');
+      logger.info('Outbound request diagnostic', { requestHeaders: 'Authorization: Bearer FAKE_INFO_BEARER_3' });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.requestHeaders).toBe('Authorization: Bearer [REDACTED]');
+      expect(entry.context.requestHeaders).not.toContain('FAKE_INFO_BEARER_3');
+    });
+
+    it('logger.warn redacts a URL-userinfo credential (fake) embedded in a context string — previously only verified through logger.error', () => {
+      const logger = createLogger('test-service');
+      logger.warn('DB diagnostic', { connectionTarget: 'postgres://demo:FAKE_WARN_URL_SECRET_4@localhost:5432/test' });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.connectionTarget).toBe('postgres://demo:[REDACTED]@localhost:5432/test');
+      expect(entry.context.connectionTarget).not.toContain('FAKE_WARN_URL_SECRET_4');
+    });
+
+    it('logger.debug never throws on a circular context object — same guard verified through .error()/.warn(), now also through .debug()', () => {
+      const logger = createLogger('test-service');
+      const circular: any = { workspaceId: 'ws-1' };
+      circular.self = circular;
+
+      expect(() => logger.debug('Circular context via debug', circular)).not.toThrow();
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.workspaceId).toBe('ws-1');
+      expect(entry.context.self).toBe('[CIRCULAR]');
+    });
+
+    it('logger.info never throws on a context object with a throwing getter — same hostile-getter guard verified through .warn()/.error(), now also through .info(), with siblings preserved', () => {
+      const logger = createLogger('test-service');
+      const hostileContext: Record<string, unknown> = { workspaceId: 'ws-1' };
+      Object.defineProperty(hostileContext, 'detail', {
+        enumerable: true,
+        get(): never {
+          throw new Error('hostile getter via info');
+        },
+      });
+
+      expect(() => logger.info('Hostile getter via info', hostileContext)).not.toThrow();
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.detail).toBe('[UNREADABLE]');
+      expect(entry.context.workspaceId).toBe('ws-1');
+      const raw = JSON.stringify(entry);
+      expect(raw).not.toContain('hostile getter via info');
+    });
+  });
 });
