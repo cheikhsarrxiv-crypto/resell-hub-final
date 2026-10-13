@@ -29,12 +29,33 @@ vi.mock('@anthropic-ai/sdk', () => {
       super(429, undefined, message, 'rate_limit_error');
     }
   }
+  // Explicit-timeout fix — mirrors the real SDK's own hierarchy
+  // (APIConnectionTimeoutError extends APIConnectionError extends
+  // APIError — see node_modules/@anthropic-ai/sdk/core/error.js) closely
+  // enough for `error instanceof Anthropic.APIConnectionTimeoutError` to
+  // behave identically to the real class in AiAgentService's own catch.
+  class APIConnectionError extends APIError {
+    constructor(message?: string) {
+      super(undefined, undefined, message);
+    }
+  }
+  class APIConnectionTimeoutError extends APIConnectionError {
+    constructor(message = 'Request timed out.') {
+      super(message);
+    }
+  }
   class MockAnthropic {
     messages = { create: createMock };
-    constructor(_opts: { apiKey: string }) {}
+    // Explicit-timeout fix — captured so a test can assert the real
+    // constructor actually receives the new timeout/maxRetries options,
+    // without needing those values to affect this mock's own behavior
+    // (it never makes a real network call either way).
+    constructor(public opts: { apiKey: string; timeout?: number; maxRetries?: number }) {}
   }
   (MockAnthropic as any).APIError = APIError;
   (MockAnthropic as any).RateLimitError = RateLimitError;
+  (MockAnthropic as any).APIConnectionError = APIConnectionError;
+  (MockAnthropic as any).APIConnectionTimeoutError = APIConnectionTimeoutError;
   return { default: MockAnthropic };
 });
 
@@ -292,6 +313,86 @@ describe('AiAgentService.sendMessage', () => {
     await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'hi')).rejects.toThrow(
       'The AI agent is receiving too many requests right now. Please try again shortly.'
     );
+  });
+
+  describe('explicit-timeout fix', () => {
+    it('the real Anthropic client is constructed with an explicit timeout and maxRetries — never left at the SDK\'s own 10-minute default', async () => {
+      createMock.mockResolvedValue(textOnlyResponse('hi'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'hi');
+
+      const client = (AiAgentService as any).client;
+      expect(client.opts).toEqual({ apiKey: 'test-key-not-real', timeout: 60_000, maxRetries: 2 });
+    });
+
+    it('APIConnectionTimeoutError -> a clean, distinct, controlled error — never an indefinite hang, never the raw SDK message', async () => {
+      createMock.mockRejectedValue(new (Anthropic as any).APIConnectionTimeoutError('Request timed out.'));
+
+      let caught: any;
+      try {
+        await AiAgentService.sendMessage('ws-1', 'user-1', 'hi');
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught.message).toBe(
+        'The AI agent took too long to respond and the request was stopped before any reply was generated. Please try again.'
+      );
+      // Distinct from the generic/rate-limit messages — never conflated.
+      expect(caught.message).not.toBe('The AI agent is temporarily unavailable. Please try again shortly.');
+      expect(caught.message).not.toContain('Request timed out.');
+    });
+
+    it('a timeout is never retried a second time by the orchestrator itself — createMock called exactly once (the SDK\'s own bounded retries, if any, are entirely internal to the mocked call)', async () => {
+      createMock.mockRejectedValue(new (Anthropic as any).APIConnectionTimeoutError());
+
+      await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'hi')).rejects.toThrow();
+      expect(createMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('a plain network error (not a timeout) still falls through to the generic safe message, never the timeout-specific one', async () => {
+      createMock.mockRejectedValue(new (Anthropic as any).APIConnectionError('ECONNRESET'));
+
+      await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'hi')).rejects.toThrow(
+        'The AI agent is temporarily unavailable. Please try again shortly.'
+      );
+    });
+
+    it('a timeout on the FIRST call leaves no dangling AI-usage reservation and no corrupted history — only the user\'s own message is persisted, no assistant/assistant_summary row at all', async () => {
+      createMock.mockRejectedValue(new (Anthropic as any).APIConnectionTimeoutError());
+
+      await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'hi')).rejects.toThrow();
+
+      // No tool was ever dispatched (the very first model call itself
+      // timed out) — the quota-reservation machinery must never have been
+      // touched at all.
+      expect(AiUsageService.reserveUsage).not.toHaveBeenCalled();
+      expect(AiUsageService.finalizeUsage).not.toHaveBeenCalled();
+      expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+
+      // The user's own message is a true, already-happened fact — it
+      // stays persisted. Nothing else (no partial/fabricated assistant
+      // reply, no assistant_summary) is ever written for this failed turn.
+      const roles = prismaMock.agentMessage.create.mock.calls.map((call) => call[0].data.role);
+      expect(roles).toEqual(['user']);
+    });
+
+    it('a timeout after a tool was already dispatched in an earlier iteration never leaves that iteration\'s own reservation dangling — it was already finalized before the next model call ran', async () => {
+      prismaMock.order.findFirst.mockResolvedValue(fakeOrder);
+      createMock
+        .mockResolvedValueOnce(toolUseResponse('get_order', { orderId: 'order-1' }))
+        .mockRejectedValueOnce(new (Anthropic as any).APIConnectionTimeoutError());
+
+      await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'check order-1')).rejects.toThrow();
+
+      // The first (successful) iteration's own reservation was finalized
+      // synchronously, well before the second (timed-out) call started —
+      // never left RESERVED-but-unresolved by the later timeout.
+      expect(AiUsageService.reserveUsage).toHaveBeenCalledTimes(1);
+      expect(AiUsageService.finalizeUsage).toHaveBeenCalledTimes(1);
+      expect(AiUsageService.releaseUsage).not.toHaveBeenCalled();
+    });
   });
 
   it('generic provider failure -> clean generic error, raw message never leaked', async () => {

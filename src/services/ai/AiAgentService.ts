@@ -38,6 +38,25 @@ const MAX_HISTORY_MESSAGES = 30;
 // deliberately documented limit (see the Phase 11D report), not built to
 // grow/paginate further in this phase.
 const MAX_UI_HISTORY_MESSAGES = 50;
+// Explicit-timeout fix — the SDK's own undocumented-here default is 10
+// minutes per call (confirmed by reading @anthropic-ai/sdk/client.js:
+// `this.timeout = options.timeout ?? DEFAULT_TIMEOUT /* 10 minutes */`),
+// which could leave a single tool-use iteration (of up to
+// MAX_TOOL_ITERATIONS) hanging far longer than any reasonable chat
+// turn should. 60s matches this project's own existing convention for a
+// single external AI call (see OpenAIImageGenerationProvider.ts's own
+// REQUEST_TIMEOUT_MS = 60_000) — generous for a non-streaming completion
+// at AI_MAX_TOKENS, still well short of a pathological hang.
+const AI_REQUEST_TIMEOUT_MS = 60_000;
+// Explicit, not left at the SDK's own implicit default (2) — documents
+// that this IS the one and only retry layer for this call. Deliberately
+// no second, orchestrator-level retry is ever added around
+// client.messages.create() itself (see that call's own comment) — unlike
+// EbayAdapter/EtsyAdapter's publish-path retries, a chat completion call
+// has no "point of no return"/external side effect to protect against a
+// duplicate of, so letting the SDK retry a handful of genuinely transient
+// network blips here is safe, not a second, uncontrolled retry layer.
+const ANTHROPIC_SDK_MAX_RETRIES = 2;
 
 const SYSTEM_PROMPT_INSTRUCTIONS = `
 You are the ADKSY Agent — a tool-using assistant that helps a reseller source, list, sell and fulfill products through ADKSY.
@@ -175,7 +194,19 @@ export class AiAgentService {
       if (!apiKey) {
         throw new Error('AI agent is not configured');
       }
-      this.client = new Anthropic({ apiKey });
+      // Explicit-timeout fix — see AI_REQUEST_TIMEOUT_MS/
+      // ANTHROPIC_SDK_MAX_RETRIES's own comments above for why these
+      // exact values. The SDK's `timeout` option arms a real
+      // AbortController around the underlying fetch() itself (confirmed
+      // by reading @anthropic-ai/sdk/client.js: `const controller = new
+      // AbortController(); ... fetchWithTimeout(url, req, timeout,
+      // controller, ...)`), so this genuinely aborts OUR side of the HTTP
+      // connection when it fires — not just a local "give up waiting"
+      // that leaves something running unobserved on our end. It does NOT
+      // prove Anthropic's own server-side generation stops the instant
+      // we abort — no client-side timeout of any SDK can guarantee that,
+      // and this is never claimed as if it did.
+      this.client = new Anthropic({ apiKey, timeout: AI_REQUEST_TIMEOUT_MS, maxRetries: ANTHROPIC_SDK_MAX_RETRIES });
     }
     return this.client;
   }
@@ -799,6 +830,21 @@ export class AiAgentService {
       if (error instanceof Anthropic.RateLimitError) {
         logger.warn('AI provider rate limited the agent request', { workspaceId, step, model: AI_MODEL, ...anthropicFields });
         throw new Error('The AI agent is receiving too many requests right now. Please try again shortly.');
+      }
+
+      // Explicit-timeout fix — APIConnectionTimeoutError is a real,
+      // distinct SDK class (extends APIConnectionError, itself extends
+      // APIError), fired only when AI_REQUEST_TIMEOUT_MS elapses without a
+      // response. Checked and handled BEFORE the generic
+      // isAnthropicError/attachments heuristic below: a timeout is a
+      // known, specific cause, never guessed — more informative than that
+      // heuristic's own honest "may be" framing for an otherwise-unclassified
+      // API error. Never retried a second time here — the SDK's own
+      // bounded maxRetries already had its chance (see getClient's own
+      // comment); this is the terminal outcome for this call.
+      if (error instanceof Anthropic.APIConnectionTimeoutError) {
+        logger.warn('AI provider request timed out', { workspaceId, step, model: AI_MODEL, timeoutMs: AI_REQUEST_TIMEOUT_MS, ...anthropicFields });
+        throw new Error('The AI agent took too long to respond and the request was stopped before any reply was generated. Please try again.');
       }
 
       logger.error('AI agent request failed', error instanceof Error ? error : String(error), {
