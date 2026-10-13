@@ -296,6 +296,30 @@ vi.mock('@/services/ssrfSafeFetch', () => ({
   fetchSafely: (...args: unknown[]) => fetchSafelyMock(...args),
 }));
 
+// Combined-integration test only (see the
+// 'downloadImageForEtsyUpload — combined integration with the REAL
+// fetchSafely' describe block near the end of this file) — mocks the two
+// Node built-ins the REAL src/services/ssrfSafeFetch.ts itself imports
+// (dns/https), exactly the same technique as
+// src/services/__tests__/ssrfSafeFetch.test.ts, with dedicated mock
+// functions so they can never be confused with fetchSafelyMock above.
+// Inert for every other test in this file: @/services/ssrfSafeFetch stays
+// mocked for all of them (see above), so the real ssrfSafeFetch.ts module
+// — and therefore these two Node built-ins — is never loaded/exercised by
+// anything else here.
+const { realFetchSafelyDnsLookupMock, realFetchSafelyHttpsRequestMock } = vi.hoisted(() => ({
+  realFetchSafelyDnsLookupMock: vi.fn(),
+  realFetchSafelyHttpsRequestMock: vi.fn(),
+}));
+vi.mock('dns', () => ({
+  default: { lookup: (...args: unknown[]) => realFetchSafelyDnsLookupMock(...args) },
+  lookup: (...args: unknown[]) => realFetchSafelyDnsLookupMock(...args),
+}));
+vi.mock('https', () => ({
+  default: { request: (...args: unknown[]) => realFetchSafelyHttpsRequestMock(...args) },
+  request: (...args: unknown[]) => realFetchSafelyHttpsRequestMock(...args),
+}));
+
 // A real, valid 1x1 transparent PNG (67 bytes) — same fixture used by
 // storage-rehost-image.test.ts — so matchesImageSignature's real
 // (duplicated-above) check actually accepts these fixtures, instead of a
@@ -2411,6 +2435,88 @@ describe('downloadImageForEtsyUpload (SSRF fix)', () => {
     fetchSafelyMock.mockRejectedValue(new Error('ECONNRESET'));
 
     await expect(downloadImageForEtsyUpload('https://img.example/img.jpg')).rejects.toThrow(/ECONNRESET/);
+  });
+});
+
+/**
+ * Combined-integration gap, closed — every test above proves two things
+ * SEPARATELY: fetchSafely's own SSRF logic (ssrfSafeFetch.test.ts, dns/
+ * https mocked, fetchSafely itself never mocked) and
+ * downloadImageForEtsyUpload's own wrapper logic (the describe block right
+ * above this one, fetchSafely itself mocked). Nothing proves the two are
+ * actually wired together: a regression that silently reverted
+ * downloadImageForEtsyUpload back to a bare fetch(url) would still pass
+ * every test above unchanged, because fetchSafelyMock stands in for
+ * fetchSafely everywhere else in this file and would simply never be
+ * called by the reverted code — yet every assertion that checks
+ * fetchSafelyMock's own call args would still trivially pass (the mock
+ * was still configured; nothing forces the production code to actually
+ * invoke it).
+ *
+ * This single test closes exactly that gap, using the REAL fetchSafely —
+ * not fetchSafelyMock. @/services/ssrfSafeFetch is unmocked just for this
+ * one test (vi.doUnmock + vi.resetModules + a dynamic import, the
+ * documented Vitest pattern for "one test needs the real module while
+ * every other test in the file needs it mocked"), then
+ * @/services/ai/tools/actionTools is re-imported fresh so ITS OWN
+ * downloadImageForEtsyUpload is bound to the real fetchSafely. The
+ * ORIGINAL, statically-imported downloadImageForEtsyUpload every other
+ * test in this file uses is an ES module binding resolved once, before
+ * any test ran — vi.resetModules()/vi.doUnmock() cannot and do not alter
+ * it retroactively, so every other test keeps using fetchSafelyMock
+ * exactly as before, unaffected by this one.
+ *
+ * dns/https are mocked exactly as in ssrfSafeFetch.test.ts (own dedicated
+ * mock functions, declared above) — no real network call is ever made.
+ * isPrivateOrReservedIp, DNS pinning, and the redirect mechanism inside
+ * the real fetchSafely are never themselves mocked.
+ */
+describe('downloadImageForEtsyUpload — combined integration with the REAL fetchSafely (no mock)', () => {
+  beforeEach(() => {
+    // Only clears call history (never the configured implementation) —
+    // earlier describe blocks in this file leave fetchSafelyMock with
+    // recorded calls of their own; this test's own "never called" check
+    // must be scoped to this test, not the whole file's running history.
+    fetchSafelyMock.mockClear();
+  });
+
+  afterEach(() => {
+    realFetchSafelyDnsLookupMock.mockReset();
+    realFetchSafelyHttpsRequestMock.mockReset();
+    // Restore @/services/ssrfSafeFetch's mock registration for any future
+    // dynamic import, and drop the fresh module instance this test
+    // created. The rest of this file's tests use the original static
+    // import (permanently bound to fetchSafelyMock) and are unaffected by
+    // this either way — this is cleanup for THIS describe block's own
+    // dynamic-import pattern, not a dependency of the other tests.
+    vi.doMock('@/services/ssrfSafeFetch', () => ({
+      fetchSafely: (...args: unknown[]) => fetchSafelyMock(...args),
+    }));
+    vi.resetModules();
+  });
+
+  it('a hostname that DNS resolves to a private IPv4 address (127.0.0.1) is rejected by the REAL fetchSafely — HTTPS transport never opens, no image data returned, no real network call', async () => {
+    realFetchSafelyDnsLookupMock.mockImplementation(
+      (_hostname: string, _opts: unknown, cb: (err: Error | null, addresses?: Array<{ address: string; family: number }>) => void) =>
+        cb(null, [{ address: '127.0.0.1', family: 4 }])
+    );
+
+    vi.doUnmock('@/services/ssrfSafeFetch');
+    vi.resetModules();
+    const { downloadImageForEtsyUpload: realDownloadImageForEtsyUpload } = await import('@/services/ai/tools/actionTools');
+
+    await expect(realDownloadImageForEtsyUpload('https://evil.example.com/image.jpg')).rejects.toThrow(
+      /resolves to a private\/reserved address/i
+    );
+
+    // The real fetchSafely rejects as soon as DNS resolution comes back
+    // private/reserved — proves the HTTPS transport was never even
+    // attempted for this destination (point 3 of the required scenario).
+    expect(realFetchSafelyHttpsRequestMock).not.toHaveBeenCalled();
+    // fetchSafelyMock (used by every other test) must stay untouched by
+    // this real-module test — proves the two code paths are genuinely
+    // independent, not accidentally sharing state.
+    expect(fetchSafelyMock).not.toHaveBeenCalled();
   });
 });
 
