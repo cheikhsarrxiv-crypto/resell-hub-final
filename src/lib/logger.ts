@@ -212,15 +212,34 @@ class StructuredLogger {
   }
 
   /**
-   * Filter sensitive data from objects
+   * Filter sensitive data from objects.
+   *
+   * Circular-reference fix — `seen` tracks every object/array already
+   * visited on this call's own recursion (a fresh Set per top-level call,
+   * via the default parameter; every recursive call explicitly threads
+   * the SAME Set through, never relying on the default again). A context
+   * object that references itself, directly or through a longer cycle,
+   * would otherwise recurse forever and crash with a stack overflow —
+   * logging a request's own failure must never itself become a second,
+   * unhandled failure. Deliberate, documented over-approximation: this
+   * also flags a harmless SHARED reference (the same sub-object reachable
+   * from two different keys, no cycle at all) as `[CIRCULAR]` on its
+   * second visit — accepted because it is a logging utility, and being
+   * slightly over-cautious about a repeated non-sensitive reference is a
+   * far smaller cost than the infinite recursion it prevents.
    */
-  private filterSensitiveData(obj: any): any {
+  private filterSensitiveData(obj: any, seen: Set<any> = new Set()): any {
     if (typeof obj !== 'object' || obj === null) {
       if (typeof obj === 'string') {
         return this.maskSensitiveStrings(obj);
       }
       return obj;
     }
+
+    if (seen.has(obj)) {
+      return '[CIRCULAR]';
+    }
+    seen.add(obj);
 
     const filtered = Array.isArray(obj) ? [...obj] : { ...obj };
     const sensitiveKeys = [
@@ -249,9 +268,11 @@ class StructuredLogger {
       // Check if key is sensitive
       if (sensitiveKeys.some((sensitive) => lowerKey.includes(sensitive))) {
         filtered[key] = '[REDACTED]';
-      } else if (typeof filtered[key] === 'object') {
-        // Recursively filter nested objects
-        filtered[key] = this.filterSensitiveData(filtered[key]);
+      } else if (typeof filtered[key] === 'object' && filtered[key] !== null) {
+        // Recursively filter nested objects — same `seen` Set passed
+        // through, never a fresh one, or the cycle guard above would
+        // never see a repeat.
+        filtered[key] = this.filterSensitiveData(filtered[key], seen);
       } else if (typeof filtered[key] === 'string') {
         filtered[key] = this.maskSensitiveStrings(filtered[key]);
       }
@@ -261,14 +282,84 @@ class StructuredLogger {
   }
 
   /**
-   * Mask sensitive patterns in strings
+   * Mask sensitive patterns in strings.
+   *
+   * Redaction fix (audit follow-up) — the original 4 patterns only ever
+   * matched an UNQUOTED `keyword[=:]value` shape (`token=abc`,
+   * `password: abc`). Proven by direct testing (not assumed) to miss:
+   * - A secret serialized as a standard JSON key:value pair with quoted
+   *   keys (`"apiKey":"abc"`, `{"token": "abc"}`) — the quote right after
+   *   the keyword meant `keyword[=:]` never matched. New pattern #1 below
+   *   covers this specifically (quoted key, quoted value, handles an
+   *   escaped quote inside the value), independently of the 4 unquoted
+   *   patterns which are kept for the exact shapes they already covered.
+   * - An `Authorization: Bearer <token>` / `Authorization: Basic <creds>`
+   *   header, free-text or JSON-serialized — no prior pattern recognized
+   *   the word "Bearer"/"Basic" at all. New pattern #3 requires an
+   *   `authorization` key/word immediately before the scheme word
+   *   (optionally quoted, with `:` or `=`) — deliberately NOT a bare
+   *   `\b(bearer|basic)\b` match anywhere in a string, which was tested
+   *   and found to mangle ordinary English ("a basic test", "a basic
+   *   configuration mistake", "provide a Bearer token for this request")
+   *   by redacting the word right after "basic"/"Bearer". Scoping to the
+   *   `authorization` header context is both what this fix was actually
+   *   asked to cover and what avoids that false-positive class.
+   * - Credentials in a URL's own userinfo (`scheme://user:pass@host`) —
+   *   no prior pattern covered this syntax at all; the previous append
+   *   risked relying on the EMAIL pattern matching that same shape by
+   *   coincidence (it only does so when the password happens to contain
+   *   only `[A-Za-z0-9._%+-]` characters AND the host happens to look
+   *   like a dotted domain — verified to fail for a password containing
+   *   `#`/`!` or a bare host like `localhost`). New pattern #4 matches
+   *   the userinfo structure itself (`scheme://user:password@`),
+   *   redacting only the password segment and leaving the scheme,
+   *   username and host untouched — and, tested explicitly, leaves a
+   *   credential-free URL (no userinfo at all, or merely `host:port`)
+   *   completely unchanged.
+   *
+   * All new patterns bound the "value" they consume to
+   * `[^\s"',}]+` — stopping at whitespace, a quote, a comma or a closing
+   * brace — instead of the old patterns' unbounded `\S+`, specifically so
+   * a match inside a larger JSON/structured string never swallows
+   * trailing punctuation (tested against values followed immediately by
+   * `"`, `,`, `}`).
+   *
+   * What this still cannot do, by design (see this task's own scope):
+   * recognize a bare secret with NO recognizable keyword/header/URL
+   * structure anywhere near it (e.g. a raw API key pasted into a message
+   * with nothing else around it). No regex can reliably tell a random
+   * high-entropy string apart from an ordinary one without an unacceptable
+   * false-positive rate — see this.log's own comment on preferring not to
+   * log a raw external payload/body in the first place for that case.
    */
   private maskSensitiveStrings(str: string): string {
+    // Bounded value: stops at whitespace/quote/comma/closing brace so a
+    // match never consumes trailing JSON/structured-text punctuation.
+    const VALUE = '[^\\s"\',}]+';
     return str
-      .replace(/password[=:]\s*\S+/gi, 'password=[REDACTED]')
-      .replace(/token[=:]\s*\S+/gi, 'token=[REDACTED]')
-      .replace(/api[_-]?key[=:]\s*\S+/gi, 'api_key=[REDACTED]')
-      .replace(/secret[=:]\s*\S+/gi, 'secret=[REDACTED]')
+      // 1. Quoted JSON key:value — "password"/"token"/"secret"/
+      // "apiKey"/"api_key"/"api-key" as an actual JSON object key, with a
+      // quoted string value (escaped-quote-aware). Keeps the key name and
+      // its quotes, redacts only the value.
+      .replace(/"(password|token|secret|api[_-]?key)"\s*:\s*"((?:[^"\\]|\\.)*)"/gi, (_m, key: string) => `"${key}":"[REDACTED]"`)
+      // 2. Original unquoted key[=:]value shapes — unchanged behavior,
+      // now using the same bounded VALUE instead of unbounded `\S+`.
+      .replace(new RegExp(`password[=:]\\s*${VALUE}`, 'gi'), 'password=[REDACTED]')
+      .replace(new RegExp(`token[=:]\\s*${VALUE}`, 'gi'), 'token=[REDACTED]')
+      .replace(new RegExp(`api[_-]?key[=:]\\s*${VALUE}`, 'gi'), 'api_key=[REDACTED]')
+      .replace(new RegExp(`secret[=:]\\s*${VALUE}`, 'gi'), 'secret=[REDACTED]')
+      // 3. Authorization: Bearer/Basic <credential> — scoped to an actual
+      // `authorization` key/word right before the scheme word (never a
+      // bare "bearer"/"basic" anywhere, which was tested to false-positive
+      // on ordinary English).
+      .replace(
+        new RegExp(`(["']?authorization["']?\\s*[:=]\\s*["']?)(bearer|basic)(\\s+)${VALUE}`, 'gi'),
+        (_m, prefix: string, scheme: string, ws: string) => `${prefix}${scheme}${ws}[REDACTED]`
+      )
+      // 4. URL userinfo credentials (scheme://user:password@host) — only
+      // the password segment is replaced; scheme/username/host untouched,
+      // and a URL with no userinfo at all is never matched or altered.
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)([^/\s:@"]+):([^/\s@"]+)@/gi, (_m, scheme: string, user: string) => `${scheme}${user}:[REDACTED]@`)
       .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[EMAIL]');
   }
 

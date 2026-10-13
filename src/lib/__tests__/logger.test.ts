@@ -160,4 +160,155 @@ describe('logger — redaction', () => {
     expect(raw).not.toContain('stack-leaked-secret-xyz');
     expect(raw).not.toContain('context-leaked-secret-abc');
   });
+
+  describe('redaction fix (audit follow-up) — JSON-quoted keys, Authorization headers, URL userinfo', () => {
+    it('redacts a quoted JSON key:value secret (apiKey/password/token/secret) embedded in error.message — previously missed because the key was followed by a quote, never "=" or ":" directly', () => {
+      const logger = createLogger('test-service');
+      logger.error('Upstream rejected', new Error('upstream response: {"apiKey":"leaked-json-key-secret-1"}'));
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toContain('"apiKey":"[REDACTED]"');
+      expect(entry.error.message).not.toContain('leaked-json-key-secret-1');
+    });
+
+    it('redacts quoted JSON secrets for password/token/secret too, with spacing around ":" and inside a larger object, without touching unrelated fields', () => {
+      const logger = createLogger('test-service');
+      const raw = '{ "user":"bob", "password" : "leaked-json-key-secret-2", "token":"leaked-json-key-secret-3", "secret":"leaked-json-key-secret-4", "ok":true }';
+      logger.error('Upstream rejected', new Error(raw));
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).not.toContain('leaked-json-key-secret-2');
+      expect(entry.error.message).not.toContain('leaked-json-key-secret-3');
+      expect(entry.error.message).not.toContain('leaked-json-key-secret-4');
+      expect(entry.error.message).toContain('"user":"bob"');
+      expect(entry.error.message).toContain('"ok":true');
+    });
+
+    it('redacts a quoted JSON secret in error.stack and in a context field too, not just error.message', () => {
+      const logger = createLogger('test-service');
+      const err = new Error('request failed');
+      err.stack = 'Error: request failed\n    body: {"token":"leaked-json-key-secret-5"}';
+
+      logger.error('Request failed', err, { responseBody: '{"secret":"leaked-json-key-secret-6"}' });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.stack).not.toContain('leaked-json-key-secret-5');
+      expect(entry.context.responseBody).not.toContain('leaked-json-key-secret-6');
+      const raw = JSON.stringify(entry);
+      expect(raw).not.toContain('leaked-json-key-secret-5');
+      expect(raw).not.toContain('leaked-json-key-secret-6');
+    });
+
+    it('redacts an "Authorization: Bearer <token>" header, free-text and JSON-serialized, in message and context', () => {
+      const logger = createLogger('test-service');
+      logger.error(
+        'Request rejected',
+        new Error('Authorization: Bearer leaked-bearer-secret-1 was rejected by upstream'),
+        { rawHeaders: '{"Authorization":"Bearer leaked-bearer-secret-2"}' }
+      );
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toContain('Authorization: Bearer [REDACTED]');
+      expect(entry.error.message).not.toContain('leaked-bearer-secret-1');
+      expect(entry.context.rawHeaders).not.toContain('leaked-bearer-secret-2');
+    });
+
+    it('redacts an "Authorization: Basic <credentials>" header the same way', () => {
+      const logger = createLogger('test-service');
+      logger.error('Request rejected', new Error('authorization: basic leaked-basic-secret-1'));
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toMatch(/basic \[REDACTED\]/i);
+      expect(entry.error.message).not.toContain('leaked-basic-secret-1');
+    });
+
+    it('does NOT redact the ordinary English words "basic"/"bearer" when there is no Authorization header context — no false positive', () => {
+      const logger = createLogger('test-service');
+      const err = new Error('The error was a basic configuration mistake; please provide a Bearer token manually next time');
+
+      logger.error('Diagnostic note', err);
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toBe('The error was a basic configuration mistake; please provide a Bearer token manually next time');
+    });
+
+    it('redacts credentials embedded in a URL\'s own userinfo (scheme://user:password@host), including a password with special characters, without altering the rest of the URL', () => {
+      const logger = createLogger('test-service');
+      logger.error('DB connection failed', new Error('connection to postgres://dbuser:leaked#url-secret!@db.internal:5432/mydb failed'));
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toContain('postgres://dbuser:[REDACTED]@db.internal:5432/mydb');
+      expect(entry.error.message).not.toContain('leaked#url-secret!');
+    });
+
+    it('redacts URL userinfo credentials even against a bare host with no dotted domain (e.g. localhost) — not reliant on the email pattern coincidentally matching', () => {
+      const logger = createLogger('test-service');
+      logger.error('DB connection failed', new Error('failed to reach https://admin:leaked-localhost-secret@localhost:5432/app'));
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toContain('https://admin:[REDACTED]@localhost:5432/app');
+      expect(entry.error.message).not.toContain('leaked-localhost-secret');
+    });
+
+    it('does NOT alter a URL with no credentials at all, or a URL whose ":" before a number is just a port — no false positive', () => {
+      const logger = createLogger('test-service');
+      const err = new Error('GET https://example.com:8080/api/v1/resource?x=1 returned 503');
+
+      logger.error('Request failed', err);
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.error.message).toBe('GET https://example.com:8080/api/v1/resource?x=1 returned 503');
+    });
+
+    it('a self-referential (circular) context object never hangs or crashes the logger — degrades to a "[CIRCULAR]" marker instead of recursing forever', () => {
+      const logger = createLogger('test-service');
+      const circular: any = { workspaceId: 'ws-1' };
+      circular.self = circular;
+
+      expect(() => logger.error('Circular context test', new Error('plain failure'), circular)).not.toThrow();
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.workspaceId).toBe('ws-1');
+      expect(entry.context.self).toBe('[CIRCULAR]');
+    });
+
+    it('a context object with a nested array containing an object that circularly references an ancestor never hangs or crashes', () => {
+      const logger = createLogger('test-service');
+      const parent: any = { label: 'parent' };
+      parent.children = [{ label: 'child', backToParent: parent }];
+
+      expect(() => logger.error('Circular nested context test', new Error('plain failure'), parent)).not.toThrow();
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.children[0].backToParent).toBe('[CIRCULAR]');
+    });
+
+    it('a shared (non-circular) nested reference used from two different keys is still handled safely, without crashing — flagged on its second occurrence (documented, safe over-approximation)', () => {
+      const logger = createLogger('test-service');
+      const shared = { note: 'shared payload' };
+      const context = { left: shared, right: shared };
+
+      expect(() => logger.error('Shared reference test', new Error('plain failure'), context)).not.toThrow();
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.left).toEqual({ note: 'shared payload' });
+      expect(entry.context.right).toBe('[CIRCULAR]');
+    });
+
+    it('still handles deeply nested objects and arrays of objects correctly alongside the new patterns — no regression from the circular-reference guard', () => {
+      const logger = createLogger('test-service');
+      logger.error('Deep nested context test', new Error('plain failure'), {
+        a: { b: { c: { apiKey: 'leaked-deep-secret-1' } } },
+        items: [{ token: 'leaked-deep-secret-2' }, { note: 'fine' }],
+      });
+
+      const [entry] = readEntries(consoleLogSpy);
+      expect(entry.context.a.b.c.apiKey).toBe('[REDACTED]');
+      expect(entry.context.items[0].token).toBe('[REDACTED]');
+      expect(entry.context.items[1].note).toBe('fine');
+      const raw = JSON.stringify(entry);
+      expect(raw).not.toContain('leaked-deep-secret-1');
+      expect(raw).not.toContain('leaked-deep-secret-2');
+    });
+  });
 });
