@@ -8,6 +8,7 @@ import { Button } from '@/components/UI/Button';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { ETSY_WHEN_MADE_OPTIONS } from '@/services/marketplace/EtsyListingMapper';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 interface EtsyTaxonomyNode {
   id: number;
@@ -16,7 +17,7 @@ interface EtsyTaxonomyNode {
 
 export default function NewProductPage() {
   const router = useRouter();
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
@@ -98,6 +99,19 @@ export default function NewProductPage() {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <div className="text-center py-12 space-y-4">
+        <p className="text-red-600">{workspaceReadiness.message}</p>
+        <Button variant="primary" onClick={() => window.location.reload()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (!isReady) {
     return <div className="text-center py-12">Loading...</div>;

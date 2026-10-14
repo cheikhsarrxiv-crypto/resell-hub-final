@@ -9,11 +9,12 @@ import { Badge } from '@/components/UI/Button';
 import { ArrowLeft, Truck, Check } from 'lucide-react';
 import Link from 'next/link';
 import { formatCurrency, getStatusLabel, getStatusColor, formatDateTime } from '@/lib/utils';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 export default function OrderDetailPage() {
   const params = useParams();
   const orderId = params.orderId as string;
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [order, setOrder] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -107,6 +108,19 @@ export default function OrderDetailPage() {
       setSimulating(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <div className="text-center py-12 space-y-4">
+        <p className="text-red-600">{workspaceReadiness.message}</p>
+        <Button variant="primary" onClick={() => window.location.reload()}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (loading) {
     return <div className="text-center py-12">Loading order...</div>;

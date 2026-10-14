@@ -6,6 +6,7 @@ import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCard
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { formatCurrency } from '@/lib/utils';
 import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { BarChart3 } from 'lucide-react';
 
 interface RevenueTrendPoint {
@@ -34,7 +35,7 @@ interface MarketplacePerformance {
 }
 
 export default function AnalyticsPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [revenueTrend, setRevenueTrend] = useState<RevenueTrendPoint[]>([]);
   const [productsPerformance, setProductsPerformance] = useState<ProductPerformance[]>([]);
   const [marketplacePerformance, setMarketplacePerformance] = useState<MarketplacePerformance>({});
@@ -73,6 +74,18 @@ export default function AnalyticsPage() {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <DashboardLoadingState message="Loading analytics..." />;

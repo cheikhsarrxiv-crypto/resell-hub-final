@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
 import { Button } from '@/components/UI/Button';
 import { ArrowLeft, AlertCircle, CheckCircle, Check } from 'lucide-react';
 import { formatCurrency } from '@/lib/utils';
-import { LoadingState } from '@/components/StateComponents';
+import { LoadingState, ErrorState } from '@/components/StateComponents';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 interface Product {
   id: string;
@@ -46,7 +47,7 @@ interface MarketplaceConnection {
 function NewListingForm() {
   const searchParams = useSearchParams();
   const preselectedProductId = searchParams.get('productId');
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
 
   const [products, setProducts] = useState<Product[]>([]);
   const [connections, setConnections] = useState<MarketplaceConnection[]>([]);
@@ -204,6 +205,18 @@ function NewListingForm() {
       setSubmitting(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <ErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <LoadingState message="Loading..." />;

@@ -8,6 +8,7 @@ import { StatusBadge } from '@/components/dashboard/StatusBadge';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { Zap, TrendingUp, Package, Truck } from 'lucide-react';
 import { formatCurrency, getStatusLabel, formatDateTime } from '@/lib/utils';
 
@@ -41,7 +42,7 @@ interface FulfillmentMetrics {
 }
 
 export default function FulfillmentPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [orders, setOrders] = useState<FulfillmentOrder[]>([]);
   const [metrics, setMetrics] = useState<FulfillmentMetrics | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,6 +85,18 @@ export default function FulfillmentPage() {
   };
 
   const statuses = ['pending', 'accepted', 'processing', 'shipped', 'delivered', 'failed', 'cancelled'];
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <DashboardLoadingState message="Loading fulfillment data..." />;

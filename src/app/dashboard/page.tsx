@@ -14,13 +14,15 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { DashboardLoadingState, DashboardErrorState, DashboardUpgradeState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { classifyMetricsResponse, type MetricsFetchOutcome } from '@/lib/dashboardMetricsState';
 import { formatCurrency, formatNumber } from '@/lib/utils';
 import { TrendingUp, ShoppingCart, Package, Zap, Plus } from 'lucide-react';
 
 export default function DashboardPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [state, setState] = useState<MetricsFetchOutcome | { kind: 'loading' }>({ kind: 'loading' });
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
   const [revenueTrend, setRevenueTrend] = useState<{ date: string; revenue: number }[]>([]);
 
   useEffect(() => {
@@ -56,6 +58,16 @@ export default function DashboardPage() {
       setState({ kind: 'error', message: "Une erreur réseau s'est produite lors du chargement de ton tableau de bord." });
     }
   };
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Aucun espace de travail disponible"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (state.kind === 'loading') {
     return <DashboardLoadingState message="Chargement du tableau de bord..." />;
