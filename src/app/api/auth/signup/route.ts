@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { signUpSchema } from '@/lib/validations';
 import prisma from '@/lib/prisma';
@@ -112,6 +113,27 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
+    // Signup race fix — the findUnique check above has a real TOCTOU
+    // window: two concurrent requests for the same email can both pass it
+    // and both reach provisionUser, whose own tx.user.create then hits
+    // the real User_email_key constraint for the losing request. That is
+    // the exact same "User already exists" outcome the check above
+    // already returns a clean 400 for — never a server failure. Matches
+    // this project's own established P2002-disambiguation convention
+    // (see src/services/ProductService.ts's own target-based check):
+    // never assumes every P2002 here is the email conflict — only one
+    // whose meta.target actually names it.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const target = error.meta?.target;
+      const fields = Array.isArray(target) ? target : typeof target === 'string' ? [target] : [];
+      if (fields.includes('email')) {
+        return NextResponse.json(
+          { error: 'User already exists' },
+          { status: 400 }
+        );
+      }
+    }
+
     console.error('Signup error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
