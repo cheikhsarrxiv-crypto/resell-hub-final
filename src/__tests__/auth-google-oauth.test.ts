@@ -252,6 +252,50 @@ describe('src/auth.ts — signIn callback — Google branch only', () => {
     expect(user.id).toBe('existing-google-user');
   });
 
+  // Google OAuth slug-collision fix — provisionUser failing (slug
+  // collision exhausted, DB error, etc.) must never be silently
+  // swallowed into a successful sign-in.
+  it('a provisioning failure (provisionUser throws) returns false — never authenticates, never mutates user.id, no unhandled exception escapes the callback', async () => {
+    const { authConfig } = await import('@/auth');
+    findUniqueMock.mockResolvedValue(null); // no existing account with this email
+    provisionUserMock.mockRejectedValue(new Error('P2002: Unique constraint failed on the fields: (`slug`)'));
+    const user: any = { id: 'google-sub-fail', email: 'brandnew@example.com' };
+
+    const result = await authConfig.callbacks!.signIn!({
+      user,
+      account: { provider: 'google', type: 'oidc' } as any,
+      profile: { email: 'brandnew@example.com', email_verified: true, name: 'Brand New' } as any,
+    } as any);
+
+    expect(result).toBe(false);
+    // The raw Google subject is never overwritten with a DB id that was
+    // never actually created.
+    expect(user.id).toBe('google-sub-fail');
+  });
+
+  // Account-without-workspace diagnosis (separate ADKSY task) — an
+  // EXISTING account found by email with zero workspaces must still be
+  // able to sign in (this callback only ever links by id; it never
+  // creates/repairs a workspace for an existing account, and this test
+  // deliberately documents that unchanged behavior rather than
+  // introducing new auto-remediation logic, which is out of this
+  // task's scope).
+  it('an existing account with no workspace at all still signs in (links by id) — this callback never auto-creates a workspace for an existing user', async () => {
+    const { authConfig } = await import('@/auth');
+    findUniqueMock.mockResolvedValue({ id: 'existing-user-no-workspace' });
+    const user: any = { id: 'google-sub-no-ws', email: 'noworkspace@example.com' };
+
+    const result = await authConfig.callbacks!.signIn!({
+      user,
+      account: { provider: 'google', type: 'oidc' } as any,
+      profile: { email: 'noworkspace@example.com', email_verified: true, name: 'No Workspace' } as any,
+    } as any);
+
+    expect(result).toBe(true);
+    expect(provisionUserMock).not.toHaveBeenCalled();
+    expect(user.id).toBe('existing-user-no-workspace');
+  });
+
   it('CRITICAL: a Credentials account signing in via Google with the same verified email links to the SAME User.id — password/workspace/subscription are never touched, no duplicate is ever created', async () => {
     const { authConfig } = await import('@/auth');
     // This existing row represents a Credentials account: it has a real

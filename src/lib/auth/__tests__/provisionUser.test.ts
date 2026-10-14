@@ -93,4 +93,42 @@ describe.skipIf(!dbAvailable)('provisionUser — real DB', () => {
 
     expect(user.country).toBe('FR');
   });
+
+  // Google OAuth slug-collision fix — two different real email addresses
+  // that share the same local part (the part before '@') used to abort
+  // the whole provisioning transaction with an unhandled unique
+  // constraint violation on Workspace.slug.
+  it('a second account whose email local-part collides with an existing workspace slug gets a disambiguated slug, and the first workspace is never touched', async () => {
+    const localPart = `provision-collide-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const emailA = `${localPart}@example.com`;
+    const emailB = `${localPart}@another-provider.example`;
+
+    const { user: userA, workspace: workspaceA } = await provisionUser({
+      email: emailA,
+      name: 'Collision A',
+      password: null,
+      preVerifiedEmail: true,
+    });
+    createdUserIds.push(userA.id);
+
+    expect(workspaceA.slug).toBe(localPart);
+
+    const { user: userB, workspace: workspaceB } = await provisionUser({
+      email: emailB,
+      name: 'Collision B',
+      password: null,
+      preVerifiedEmail: true,
+    });
+    createdUserIds.push(userB.id);
+
+    // Deterministic, collision-resistant fallback — never the same slug,
+    // never a random/non-deterministic value, always derived from this
+    // user's own real id.
+    expect(workspaceB.slug).toBe(`${localPart}-${userB.id.slice(-8)}`);
+    expect(workspaceB.slug).not.toBe(workspaceA.slug);
+
+    // The first user's workspace was never renamed/touched by the second call.
+    const dbWorkspaceA = await prisma.workspace.findUnique({ where: { id: workspaceA.id } });
+    expect(dbWorkspaceA?.slug).toBe(localPart);
+  });
 });
