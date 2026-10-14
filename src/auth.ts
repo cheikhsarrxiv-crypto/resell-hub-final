@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import NextAuth, { type NextAuthConfig } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
@@ -7,6 +8,9 @@ import prisma from '@/lib/prisma';
 import { authConfig as baseAuthConfig } from '@/auth.config';
 import { provisionUser } from '@/lib/auth/provisionUser';
 import { isReservedAdminEmail } from '@/lib/admin';
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('auth-google-signin');
 
 // Full config — Node.js runtime only (API routes, server components).
 // Never import this file from middleware.ts: the Credentials provider
@@ -121,14 +125,30 @@ export const authConfig: NextAuthConfig = {
         return true;
       }
 
-      const { user: created } = await provisionUser({
-        email: profile.email,
-        name: profile.name ?? profile.email.split('@')[0],
-        password: null,
-        preVerifiedEmail: true,
-      });
-      user.id = created.id;
-      return true;
+      try {
+        const { user: created } = await provisionUser({
+          email: profile.email,
+          name: profile.name ?? profile.email.split('@')[0],
+          password: null,
+          preVerifiedEmail: true,
+        });
+        user.id = created.id;
+        return true;
+      } catch (error) {
+        // Never authenticate a Google sign-in whose required
+        // provisioning (User + Subscription + Workspace) didn't actually
+        // succeed — an unhandled exception here used to propagate
+        // straight out of this callback, which NextAuth turns into a
+        // generic failure anyway, but silently: this makes the failure
+        // explicit and gives it a correlation id, without ever logging
+        // the email/profile/any secret.
+        const correlationId = randomUUID();
+        logger.error('Google sign-in provisioning failed', error instanceof Error ? error : String(error), {
+          correlationId,
+          category: 'provisioning_failed',
+        });
+        return false;
+      }
     },
     async jwt({ token, user, account }) {
       if (user) {
