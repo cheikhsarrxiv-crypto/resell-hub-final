@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
 import { Button } from '@/components/UI/Button';
 import { ProductImageDisplay } from '@/components/ProductImageDisplay';
 import { LoadingState, ErrorState } from '@/components/StateComponents';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { ArrowLeft, ImageIcon, Tag } from 'lucide-react';
 
 interface Product {
@@ -64,8 +65,8 @@ const SYNC_STATUS_LABELS: Record<string, string> = {
 
 export default function ProductDetailPage() {
   const { id: productId } = useParams();
-  const { workspaceId, isReady } = useWorkspace();
-  
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
+
   const [product, setProduct] = useState<Product | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +98,18 @@ export default function ProductDetailPage() {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <ErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <LoadingState message="Loading product..." />;

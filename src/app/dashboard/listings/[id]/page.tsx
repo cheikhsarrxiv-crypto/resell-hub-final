@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/UI/Card';
 import { ArrowLeft, AlertCircle, ImageIcon } from 'lucide-react';
 import { formatCurrency, formatDateTime } from '@/lib/utils';
 import { LoadingState, ErrorState } from '@/components/StateComponents';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 const SYNC_STATUS_COLORS: Record<string, string> = {
   not_synced: 'bg-gray-100 text-gray-800',
@@ -27,7 +28,7 @@ const SYNC_STATUS_LABELS: Record<string, string> = {
 export default function ListingDetailPage() {
   const params = useParams();
   const listingId = params.id as string;
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
 
   const [listing, setListing] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +58,18 @@ export default function ListingDetailPage() {
       setLoading(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <ErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <LoadingState message="Loading listing..." />;

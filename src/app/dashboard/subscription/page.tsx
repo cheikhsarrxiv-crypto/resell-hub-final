@@ -5,7 +5,8 @@ import { useWorkspace } from '@/hooks';
 import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCardTitle } from '@/components/dashboard/DashboardCard';
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
-import { DashboardLoadingState } from '@/components/dashboard/DashboardStates';
+import { DashboardLoadingState, DashboardErrorState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { formatCurrency } from '@/lib/utils';
 import { isEnterprisePlan } from '@/lib/subscription/planHelpers';
 import { Check } from 'lucide-react';
@@ -24,7 +25,7 @@ interface Plan {
 }
 
 export default function SubscriptionPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [subscription, setSubscription] = useState<any>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,6 +110,18 @@ export default function SubscriptionPage() {
       setCheckoutError("We couldn't open the billing portal. Please try again in a moment.");
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (loading) {
     return <DashboardLoadingState message="Loading subscription..." />;

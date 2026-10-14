@@ -8,6 +8,7 @@ import { Button } from '@/components/UI/Button';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { LoadingState, ErrorState } from '@/components/StateComponents';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { ETSY_WHEN_MADE_OPTIONS } from '@/services/marketplace/EtsyListingMapper';
 
 interface EtsyTaxonomyNode {
@@ -19,7 +20,7 @@ export default function EditProductPage() {
   const router = useRouter();
   const params = useParams();
   const productId = params.id as string;
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -138,6 +139,18 @@ export default function EditProductPage() {
       setSaving(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <ErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <LoadingState message="Loading product..." />;

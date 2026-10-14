@@ -8,6 +8,7 @@ import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCard
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState, DashboardErrorState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { ConfirmModal } from '@/components/ConfirmModal';
 
 const inputClass =
@@ -15,7 +16,7 @@ const inputClass =
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { workspace, isReady } = useWorkspace();
+  const { workspace, isReady, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [workspaceName, setWorkspaceName] = useState('');
   const [workspaceDescription, setWorkspaceDescription] = useState('');
   const [country, setCountry] = useState('');
@@ -91,6 +92,18 @@ export default function SettingsPage() {
       setSaving(false);
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady) {
     return <DashboardLoadingState message="Loading settings..." />;

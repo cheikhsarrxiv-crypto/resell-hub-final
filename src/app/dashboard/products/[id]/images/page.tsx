@@ -10,6 +10,7 @@ import { ImageUploadZone } from '@/components/ImageUploadZone';
 import { ImageGallery } from '@/components/ImageGallery';
 import { ArrowLeft } from 'lucide-react';
 import { LoadingState, ErrorState } from '@/components/StateComponents';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 interface ProductImage {
   id: string;
@@ -21,8 +22,8 @@ interface ProductImage {
 
 export default function ProductImagesPage() {
   const { id: productId } = useParams();
-  const { workspaceId, isReady } = useWorkspace();
-  
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
+
   const [images, setImages] = useState<ProductImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +149,18 @@ export default function ProductImagesPage() {
       throw err;
     }
   };
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <ErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <LoadingState message="Loading images..." />;

@@ -7,11 +7,12 @@ import { DashboardCard, DashboardCardContent, DashboardCardHeader, DashboardCard
 import { DashboardButton } from '@/components/dashboard/DashboardButton';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
+import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 import { Plus, Package, Search } from 'lucide-react';
 import { formatCurrency } from '@/lib/utils';
 
 export default function ProductsPage() {
-  const { workspaceId, isReady } = useWorkspace();
+  const { workspaceId, isReady, workspace, loading: workspaceLoading, error: workspaceError } = useWorkspace();
   const [products, setProducts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,6 +53,18 @@ export default function ProductsPage() {
     const q = search.trim().toLowerCase();
     return products.filter((p) => p.title?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q));
   }, [products, search]);
+
+  const workspaceReadiness = getWorkspaceReadiness(workspace, workspaceLoading, workspaceError);
+
+  if (workspaceReadiness.status === 'error') {
+    return (
+      <DashboardErrorState
+        message="Unable to load your workspace"
+        details={workspaceReadiness.message}
+        onRetry={() => window.location.reload()}
+      />
+    );
+  }
 
   if (!isReady || loading) {
     return <DashboardLoadingState message="Loading products..." />;
