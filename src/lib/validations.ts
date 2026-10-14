@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { ETSY_WHEN_MADE_OPTIONS } from '@/services/marketplace/EtsyListingMapper';
+import { ALLOWED_MIME_TYPES } from '@/services/StorageService';
 
 const ETSY_WHEN_MADE_VALUES = ETSY_WHEN_MADE_OPTIONS.map((o) => o.value) as [string, ...string[]];
+const ALLOWED_IMAGE_MIME_TYPES = ALLOWED_MIME_TYPES as [string, ...string[]];
 
 // Auth
 export const signUpSchema = z.object({
@@ -194,13 +196,36 @@ export const aiChatMessageSchema = z.object({
     .default([]),
 });
 
+// AI-first "free listing creation" workflow — exactly the shape POST
+// /api/ai/agent/photos returns ({url, storagePath, mimeType}, see that
+// route's own header comment) and the only shape buildAgentRequestBody
+// (src/lib/ai/agentConversation.ts) ever sends back in `attachments`.
+// mimeType reuses StorageService's own ALLOWED_MIME_TYPES rather than a
+// second, possibly-drifting list — this is shape validation only: the
+// real security boundary stays StorageService.downloadConversationImageBytes,
+// which re-derives mimeType from storagePath's own extension and never
+// trusts this field, and re-verifies storagePath's prefix against
+// {workspaceId}/_draft-uploads/{conversationId}/ itself (see that
+// method's own header comment) — never duplicated here.
+const agentPhotoAttachmentSchema = z.object({
+  url: z.string().url('Each attachment url must be a valid URL'),
+  storagePath: z.string().min(1, 'Each attachment storagePath is required'),
+  mimeType: z.enum(ALLOWED_IMAGE_MIME_TYPES, { errorMap: () => ({ message: 'Unsupported attachment mimeType' }) }),
+});
+
 // AI Agent — distinct from aiChatMessageSchema above. The agent persists
 // its own conversation server-side (see AgentConversation/AgentMessage in
 // prisma/schema.prisma), so the client sends a conversationId to
-// continue one instead of resending full history.
+// continue one instead of resending full history. attachments: real,
+// already-uploaded photos (see agentPhotoAttachmentSchema above) — never
+// raw file bytes over this JSON body. Capped at 10: no real UI flow
+// attaches more than a handful of photos to one turn, and persisting a
+// much larger array as synthetic tool_use/tool_result content
+// (AiAgentService.sendMessage) has no legitimate case, only abuse.
 export const aiAgentMessageSchema = z.object({
   message: z.string().min(1, 'Message is required').max(4000, 'Message is too long'),
   conversationId: z.string().min(1).optional(),
+  attachments: z.array(agentPhotoAttachmentSchema).max(10, 'Too many attachments').optional(),
 });
 
 export type SignUpInput = z.infer<typeof signUpSchema>;

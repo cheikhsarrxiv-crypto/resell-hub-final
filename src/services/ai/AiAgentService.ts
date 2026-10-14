@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
 import { ADKSY_AI_FALLBACK_MESSAGE } from '@/lib/ai/knowledgeBase';
+import { StorageService } from '@/services/StorageService';
 import { AiToolRegistry } from './AiToolRegistry';
 import { AiActionService } from './AiActionService';
 import { AiEntitlementService, getRequiredCapabilityForTool } from './AiEntitlementService';
@@ -72,6 +73,8 @@ Free listing creation — no sourcing required (AI-first listing workflow): sour
 Collecting information conversationally (AI-first "free listing creation" workflow): never present a giant form or ask for every field at once. Ask for what's genuinely missing, one question (or a small, natural group of simple ones) at a time, in plain conversational text — exactly like you already do for any other clarification, no special tool is needed to "ask a question": simply respond with text and wait for the next message. NEVER ask again for something the reseller already told you earlier in this conversation — re-read the conversation before asking. Indispensable facts (ask when missing and actually needed): what the item is (enough to write a title — category/brand/model as applicable), condition, size when applicable, photos when none exist yet, a purchase price when known/needed for a margin preview, and a selling price (or let the reseller ask you to propose one — see below). Optional facts (box, invoice, accessories, color, material, year, country of manufacture, extra defects, manufacturer reference, etc.): ask only if natural in the conversation, and if the reseller doesn't give one, simply leave it unset — NEVER invent it. This absolute rule has NO exception for this workflow: never guess or fabricate a purchase price, selling price, size, condition, color, material, accessories, box, invoice, defect, authenticity claim, dimension, purchase date, origin, SKU, or any other specific product fact. A detail you merely suspect from a photo is a HYPOTHESIS, never a fact — say so explicitly and ask the reseller to confirm it before treating it as real.
 
 Photos in free listing creation: ask for photos when none have been attached yet and the reseller hasn't said there are none. Real photos the reseller sends in the chat are uploaded via the product's own existing provenance system (tagged USER_UPLOADED once the product is actually created) — you never generate a substitute image instead of a real one the reseller is providing, and generate_listing_draft_image (AI-generated images) remains reserved for the SOURCED pipeline/explicit reseller request, never a stand-in for a missing real photo in this workflow. Once at least one real photo has been sent in this conversation, generate_listing_draft (FREE mode) and edit_listing_draft automatically attach it — you never need to pass an image yourself.
+
+Photos attached to any message — real visual analysis, with real limits: when the reseller attaches a photo to a message, in any workflow, you genuinely receive and can see its actual image content in that same turn — never just a filename or a description of one. You may describe what you actually observe (a visible logo, a general shape, an apparent color, a visible defect) as YOUR OWN observation, clearly framed as such ("sur la photo, je vois...", "il me semble voir..."), never as a confirmed fact. Never claim certainty about a brand, model, material, authenticity, or condition from a photo alone — especially when the image is ambiguous, partial, or low-quality — say so plainly and ask the reseller to confirm it in words before treating it as a real fact anywhere else in this conversation. Never pass your own visual impression into a tool call or any business action as if it were a reseller-confirmed fact — only ever pass a value the reseller has actually stated in words. A tool result's own photo entry can be marked unavailable when the file could not be retrieved this turn (e.g. too large, wrong format, or a storage failure) — when that happens, say plainly that this specific photo could not be analyzed; never claim to have seen, analyzed, or described a photo that the tool result marked unavailable, and never treat a partial success (some photos attached, others unavailable) as if every photo had been analyzed.
 
 Preparing the free draft and margin preview: once you have the indispensable facts (at minimum a title), call generate_listing_draft with NO sourceUrl and the fields the reseller actually gave you (title/brand/condition/size/color/material/model/proposedPrice) — never a value they didn't state. It returns a draftId: remember it and pass it back on every later edit_listing_draft/create_product call for this same item, exactly like you already do with sourceUrl for a sourced item. Use edit_listing_draft's patch for every later change (e.g. "mets plutôt 189 € et précise qu'il y a la boîte" → one edit_listing_draft call changing only price and description) — never regenerate the draft from scratch for a small change. A free draft has no sourced purchase cost at all — once the reseller has told you their purchase price, use the existing calculate_margin tool (purchasePrice/purchaseCurrency + the draft's own proposed price) to show a margin preview; state plainly which part is the reseller's own figure, which is your proposal, and which (if any) is still only an estimate — marketplace/shipping/tax fees not yet known must be named as excluded, never silently folded into "profit".
 
@@ -436,13 +439,64 @@ export class AiAgentService {
     // is ever populated — see aiAgentMessageSchema) already verified this
     // exact workspace+conversation and already wrote the real bytes to
     // Supabase Storage before this method was ever called.
+    //
+    // Real vision wiring (AI agent readiness audit, P0 fix): this used to
+    // ONLY persist the photo's metadata (url/storagePath/mimeType) as a
+    // plain JSON-text tool_result — the model never received the photo's
+    // actual pixels, only a text description of where it lives. Now, for
+    // THIS turn's live Anthropic call, each attachment's real bytes are
+    // fetched via StorageService.downloadConversationImageBytes — the
+    // existing, already-hardened function that re-verifies the storagePath
+    // is really scoped under this exact workspace+conversation's own
+    // upload prefix, re-derives mimeType from the storagePath's own
+    // extension (never the client-supplied mimeType field), checks the
+    // file's magic bytes match that mimeType, and downloads it via the
+    // Supabase SDK's own authenticated call — never a raw fetch() of the
+    // client-supplied `url` (that would be an SSRF surface; see that
+    // function's own comment). A photo that fails this (missing, wrong
+    // type, oversized, forged path) is marked 'unavailable' rather than
+    // silently dropped or falsely claimed as analyzed.
+    //
+    // The persisted DB row (and therefore every future turn's replayed
+    // history — see loadHistory) deliberately keeps the SAME lightweight,
+    // metadata-only shape as before — never the raw image bytes/base64.
+    // Resending the same photo's full bytes on every later turn would
+    // bloat this conversation's storage forever and waste tokens on every
+    // subsequent request for no benefit: the model's own understanding of
+    // the photo, once analyzed in THIS turn's reply, already becomes part
+    // of the ordinary text history going forward.
     if (attachments && attachments.length > 0) {
       const toolUseId = `photo-upload-${randomUUID()}`;
       const uploadedAt = new Date().toISOString();
-      const photos = attachments.map((a) => ({ url: a.url, storagePath: a.storagePath, mimeType: a.mimeType, uploadedAt }));
+
+      const downloads = await Promise.all(
+        attachments.map((a) =>
+          StorageService.downloadConversationImageBytes({
+            workspaceId,
+            conversationId: resolvedConversationId,
+            storagePath: a.storagePath,
+          })
+        )
+      );
+
+      const photos = attachments.map((a, i) => ({
+        url: a.url,
+        storagePath: a.storagePath,
+        mimeType: a.mimeType,
+        uploadedAt,
+        status: downloads[i] ? ('attached' as const) : ('unavailable' as const),
+      }));
+
       const toolUseBlock = { type: 'tool_use', id: toolUseId, name: 'user_photos_uploaded', input: { count: photos.length } };
-      const toolResultPayload = { photos, count: photos.length };
-      const toolResultBlock = { type: 'tool_result', tool_use_id: toolUseId, content: JSON.stringify(toolResultPayload) };
+      // Persisted version — metadata only, no image bytes, read back by
+      // loadHistory on every future turn and by findToolResultsByName for
+      // revalidation (e.g. generate_listing_draft's free mode).
+      const persistedToolResultPayload = { photos, count: photos.length };
+      const persistedToolResultBlock = {
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: JSON.stringify(persistedToolResultPayload),
+      };
 
       await this.persistMessage(resolvedConversationId, 'assistant', JSON.stringify([toolUseBlock]), {
         toolName: 'user_photos_uploaded',
@@ -451,12 +505,34 @@ export class AiAgentService {
       });
       messages.push({ role: 'assistant', content: [toolUseBlock] });
 
-      await this.persistMessage(resolvedConversationId, 'tool_result', JSON.stringify([toolResultBlock]), {
+      await this.persistMessage(resolvedConversationId, 'tool_result', JSON.stringify([persistedToolResultBlock]), {
         toolName: 'user_photos_uploaded',
         toolUseId,
         toolCategory: 'write',
       });
-      messages.push({ role: 'user', content: [toolResultBlock] });
+
+      // Ephemeral version — used ONLY for this turn's live model call,
+      // never persisted: a text summary (so the model knows which photos
+      // succeeded/failed and in what order) followed by one real Anthropic
+      // vision `image` content block per successfully downloaded photo, in
+      // the same order the reseller attached them. A failed download never
+      // gets an image block — the model is told via the summary that this
+      // specific photo could not be retrieved, so it can say so honestly
+      // rather than ever claiming to have seen it.
+      const ephemeralContent: Array<Record<string, unknown>> = [
+        { type: 'text', text: JSON.stringify(persistedToolResultPayload) },
+      ];
+      for (let i = 0; i < attachments.length; i++) {
+        const downloaded = downloads[i];
+        if (downloaded) {
+          ephemeralContent.push({
+            type: 'image',
+            source: { type: 'base64', media_type: downloaded.mimeType, data: downloaded.buffer.toString('base64') },
+          });
+        }
+      }
+      const ephemeralToolResultBlock = { type: 'tool_result', tool_use_id: toolUseId, content: ephemeralContent };
+      messages.push({ role: 'user', content: [ephemeralToolResultBlock] });
     }
 
     const client = this.getClient();
@@ -734,6 +810,29 @@ export class AiAgentService {
         cause,
         ...anthropicFields,
       });
+
+      // Real photo analysis hardening (P1-3, final review finding) — a
+      // photo that passed every check in downloadConversationImageBytes
+      // (size, signature, ownership) can still be rejected by Anthropic's
+      // own API itself (e.g. a payload shape it doesn't accept), which
+      // surfaces here as a genuine Anthropic.APIError, not a download
+      // failure — the whole turn aborts, since one bad image can
+      // invalidate the entire request. There is no reliable way, from a
+      // single combined API error, to prove the failure was specifically
+      // about an image rather than some other request-level rejection — so
+      // this never claims certainty ("may be"), never claims a draft or
+      // listing was created, and never retries. It only applies when this
+      // turn genuinely had attachments AND the failure genuinely came from
+      // the Anthropic API itself (isAnthropicError) — a non-API error
+      // (e.g. a conversation-ownership failure thrown before the model was
+      // ever called) still gets the plain generic message below, never
+      // this photo-specific one it has nothing to do with.
+      if (isAnthropicError && attachments && attachments.length > 0) {
+        throw new Error(
+          'The AI agent could not analyze the attached photo(s) — the image may be too large or in an unsupported format. Please try again with a smaller image, or a JPEG, PNG, WEBP, or GIF file.'
+        );
+      }
+
       throw new Error('The AI agent is temporarily unavailable. Please try again shortly.');
     }
   }

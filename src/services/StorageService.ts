@@ -21,6 +21,31 @@ const BUCKET_NAME = 'product-images';
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 export const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
+/**
+ * Real photo analysis hardening (P1-3, final review finding) — the
+ * Anthropic Messages API's own documented per-image limit, used directly
+ * (first-party `new Anthropic({apiKey})` in AiAgentService — never
+ * Bedrock/Vertex, whose limits differ) via `@anthropic-ai/sdk`, is 10MB
+ * for a BASE64-ENCODED image (confirmed against
+ * https://platform.claude.com/docs/en/build-with-claude/vision —
+ * "Image limits and costs"). Base64 inflates raw bytes by exactly 4/3 (3
+ * raw bytes -> 4 encoded chars), so MAX_FILE_SIZE's own 10MB RAW cap is
+ * NOT a safe proxy for that limit: a raw file between ~7.5MB and 10MB
+ * encodes to between ~10MB and ~13.3MB and would be rejected by
+ * Anthropic's own API after already passing every other check here,
+ * aborting the whole turn (see AiAgentService.sendMessage's catch block)
+ * instead of just this one photo. This constant is the largest raw byte
+ * count whose base64 encoding is still guaranteed <= 10MB, and is applied
+ * ONLY inside downloadConversationImageBytes (the vision-specific read
+ * path) — MAX_FILE_SIZE itself is left untouched, so the generic upload
+ * cap (uploadImage/uploadConversationImage/rehostImageFromUrl) and every
+ * other feature that already accepts a file up to 10MB raw are
+ * unaffected; a photo between this constant and MAX_FILE_SIZE can still
+ * be uploaded and stored normally, only vision analysis of it degrades to
+ * 'unavailable', exactly like any other download failure.
+ */
+export const MAX_VISION_IMAGE_BYTES = Math.floor((10 * 1024 * 1024 * 3) / 4); // 7.5MB raw -> <=10MB base64
+
 export interface UploadImageData {
   workspaceId: string;
   productId: string;
@@ -38,6 +63,34 @@ export interface RehostImageData {
 export interface RehostedImage {
   url: string;
   storagePath: string;
+}
+
+/**
+ * Real-image-analysis hardening (free listing creation) — a minimal magic-
+ * byte check so downloadConversationImageBytes never hands a renamed,
+ * mismatched, or non-image file to the AI provider as if it were the
+ * mimeType its own extension claims. Deliberately checks only the small,
+ * well-documented leading signature each format always starts with
+ * (never a full image-format parse, which this project has no library for
+ * and should not add just for this) — a real image in one of the four
+ * ALLOWED_MIME_TYPES always matches; anything else (a renamed .txt/.exe,
+ * a truncated/corrupted upload) does not and is rejected before it can
+ * ever reach a vision content block.
+ */
+function matchesImageSignature(buffer: Buffer, mimeType: string): boolean {
+  if (buffer.length < 4) return false;
+  switch (mimeType) {
+    case 'image/jpeg':
+      return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case 'image/png':
+      return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+    case 'image/gif':
+      return buffer.slice(0, 6).toString('ascii') === 'GIF87a' || buffer.slice(0, 6).toString('ascii') === 'GIF89a';
+    case 'image/webp':
+      return buffer.length >= 12 && buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+    default:
+      return false;
+  }
 }
 
 export class StorageService {
@@ -313,7 +366,20 @@ export class StorageService {
     if (error || !fileData) return null;
 
     const buffer = Buffer.from(await fileData.arrayBuffer());
-    if (buffer.length > MAX_FILE_SIZE) return null;
+    // MAX_FILE_SIZE (10MB raw) is the generic storage cap the upload step
+    // already enforced — never loosened here. MAX_VISION_IMAGE_BYTES is
+    // the STRICTER, vision-specific ceiling (see its own comment): a file
+    // between the two still uploaded/stored fine, it just can't be safely
+    // base64-encoded for Anthropic's own 10MB-base64 per-image limit, so
+    // vision treats it as unavailable rather than letting Anthropic reject
+    // the whole request later.
+    if (buffer.length > MAX_FILE_SIZE || buffer.length > MAX_VISION_IMAGE_BYTES) return null;
+
+    // Real-image-analysis hardening — the file's own leading bytes must
+    // actually match what its extension/mimeType claims (see
+    // matchesImageSignature's own comment). Never trusted on extension
+    // alone before this is handed to a vision content block.
+    if (!matchesImageSignature(buffer, mimeType)) return null;
 
     return { buffer, mimeType };
   }

@@ -86,6 +86,7 @@ vi.mock('@/services/imagegen/ImageGenerationProviderRegistry', () => ({
 
 import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '@/lib/prisma';
+import { StorageService } from '@/services/StorageService';
 import { AiAgentService } from '@/services/ai/AiAgentService';
 import { AiEntitlementService } from '@/services/ai/AiEntitlementService';
 import { AiUsageService } from '@/services/ai/AiUsageService';
@@ -673,6 +674,264 @@ describe('AiAgentService — AiUsageService reserve/finalize/release wiring (rac
 
       const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
       expect(createCalls.some((c: any) => c.data.toolName === 'user_photos_uploaded')).toBe(false);
+    });
+  });
+
+  /**
+   * Real photo analysis (AI agent readiness audit, P0 fix): proves the
+   * model actually receives a real Anthropic vision `image` content block
+   * built from the attachment's real downloaded bytes — not just the
+   * JSON-text metadata the previous describe block above already proved.
+   * StorageService.downloadConversationImageBytes is spied on (never the
+   * whole module mocked, so every OTHER tool's real StorageService import
+   * stays untouched) and restored after each test — without a spy, the
+   * real function runs and returns null (no Supabase credentials in this
+   * test environment), which is exactly the "unavailable" case the last
+   * few tests below exercise deliberately.
+   */
+  describe('Real photo analysis — actual vision content blocks sent to the model', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('a successfully downloaded photo becomes a real {type: "image", source: {type: "base64", ...}} block in the SAME tool_result message, after the text summary', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: pngBytes, mimeType: 'image/png' });
+      const snapshots = queueResponses(textOnlyResponse('Je vois la photo.'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.png', mimeType: 'image/png' },
+      ]);
+
+      const sentMessages = snapshots[0] as any[];
+      const toolResultMessage = sentMessages.find(
+        (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result'
+      );
+      expect(toolResultMessage).toBeDefined();
+      const content = toolResultMessage.content[0].content as any[];
+      expect(Array.isArray(content)).toBe(true);
+      expect(content[0]).toMatchObject({ type: 'text' });
+      expect(content[1]).toMatchObject({
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: pngBytes.toString('base64') },
+      });
+    });
+
+    it('multiple photos become multiple image blocks, in the SAME order the reseller attached them', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const bufferA = Buffer.from('photo-a-bytes');
+      const bufferB = Buffer.from('photo-b-bytes');
+      vi.spyOn(StorageService, 'downloadConversationImageBytes')
+        .mockResolvedValueOnce({ buffer: bufferA, mimeType: 'image/jpeg' })
+        .mockResolvedValueOnce({ buffer: bufferB, mimeType: 'image/jpeg' });
+      const snapshots = queueResponses(textOnlyResponse('Je vois les deux photos.'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Deux photos.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../a.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/a.jpg', mimeType: 'image/jpeg' },
+        { url: 'https://fake.supabase.co/.../b.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/b.jpg', mimeType: 'image/jpeg' },
+      ]);
+
+      const sentMessages = snapshots[0] as any[];
+      const toolResultMessage = sentMessages.find(
+        (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result'
+      );
+      const imageBlocks = (toolResultMessage.content[0].content as any[]).filter((b) => b.type === 'image');
+      expect(imageBlocks).toHaveLength(2);
+      expect(imageBlocks[0].source.data).toBe(bufferA.toString('base64'));
+      expect(imageBlocks[1].source.data).toBe(bufferB.toString('base64'));
+    });
+
+    it('a photo whose download fails gets NO image block — the model is told it is unavailable, never falsely told it was analyzed', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue(null);
+      const snapshots = queueResponses(textOnlyResponse("Je n'ai pas pu voir la photo."));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../gone.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/gone.jpg', mimeType: 'image/jpeg' },
+      ]);
+
+      const sentMessages = snapshots[0] as any[];
+      const toolResultMessage = sentMessages.find(
+        (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result'
+      );
+      const content = toolResultMessage.content[0].content as any[];
+      expect(content.filter((b) => b.type === 'image')).toHaveLength(0);
+      const summary = JSON.parse(content[0].text);
+      expect(summary.photos[0].status).toBe('unavailable');
+    });
+
+    it('with several photos, only the ones that actually downloaded get an image block — a failure for one never blocks the others', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const bufferB = Buffer.from('photo-b-bytes');
+      vi.spyOn(StorageService, 'downloadConversationImageBytes')
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ buffer: bufferB, mimeType: 'image/jpeg' });
+      const snapshots = queueResponses(textOnlyResponse('Je vois une des deux photos.'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Deux photos.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../a.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/a.jpg', mimeType: 'image/jpeg' },
+        { url: 'https://fake.supabase.co/.../b.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/b.jpg', mimeType: 'image/jpeg' },
+      ]);
+
+      const sentMessages = snapshots[0] as any[];
+      const toolResultMessage = sentMessages.find(
+        (m: any) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result'
+      );
+      const content = toolResultMessage.content[0].content as any[];
+      const imageBlocks = content.filter((b) => b.type === 'image');
+      expect(imageBlocks).toHaveLength(1);
+      expect(imageBlocks[0].source.data).toBe(bufferB.toString('base64'));
+      const summary = JSON.parse(content[0].text);
+      expect(summary.photos[0].status).toBe('unavailable');
+      expect(summary.photos[1].status).toBe('attached');
+    });
+
+    it('the PERSISTED tool_result row never contains the image bytes — only lightweight metadata (never resends the same bytes on a later turn)', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: pngBytes, mimeType: 'image/png' });
+      createMock.mockResolvedValue(textOnlyResponse('Je vois la photo.'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../photo1.png', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.png', mimeType: 'image/png' },
+      ]);
+
+      const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
+      const toolResultPhotoRow = createCalls.find((c: any) => c.data.role === 'tool_result' && c.data.toolName === 'user_photos_uploaded');
+      expect(toolResultPhotoRow).toBeDefined();
+      // Never contains the base64 image data or an 'image' content block —
+      // only the same {photos, count} metadata shape the earlier, already-
+      // passing tests in this file assert on.
+      expect(toolResultPhotoRow.data.content).not.toContain(pngBytes.toString('base64'));
+      expect(toolResultPhotoRow.data.content).not.toContain('"type":"image"');
+      const parsed = JSON.parse(JSON.parse(toolResultPhotoRow.data.content)[0].content);
+      expect(parsed.photos[0].status).toBe('attached');
+    });
+
+    it('a later turn in the same conversation never resends the earlier photo\'s bytes — loadHistory only ever replays the lightweight persisted metadata', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const pngBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+      const downloadSpy = vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: pngBytes, mimeType: 'image/png' });
+      queueResponses(textOnlyResponse('Je vois la photo.'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+        { url: 'https://fake.supabase.co/.../photo1.png', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.png', mimeType: 'image/png' },
+      ]);
+
+      // Simulate the SAME persisted row being replayed as this turn's
+      // history on a follow-up message with no new attachments — exactly
+      // what loadHistory() does for a real conversation (role 'tool_result'
+      // rows are read back from the DB, never re-derived from the earlier
+      // in-memory ephemeral message).
+      const createCalls = prismaMock.agentMessage.create.mock.calls.map((c: any[]) => c[0]);
+      const persistedRows = createCalls.filter((c: any) => c.data.role === 'user' || c.data.role === 'assistant' || c.data.role === 'tool_result');
+      // loadHistory's own real query uses orderBy: { createdAt: 'desc' }
+      // and reverses the result itself — the mock must supply rows in that
+      // same descending (most-recent-first) order, exactly like the
+      // existing "continues it, loads prior history" test above already
+      // documents, or this replay would come out in the wrong order.
+      prismaMock.agentMessage.findMany.mockResolvedValue(
+        [...persistedRows].reverse().map((c: any) => ({ role: c.data.role, content: c.data.content, createdAt: new Date() }))
+      );
+      downloadSpy.mockClear();
+      const snapshots = queueResponses(textOnlyResponse('Et pour le prix ?'));
+
+      await AiAgentService.sendMessage('ws-1', 'user-1', 'Et pour le prix ?', 'conv-1');
+
+      // downloadConversationImageBytes must never be called again for a
+      // turn with no new attachments — nothing left to download.
+      expect(downloadSpy).not.toHaveBeenCalled();
+      const secondTurnMessages = JSON.stringify(snapshots[0]);
+      expect(secondTurnMessages).not.toContain(pngBytes.toString('base64'));
+      expect(secondTurnMessages).not.toContain('"type":"image"');
+    });
+  });
+
+  /**
+   * P1-3 fix (final review finding) — a photo can pass every check in
+   * downloadConversationImageBytes (size, signature, ownership) and STILL
+   * be rejected by the Anthropic API itself once actually sent (e.g. a
+   * payload shape it doesn't accept) — a genuine Anthropic.APIError, which
+   * aborts the whole turn. These prove the user gets an honest, actionable
+   * message (never a fake success, never a claim that a draft/listing was
+   * created, no retry anywhere) for exactly that case, and that an
+   * unrelated failure (not from the Anthropic API) never gets the
+   * misleading photo-specific wording just because attachments happened
+   * to be present.
+   */
+  describe('Provider rejects an image payload — honest error, no false success', () => {
+    it('an Anthropic.APIError thrown while this turn had attachments surfaces an honest, actionable "photo could not be analyzed" message — never a generic/unrelated one', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: Buffer.from('bytes'), mimeType: 'image/jpeg' });
+      const ApiErrorCtor = (Anthropic as any).APIError;
+      createMock.mockRejectedValue(new ApiErrorCtor(400, undefined, 'image payload rejected', 'invalid_request_error'));
+
+      await expect(
+        AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+          { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+        ])
+      ).rejects.toThrow(/could not analyze the attached photo.*smaller image.*JPEG, PNG, WEBP, or GIF/i);
+
+      vi.restoreAllMocks();
+    });
+
+    it('never claims success or implies a draft/listing was created when the provider rejects the image', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: Buffer.from('bytes'), mimeType: 'image/jpeg' });
+      const ApiErrorCtor = (Anthropic as any).APIError;
+      createMock.mockRejectedValue(new ApiErrorCtor(400, undefined, 'image payload rejected', 'invalid_request_error'));
+
+      let caught: Error | undefined;
+      try {
+        await AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+          { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+        ]);
+      } catch (e) {
+        caught = e as Error;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught!.message).not.toMatch(/success|created|draft is ready|annonce/i);
+      vi.restoreAllMocks();
+    });
+
+    it('never retries the request itself — createMock is called exactly once before the error propagates', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      vi.spyOn(StorageService, 'downloadConversationImageBytes').mockResolvedValue({ buffer: Buffer.from('bytes'), mimeType: 'image/jpeg' });
+      const ApiErrorCtor = (Anthropic as any).APIError;
+      createMock.mockRejectedValue(new ApiErrorCtor(400, undefined, 'image payload rejected', 'invalid_request_error'));
+
+      await expect(
+        AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+          { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+        ])
+      ).rejects.toThrow();
+
+      expect(createMock).toHaveBeenCalledTimes(1);
+      vi.restoreAllMocks();
+    });
+
+    it('a non-Anthropic failure (e.g. conversation ownership) with attachments present still gets the plain generic message, never the photo-specific one', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue(null); // ownership check fails before the model is ever called
+
+      await expect(
+        AiAgentService.sendMessage('ws-1', 'user-1', 'Voici une photo.', 'conv-1', [
+          { url: 'https://fake.supabase.co/.../photo1.jpg', storagePath: 'ws-1/_draft-uploads/conv-1/photo1.jpg', mimeType: 'image/jpeg' },
+        ])
+      ).rejects.toThrow('Conversation not found in this workspace');
+
+      expect(createMock).not.toHaveBeenCalled();
+    });
+
+    it('an Anthropic.APIError with NO attachments this turn still gets the plain generic message, never the photo-specific one', async () => {
+      prismaMock.agentConversation.findFirst.mockResolvedValue({ id: 'conv-1' });
+      const ApiErrorCtor = (Anthropic as any).APIError;
+      createMock.mockRejectedValue(new ApiErrorCtor(500, undefined, 'server error', 'api_error'));
+
+      await expect(AiAgentService.sendMessage('ws-1', 'user-1', 'Bonjour', 'conv-1')).rejects.toThrow(
+        'The AI agent is temporarily unavailable. Please try again shortly.'
+      );
     });
   });
 });
