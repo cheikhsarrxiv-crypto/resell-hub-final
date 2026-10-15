@@ -77,6 +77,7 @@ vi.mock('@/lib/prisma', () => ({
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService';
 import { TokenManager } from '@/services/marketplace/TokenManager';
 import { EbayAdapter } from '@/services/marketplace/adapters/EbayAdapter';
+import { EtsyAdapter } from '@/services/marketplace/adapters/EtsyAdapter';
 
 function jsonResponse(body: any, ok = true, status = ok ? 200 : 400) {
   // EbayAdapter/EtsyAdapter's own private HTTP helpers read the response
@@ -369,6 +370,124 @@ describe('MarketplaceConnectionService', () => {
       // A failed refresh must never fabricate a replacement token — the
       // (now-unusable) access token field is left exactly as it was.
       expect(stored.encryptedOauthToken).toBe(originalEncryptedAccessToken);
+    });
+  });
+
+  /**
+   * Etsy OAuth/scopes audit prep (Commercial Access): the eBay refresh-
+   * failure path above had no Etsy equivalent — Etsy's OAuth+PKCE
+   * connection is a structurally different adapter (EtsyAdapter), so this
+   * is not redundant with the eBay test, it proves the same
+   * MarketplaceConnectionService.getAccessToken() contract holds for the
+   * other real OAuth adapter too.
+   */
+  describe('getAccessToken — Etsy refresh', () => {
+    it('a failing Etsy token refresh marks the connection "expired", records lastSyncError, and rethrows the original error', async () => {
+      const tokenManager = new TokenManager();
+      const encryptedRefresh = tokenManager.encryptToken('real-looking-etsy-refresh-token', 'ws-1');
+      const originalEncryptedAccessToken = tokenManager.encryptToken('stale-etsy-access-token', 'ws-1').encrypted;
+
+      connectionStore.set(connectionKey('ws-1', Marketplace.ETSY), {
+        id: 'conn-etsy-ws1',
+        workspaceId: 'ws-1',
+        marketplaceId: Marketplace.ETSY,
+        status: 'connected',
+        encryptedOauthToken: originalEncryptedAccessToken,
+        encryptedRefreshToken: encryptedRefresh.encrypted,
+        tokenExpiresAt: new Date(Date.now() - 1000), // already expired
+      });
+
+      const refreshError = new Error('Etsy validation error: The refresh token is invalid or has been revoked.');
+      vi.spyOn(EtsyAdapter.prototype, 'refreshToken').mockRejectedValue(refreshError);
+
+      const service = new MarketplaceConnectionService(etsyConfig());
+
+      await expect(service.getAccessToken('ws-1', Marketplace.ETSY)).rejects.toThrow(
+        'Etsy validation error: The refresh token is invalid or has been revoked.'
+      );
+
+      const stored = connectionStore.get(connectionKey('ws-1', Marketplace.ETSY));
+      expect(stored.status).toBe('expired');
+      expect(stored.lastSyncError).toContain('refresh token is invalid or has been revoked');
+      expect(stored.encryptedOauthToken).toBe(originalEncryptedAccessToken);
+    });
+
+    it('a successful Etsy token refresh updates the stored access token and never resolves/re-resolves shop_id (no call to validateConnection)', async () => {
+      const tokenManager = new TokenManager();
+      const encryptedRefresh = tokenManager.encryptToken('real-looking-etsy-refresh-token', 'ws-1');
+
+      connectionStore.set(connectionKey('ws-1', Marketplace.ETSY), {
+        id: 'conn-etsy-ws1',
+        workspaceId: 'ws-1',
+        marketplaceId: Marketplace.ETSY,
+        status: 'connected',
+        encryptedOauthToken: tokenManager.encryptToken('stale-etsy-access-token', 'ws-1').encrypted,
+        encryptedRefreshToken: encryptedRefresh.encrypted,
+        tokenExpiresAt: new Date(Date.now() - 1000), // already expired
+        sellerId: '999', // shop_id already resolved during the original connection
+      });
+
+      vi.spyOn(EtsyAdapter.prototype, 'refreshToken').mockResolvedValue({
+        accessToken: 'fresh-etsy-access-token',
+        expiresIn: 3600,
+      });
+      const validateConnectionSpy = vi.spyOn(EtsyAdapter.prototype, 'validateConnection');
+
+      const service = new MarketplaceConnectionService(etsyConfig());
+      const accessToken = await service.getAccessToken('ws-1', Marketplace.ETSY);
+
+      expect(accessToken).toBe('fresh-etsy-access-token');
+      expect(validateConnectionSpy).not.toHaveBeenCalled();
+
+      const stored = connectionStore.get(connectionKey('ws-1', Marketplace.ETSY));
+      expect(stored.status).toBe('connected'); // never touched by a successful refresh
+      expect(tokenManager.decryptToken({ encrypted: stored.encryptedOauthToken }, 'ws-1')).toBe('fresh-etsy-access-token');
+    });
+
+    /**
+     * REGRESSION FIX, confirmed by reading MarketplaceConnectionService.ts
+     * directly: the `!connection.encryptedRefreshToken` check used to sit
+     * BEFORE the try/catch that writes `status: 'expired'`, so this exact
+     * path (the one actually diagnosed in the production cron logs:
+     * "Cannot refresh token: no refresh token stored" for two real
+     * workspaces) threw WITHOUT ever updating the connection's stored
+     * status — it stayed 'connected' in the database forever, even though
+     * every subsequent call kept failing the same way, and the B2 UI fix
+     * (distinguishing 'expired' from 'not_connected') could never have
+     * shown "Expired" for these two workspaces as a result. Moved inside
+     * the try/catch: this exact case is now marked 'expired' with
+     * lastSyncError recorded, identically to every other refresh failure.
+     * This is a permanent, non-retryable condition (there is no token to
+     * attempt a refresh with at all) — not a transient network blip being
+     * over-classified, so marking it 'expired' immediately is correct,
+     * not premature.
+     */
+    it('REGRESSION FIX: absence of a stored refresh token now marks the connection "expired" with lastSyncError recorded, consistently with every other refresh failure', async () => {
+      const tokenManager = new TokenManager();
+
+      connectionStore.set(connectionKey('ws-1', Marketplace.ETSY), {
+        id: 'conn-etsy-ws1',
+        workspaceId: 'ws-1',
+        marketplaceId: Marketplace.ETSY,
+        status: 'connected',
+        encryptedOauthToken: tokenManager.encryptToken('stale-etsy-access-token', 'ws-1').encrypted,
+        encryptedRefreshToken: null, // the exact production condition diagnosed in the cron logs
+        tokenExpiresAt: new Date(Date.now() - 1000),
+      });
+
+      const refreshSpy = vi.spyOn(EtsyAdapter.prototype, 'refreshToken');
+
+      const service = new MarketplaceConnectionService(etsyConfig());
+
+      await expect(service.getAccessToken('ws-1', Marketplace.ETSY)).rejects.toThrow(
+        'Cannot refresh token: no refresh token stored'
+      );
+
+      expect(refreshSpy).not.toHaveBeenCalled(); // never reaches the network without a refresh token to send
+
+      const stored = connectionStore.get(connectionKey('ws-1', Marketplace.ETSY));
+      expect(stored.status).toBe('expired'); // fixed: now consistent with every other refresh failure
+      expect(stored.lastSyncError).toContain('Cannot refresh token: no refresh token stored');
     });
   });
 
