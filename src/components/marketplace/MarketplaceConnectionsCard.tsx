@@ -37,6 +37,27 @@ export function resolveConnectOutcome(
 }
 
 /**
+ * Pure decision logic for turning a raw MarketplaceConnection.status value
+ * (whatever the database actually holds — today: 'connected', 'expired',
+ * 'not_connected', or no connection row at all) into the three display
+ * states this card actually renders differently. Pulled out for the same
+ * reason resolveConnectOutcome()/resolveCallbackNotice() are: testable
+ * without rendering.
+ *
+ * 'connected' is returned ONLY for the literal string 'connected' — this
+ * card must never show "Connected" for an expired, not-yet-connected, or
+ * any future/unrecognized status value. Anything that isn't exactly
+ * 'connected' or 'expired' (including undefined/no connection row) falls
+ * back to 'not_connected', preserving the card's pre-existing behavior for
+ * every status other than 'expired'.
+ */
+export function resolveDisplayStatus(status: string | undefined): 'connected' | 'expired' | 'not_connected' {
+  if (status === 'connected') return 'connected'
+  if (status === 'expired') return 'expired'
+  return 'not_connected'
+}
+
+/**
  * Pure decision logic for interpreting the OAuth callback's redirect
  * query params (?status=connected&marketplace=ebay or
  * ?status=error&error=...) into a one-time notice to show the user.
@@ -104,11 +125,15 @@ export function MarketplaceConnectionsCard({
   const [connectError, setConnectError] = useState<{ marketplace: string; message: string } | null>(null)
 
   const ebayConnection = connections.find(c => c.marketplaceId === 'ebay')
-  const isEbayConnected = ebayConnection?.status === 'connected'
+  const ebayDisplayStatus = resolveDisplayStatus(ebayConnection?.status)
+  const isEbayConnected = ebayDisplayStatus === 'connected'
+  const isEbayExpired = ebayDisplayStatus === 'expired'
   const lastSync = ebayConnection?.syncLogs?.[0]
 
   const etsyConnection = connections.find(c => c.marketplaceId === 'etsy')
-  const isEtsyConnected = etsyConnection?.status === 'connected'
+  const etsyDisplayStatus = resolveDisplayStatus(etsyConnection?.status)
+  const isEtsyConnected = etsyDisplayStatus === 'connected'
+  const isEtsyExpired = etsyDisplayStatus === 'expired'
   const etsyLastSync = etsyConnection?.syncLogs?.[0]
 
   const handleConnect = async (marketplace: string) => {
@@ -204,6 +229,23 @@ export function MarketplaceConnectionsCard({
                 {disconnecting === 'ebay' ? 'Disconnecting...' : 'Disconnect'}
               </DashboardButton>
             </div>
+          ) : isEbayExpired ? (
+            <div className="flex items-center gap-3">
+              <span
+                role="status"
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-400"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                Expired — reconnection required
+              </span>
+              <DashboardButton
+                variant="primary"
+                onClick={() => handleConnect('ebay')}
+                disabled={connecting === 'ebay'}
+              >
+                {connecting === 'ebay' ? 'Connecting...' : 'Reconnect to eBay'}
+              </DashboardButton>
+            </div>
           ) : (
             <div className="flex items-center gap-3">
               <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500">
@@ -225,6 +267,14 @@ export function MarketplaceConnectionsCard({
           <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20">
             <p className="text-sm text-gray-200">
               Your eBay account is connected. You can now sync listings and orders.
+            </p>
+          </div>
+        )}
+
+        {isEbayExpired && (
+          <div className="mt-4 p-4 bg-amber-500/10 rounded-xl border border-amber-500/20">
+            <p className="text-sm text-amber-300">
+              Your eBay connection has expired. Reconnect to resume syncing listings and orders.
             </p>
           </div>
         )}
@@ -275,6 +325,23 @@ export function MarketplaceConnectionsCard({
                 {disconnecting === 'etsy' ? 'Disconnecting...' : 'Disconnect'}
               </DashboardButton>
             </div>
+          ) : isEtsyExpired ? (
+            <div className="flex items-center gap-3">
+              <span
+                role="status"
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-amber-400"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                Expired — reconnection required
+              </span>
+              <DashboardButton
+                variant="primary"
+                onClick={() => handleConnect('etsy')}
+                disabled={connecting === 'etsy'}
+              >
+                {connecting === 'etsy' ? 'Connecting...' : 'Reconnect to Etsy'}
+              </DashboardButton>
+            </div>
           ) : (
             <div className="flex items-center gap-3">
               <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500">
@@ -296,6 +363,14 @@ export function MarketplaceConnectionsCard({
           <div className="mt-4 p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20">
             <p className="text-sm text-gray-200">
               Your Etsy account is connected. You can now sync listings and orders.
+            </p>
+          </div>
+        )}
+
+        {isEtsyExpired && (
+          <div className="mt-4 p-4 bg-amber-500/10 rounded-xl border border-amber-500/20">
+            <p className="text-sm text-amber-300">
+              Your Etsy connection has expired. Reconnect to resume syncing listings and orders.
             </p>
           </div>
         )}
