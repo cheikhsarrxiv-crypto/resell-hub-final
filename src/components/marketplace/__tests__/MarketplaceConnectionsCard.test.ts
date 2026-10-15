@@ -28,6 +28,37 @@ const componentSource = fs.readFileSync(
   'utf-8'
 );
 
+/**
+ * Connector Hub audit (B1) finding: this card used to treat any status
+ * other than the literal string 'connected' identically ("Disconnected"),
+ * so an expired connection was indistinguishable from one that was never
+ * connected at all. resolveDisplayStatus() is the pure decision logic for
+ * the fix — proves the three display states map correctly, and that
+ * nothing other than the exact string 'connected' can ever resolve to
+ * 'connected'.
+ */
+describe('resolveDisplayStatus() — pure decision logic', () => {
+  const fnStart = componentSource.indexOf('export function resolveDisplayStatus(');
+  const fnEnd = componentSource.indexOf('\n}\n', fnStart);
+  const fnBody = componentSource.slice(fnStart, fnEnd);
+
+  it('exists as a standalone, exported function (testable independently of React state)', () => {
+    expect(fnStart).toBeGreaterThan(-1);
+  });
+
+  it('maps the literal string "connected" to \'connected\'', () => {
+    expect(fnBody).toContain("if (status === 'connected') return 'connected'");
+  });
+
+  it('maps the literal string "expired" to \'expired\'', () => {
+    expect(fnBody).toContain("if (status === 'expired') return 'expired'");
+  });
+
+  it('falls back to \'not_connected\' for anything else, including undefined/missing status', () => {
+    expect(fnBody.trim().endsWith("return 'not_connected'")).toBe(true);
+  });
+});
+
 describe('resolveConnectOutcome() — pure decision logic', () => {
   const fnStart = componentSource.indexOf('export function resolveConnectOutcome(');
   const fnEnd = componentSource.indexOf('\n}\n', fnStart);
@@ -216,5 +247,84 @@ describe('MarketplaceConnectionsCard wires resolveCallbackNotice() into a one-ti
     expect(componentSource).toContain("'p-4 bg-[#FF5A1F]/10 rounded-xl border border-[#FF5A1F]/20'");
     // Same classes as the existing connectError banner.
     expect(componentSource).toContain("'p-4 bg-red-500/10 rounded-xl border border-red-500/20'");
+  });
+});
+
+/**
+ * Connector Hub audit (B1) fix: both marketplace cards must render a
+ * visually and textually distinct "expired" state, with a reconnect
+ * action, and must never show "Connected" for any status other than the
+ * literal 'connected'. Source-level checks, same convention as the rest
+ * of this file (component can't be imported directly under this
+ * tsconfig/Vitest setup — see header comment).
+ */
+describe('eBay/Etsy cards — expired state is visually and textually distinct from both connected and not_connected', () => {
+  it('derives isEbayExpired/isEtsyExpired from resolveDisplayStatus(), never from a raw string comparison', () => {
+    expect(componentSource).toContain('const ebayDisplayStatus = resolveDisplayStatus(ebayConnection?.status)');
+    expect(componentSource).toContain("const isEbayExpired = ebayDisplayStatus === 'expired'");
+    expect(componentSource).toContain('const etsyDisplayStatus = resolveDisplayStatus(etsyConnection?.status)');
+    expect(componentSource).toContain("const isEtsyExpired = etsyDisplayStatus === 'expired'");
+  });
+
+  it('renders a distinct "Expired — reconnection required" label for both marketplaces, with a visible text label (not color-only)', () => {
+    const occurrences = [...componentSource.matchAll(/Expired — reconnection required/g)];
+    expect(occurrences.length).toBe(2);
+  });
+
+  it('exposes the expired badge via role="status" for assistive technology', () => {
+    const occurrences = [...componentSource.matchAll(/role="status"/g)];
+    expect(occurrences.length).toBe(2);
+  });
+
+  it('offers a reconnect action wired to the existing handleConnect() flow, never a new/duplicate connection flow', () => {
+    expect(componentSource).toContain("onClick={() => handleConnect('ebay')}");
+    expect(componentSource).toContain("onClick={() => handleConnect('etsy')}");
+    const reconnectLabels = [...componentSource.matchAll(/'Reconnect to (eBay|Etsy)'/g)];
+    expect(reconnectLabels.length).toBe(2);
+  });
+
+  it('the expired branch is checked before the generic not_connected fallback, for both cards (isXExpired as an else-if between connected and the final else)', () => {
+    const ebayBranch = componentSource.slice(
+      componentSource.indexOf('{isEbayConnected ? ('),
+      componentSource.indexOf('{isEbayConnected && (')
+    );
+    const ebayConnectedIdx = ebayBranch.indexOf('isEbayConnected ?');
+    const ebayExpiredIdx = ebayBranch.indexOf('isEbayExpired ?');
+    const ebayElseIdx = ebayBranch.lastIndexOf(') : (');
+    expect(ebayConnectedIdx).toBeGreaterThan(-1);
+    expect(ebayExpiredIdx).toBeGreaterThan(ebayConnectedIdx);
+    expect(ebayElseIdx).toBeGreaterThan(ebayExpiredIdx);
+
+    const etsyBranch = componentSource.slice(
+      componentSource.indexOf('{isEtsyConnected ? ('),
+      componentSource.indexOf('{isEtsyConnected && (')
+    );
+    const etsyConnectedIdx = etsyBranch.indexOf('isEtsyConnected ?');
+    const etsyExpiredIdx = etsyBranch.indexOf('isEtsyExpired ?');
+    const etsyElseIdx = etsyBranch.lastIndexOf(') : (');
+    expect(etsyConnectedIdx).toBeGreaterThan(-1);
+    expect(etsyExpiredIdx).toBeGreaterThan(etsyConnectedIdx);
+    expect(etsyElseIdx).toBeGreaterThan(etsyExpiredIdx);
+  });
+
+  it('never renders the "Connected" label (nor the green connected indicator) inside the expired branch for either marketplace', () => {
+    const ebayExpiredStart = componentSource.indexOf('isEbayExpired ? (');
+    const ebayExpiredEnd = componentSource.indexOf(') : (', ebayExpiredStart);
+    const ebayExpiredBranch = componentSource.slice(ebayExpiredStart, ebayExpiredEnd);
+    expect(ebayExpiredBranch).not.toMatch(/\bConnected\b/);
+    expect(ebayExpiredBranch).not.toContain('text-emerald-400');
+
+    const etsyExpiredStart = componentSource.indexOf('isEtsyExpired ? (');
+    const etsyExpiredEnd = componentSource.indexOf(') : (', etsyExpiredStart);
+    const etsyExpiredBranch = componentSource.slice(etsyExpiredStart, etsyExpiredEnd);
+    expect(etsyExpiredBranch).not.toMatch(/\bConnected\b/);
+    expect(etsyExpiredBranch).not.toContain('text-emerald-400');
+  });
+
+  it('shows a dedicated banner explaining the expired state, for both marketplaces', () => {
+    expect(componentSource).toContain('Your eBay connection has expired. Reconnect to resume syncing listings and orders.');
+    expect(componentSource).toContain('Your Etsy connection has expired. Reconnect to resume syncing listings and orders.');
+    expect(componentSource).toContain('{isEbayExpired && (');
+    expect(componentSource).toContain('{isEtsyExpired && (');
   });
 });

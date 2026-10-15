@@ -345,11 +345,22 @@ export class MarketplaceConnectionService {
 
     // Check if token needs refresh
     if (connection.tokenExpiresAt && this.tokenManager.shouldRefreshToken(connection.tokenExpiresAt)) {
-      if (!connection.encryptedRefreshToken) {
-        throw new Error('Cannot refresh token: no refresh token stored')
-      }
-
       try {
+        // Moved inside the try/catch below (previously thrown before it):
+        // a connection with no refresh token stored can never succeed a
+        // refresh attempt — same permanent, non-retryable nature as any
+        // other refresh failure below, so it must go through the exact
+        // same "mark expired, record lastSyncError, rethrow" path, not
+        // bypass it. Before this fix, this specific case left the
+        // connection's status stuck on 'connected' forever in the
+        // database, even though every subsequent call kept failing the
+        // same way — confirmed as the exact condition behind the
+        // "Cannot refresh token: no refresh token stored" cron failures
+        // diagnosed in production for two real workspaces.
+        if (!connection.encryptedRefreshToken) {
+          throw new Error('Cannot refresh token: no refresh token stored')
+        }
+
         const decrypted = this.tokenManager.decryptToken(
           { encrypted: connection.encryptedRefreshToken },
           workspaceId

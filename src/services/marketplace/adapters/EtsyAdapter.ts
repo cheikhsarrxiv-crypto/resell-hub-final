@@ -25,6 +25,7 @@
 
 import MarketplaceAdapter from '@/services/marketplace/MarketplaceAdapter'
 import {
+  Address,
   Marketplace,
   MarketplaceAdapterConfig,
   MarketplaceListing,
@@ -194,6 +195,20 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
       }
 
       const data = await response.json()
+
+      // A 200 response is not proof of a usable token — Etsy returning a
+      // body without a real access_token (or a non-string one) must never
+      // produce a silent `{ accessToken: undefined }` that callers would
+      // otherwise try to encrypt and store as if it were real. Caught
+      // below by the same normalize() path as every other failure here.
+      if (!data.access_token || typeof data.access_token !== 'string') {
+        throw {
+          status: response.status,
+          message: 'Etsy token refresh returned an invalid response: missing or malformed access_token',
+          error: data,
+        }
+      }
+
       this.accessToken = data.access_token
 
       return {
@@ -594,7 +609,15 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
       externalOrderId: receipt.receipt_id?.toString(),
       buyerId: receipt.buyer_user_id?.toString() || '',
       buyerName: receipt.name || '',
-      buyerEmail: receipt.buyer_email || '',
+      // Etsy OAuth/scopes audit finding: buyer email access may require an
+      // approval separate from transactions_r and can legitimately be
+      // absent on a receipt. `undefined` (never a fabricated '') matches
+      // MarketplaceOrder.buyerEmail's own `?: string` contract — every
+      // existing caller already reads this via `|| ''`/optional chaining
+      // (OrdersSyncService.ts, MarketplaceOrderService.ts), so this is not
+      // a behavior change downstream, only a more honest "field not
+      // provided" value here.
+      buyerEmail: receipt.buyer_email || undefined,
       totalPrice: receipt.grandtotal?.amount && receipt.grandtotal?.divisor
         ? receipt.grandtotal.amount / receipt.grandtotal.divisor
         : 0,
@@ -617,22 +640,51 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
         // Product.sku, same 1:1 mapping eBay's line-item sku already has.
         sku: t.sku || undefined,
       })),
-      shippingAddress: receipt.first_line
-        ? {
-            name: receipt.name || '',
-            street1: receipt.first_line,
-            street2: receipt.second_line || undefined,
-            city: receipt.city || '',
-            state: receipt.state || '',
-            postalCode: receipt.zip || '',
-            country: receipt.country_iso || '',
-            // Etsy's Receipt has no phone field at all — email is the only
-            // extra contact detail available, and it's the same
-            // buyer_email already used for MarketplaceOrder.buyerEmail
-            // above, just also surfaced on the address itself.
-            email: receipt.buyer_email || undefined,
-          }
-        : undefined,
+      shippingAddress: this.mapShippingAddress(receipt),
+    }
+  }
+
+  /**
+   * Etsy OAuth/scopes audit finding: third-party access to shipping
+   * address fields has reportedly been restricted for some regions —
+   * Etsy may return a receipt with SOME address fields present and others
+   * withheld, rather than either a full address or none at all. The
+   * previous implementation gated the entire shippingAddress on
+   * `first_line` alone, so a receipt missing just the street line (but
+   * carrying city/country/zip) silently lost all of that real,
+   * available data. This builds the address whenever ANY address field
+   * is present, and returns undefined only when the receipt truly
+   * carries none — every field still falls back to '' individually
+   * (unchanged from before), matching Address's own required-string
+   * fields and the Order model's own non-nullable shipping columns that
+   * every caller (OrdersSyncService.ts) already coalesces with `|| ''`.
+   */
+  private mapShippingAddress(receipt: any): Address | undefined {
+    const hasAnyAddressField = !!(
+      receipt.first_line ||
+      receipt.second_line ||
+      receipt.city ||
+      receipt.state ||
+      receipt.zip ||
+      receipt.country_iso
+    )
+    if (!hasAnyAddressField) {
+      return undefined
+    }
+
+    return {
+      name: receipt.name || '',
+      street1: receipt.first_line || '',
+      street2: receipt.second_line || undefined,
+      city: receipt.city || '',
+      state: receipt.state || '',
+      postalCode: receipt.zip || '',
+      country: receipt.country_iso || '',
+      // Etsy's Receipt has no phone field at all — email is the only
+      // extra contact detail available, and it's the same buyer_email
+      // already used for MarketplaceOrder.buyerEmail above, just also
+      // surfaced on the address itself.
+      email: receipt.buyer_email || undefined,
     }
   }
 
