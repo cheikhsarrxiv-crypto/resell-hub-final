@@ -67,11 +67,55 @@ describe('/api/ai/agent route — auth, workspace isolation, and Business gating
   });
 
   it('passes session.user.id (not a client-supplied value) as the agent conversation owner', () => {
-    expect(routeSource).toContain('AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId)');
+    expect(routeSource).toContain(
+      'AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId, attachments)'
+    );
   });
 
   it('never logs the raw error object at this layer', () => {
     expect(routeSource).not.toMatch(/logger\.error\([^)]*,\s*error\s*\)/);
+  });
+});
+
+/**
+ * Bug fix (AI agent readiness audit): aiAgentMessageSchema previously had
+ * no `attachments` field, so Zod silently stripped it from result.data —
+ * this route never read it, and a real photo upload (POST
+ * /api/ai/agent/photos, genuinely sent back by buildAgentRequestBody in
+ * the next message's JSON body — see src/lib/ai/agentConversation.ts)
+ * never reached AiAgentService.sendMessage, even though
+ * AiAgentService.sendMessage's own signature already had an attachments
+ * parameter and ai-agent-service.test.ts already proved that parameter
+ * works correctly IN ISOLATION — that test suite called the service
+ * directly, bypassing this route entirely, so it could never have caught
+ * this gap. These checks prove the route itself now actually wires the
+ * two together, at the source level, the same convention this whole file
+ * already uses for everything else this route is responsible for.
+ */
+describe('/api/ai/agent route — attachments are extracted and forwarded (photo-transfer fix)', () => {
+  it('destructures attachments out of the validated request body', () => {
+    expect(routeSource).toContain('const { message, conversationId, attachments } = result.data;');
+  });
+
+  it('destructures attachments only after aiAgentMessageSchema has validated the body — never before', () => {
+    const validateIndex = routeSource.indexOf('aiAgentMessageSchema.safeParse(body)');
+    const destructureIndex = routeSource.indexOf('const { message, conversationId, attachments } = result.data;');
+    expect(validateIndex).toBeGreaterThan(-1);
+    expect(destructureIndex).toBeGreaterThan(validateIndex);
+  });
+
+  it('forwards attachments as the 5th argument to AiAgentService.sendMessage, after message and conversationId', () => {
+    const callIndex = routeSource.indexOf('AiAgentService.sendMessage(');
+    expect(callIndex).toBeGreaterThan(-1);
+    const callEndIndex = routeSource.indexOf(');', callIndex);
+    expect(callEndIndex).toBeGreaterThan(callIndex);
+    const callArgsText = routeSource.slice(callIndex + 'AiAgentService.sendMessage('.length, callEndIndex);
+    const args = callArgsText.split(',').map((s) => s.trim());
+    expect(args).toEqual(['workspaceId', 'session.user.id', 'message', 'conversationId', 'attachments']);
+  });
+
+  it('never reads attachments from anywhere other than the Zod-validated body (no raw body.attachments access)', () => {
+    expect(routeSource).not.toContain('body.attachments');
   });
 });
 
