@@ -10,6 +10,7 @@ import { AgentErrorBanner } from '@/components/ai/AgentErrorBanner';
 import { AgentUsageBanner } from '@/components/ai/AgentUsageBanner';
 import { AgentOnboarding } from '@/components/ai/AgentOnboarding';
 import { recordToProfileInput, type AgentProfileInput } from '@/lib/ai/agentProfile';
+import { interpretProfileResponse, type ProfileLoadOutcome } from '@/lib/ai/agentConversation';
 
 /**
  * Phase 11A — text-only Agent conversation page. Phase 11D — restores a
@@ -56,33 +57,56 @@ export default function AgentPage() {
   const [profileChecked, setProfileChecked] = useState(false);
   const [hasProfile, setHasProfile] = useState(false);
   const [existingProfileForEdit, setExistingProfileForEdit] = useState<AgentProfileInput | null>(null);
+  // Diagnostic fix (profile 403 vs agent-search 500 investigation): a 403
+  // (no workspace / feature disabled / email unverified / session
+  // expired) or a real server/network failure used to be silently
+  // treated exactly like "no profile yet", showing onboarding with no
+  // indication anything was actually wrong — see interpretProfileResponse
+  // (agentConversation.ts), the single source of truth this effect and
+  // the retry button below both defer to. null means no error to show.
+  const [profileLoadError, setProfileLoadError] = useState<{ type: 'access_denied' | 'server_error'; message: string } | null>(null);
+
+  const applyProfileOutcome = useCallback((outcome: ProfileLoadOutcome) => {
+    if (outcome.status === 'ok') {
+      setProfileLoadError(null);
+      setHasProfile(Boolean(outcome.profile));
+      if (outcome.profile) setExistingProfileForEdit(recordToProfileInput(outcome.profile));
+    } else {
+      // Never flip hasProfile here — an access/server error must never
+      // be mistaken for "no profile yet" and silently show onboarding.
+      setProfileLoadError({ type: outcome.status, message: outcome.message });
+    }
+    setProfileChecked(true);
+  }, []);
+
+  const loadProfile = useCallback(() => {
+    fetch('/api/ai/agent/profile')
+      .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
+      .then(({ ok, data }) => applyProfileOutcome(interpretProfileResponse(ok, data)))
+      .catch(() =>
+        applyProfileOutcome({ status: 'server_error', message: 'Impossible de contacter ADKSY. Vérifiez votre connexion.' })
+      );
+  }, [applyProfileOutcome]);
 
   useEffect(() => {
     let cancelled = false;
     fetch('/api/ai/agent/profile')
-      .then((res) => res.json().catch(() => null))
-      .then((data: any) => {
+      .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
+      .then(({ ok, data }) => {
         if (cancelled) return;
-        const profile = data?.profile ?? null;
-        setHasProfile(Boolean(profile));
-        if (profile) setExistingProfileForEdit(recordToProfileInput(profile));
-        setProfileChecked(true);
+        applyProfileOutcome(interpretProfileResponse(ok, data));
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed check never blocks access to the Agent — treated the
-        // exact same way as "no profile yet" (onboarding would show, but
-        // "Terminer maintenant"/"Passer" always let the reseller through
-        // immediately; the Agent itself works identically either way).
-        setHasProfile(false);
-        setProfileChecked(true);
+        applyProfileOutcome({ status: 'server_error', message: 'Impossible de contacter ADKSY. Vérifiez votre connexion.' });
       });
     return () => {
       cancelled = true;
     };
     // Checked once per page load only — a completed/edited onboarding
-    // flips hasProfile directly via handleOnboardingComplete below,
-    // never by re-running this effect.
+    // flips hasProfile directly via handleOnboardingComplete below, and a
+    // retry click calls loadProfile() directly — neither re-runs this
+    // effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -93,7 +117,10 @@ export default function AgentPage() {
     }
   }, [editProfileRequested, pathname, router]);
 
-  const showOnboarding = profileChecked && (!hasProfile || editProfileRequested);
+  // profileLoadError takes priority: onboarding must only ever show on a
+  // genuine 200 {profile: null}, never on an access refusal or a server
+  // failure that happens to look like "no profile yet" from the outside.
+  const showOnboarding = profileChecked && !profileLoadError && (!hasProfile || editProfileRequested);
 
   // Lets a click on one of AgentMessageList's "Exemples de demandes" cards
   // fill AgentComposer's field — the two are siblings with no shared
@@ -167,7 +194,20 @@ export default function AgentPage() {
         )}
       </div>
 
-      {showOnboarding ? (
+      {profileLoadError ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center">
+          <AgentErrorBanner message={profileLoadError.message} />
+          {profileLoadError.type === 'server_error' && (
+            <button
+              type="button"
+              onClick={loadProfile}
+              className="text-sm font-medium text-[#FF5A1F] hover:text-[#e64f18] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF5A1F]/60 rounded-md px-2 py-1"
+            >
+              Réessayer
+            </button>
+          )}
+        </div>
+      ) : showOnboarding ? (
         <AgentOnboarding onComplete={handleOnboardingComplete} initialAnswers={editProfileRequested ? existingProfileForEdit : null} />
       ) : (
         <>

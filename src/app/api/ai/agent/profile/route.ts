@@ -19,7 +19,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
-import { verifyWorkspaceAccess, errorResponse } from '@/lib/security';
+import { verifyWorkspaceAccess } from '@/lib/security';
 import { SubscriptionService } from '@/services/SubscriptionService';
 import { prisma } from '@/lib/prisma';
 import { agentProfileInputSchema, type AgentProfileRecord } from '@/lib/ai/agentProfile';
@@ -33,10 +33,10 @@ async function resolveWorkspaceId(): Promise<string | NextResponse> {
   const session = await auth();
 
   if (!session?.user?.id) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    return NextResponse.json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
   }
   if (!session.user.workspaceId) {
-    return NextResponse.json({ error: 'No workspace found for this account' }, { status: 403 });
+    return NextResponse.json({ error: 'No workspace found for this account', code: 'NO_WORKSPACE' }, { status: 403 });
   }
 
   const workspaceId = await verifyWorkspaceAccess(session.user.workspaceId);
@@ -44,12 +44,50 @@ async function resolveWorkspaceId(): Promise<string | NextResponse> {
   const hasAgentAccess = await SubscriptionService.hasFeature(workspaceId, 'aiAssistant');
   if (!hasAgentAccess) {
     return NextResponse.json(
-      { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.' },
+      { error: 'The AI Agent is not enabled for this workspace. Contact support if you believe this is an error.', code: 'FEATURE_DISABLED' },
       { status: 403 }
     );
   }
 
   return workspaceId;
+}
+
+/**
+ * Diagnostic fix (profile 403 vs agent-search 500 investigation) — a
+ * stable, machine-readable `code` alongside every non-2xx JSON body this
+ * route returns, so AgentPage's frontend never has to guess the cause
+ * from the human-readable `error` string (and used to not even try,
+ * silently treating any non-ok response as "no profile yet" — see
+ * interpretProfileResponse in agentConversation.ts, the consumer this
+ * was added for).
+ *
+ * Every HTTP status below is UNCHANGED from before this fix — only the
+ * `code` field is new, which is purely additive for any existing
+ * consumer that only reads `error`/`success`/`profile`. Deliberately
+ * NOT routed through the shared errorResponse() (src/lib/security.ts):
+ * that helper is used by many other routes with no `code` field at all,
+ * and giving it one here would change its shape for all of them. This
+ * local mapper instead mirrors errorResponse()'s own existing message ->
+ * status precedence exactly (same branches, same order), just attaching
+ * a `code` on top — never changes which status a given error message
+ * maps to.
+ */
+function profileErrorResponse(error: unknown): NextResponse {
+  const message = error instanceof Error ? error.message : 'Internal server error';
+
+  if (message === 'Unauthorized' || message.includes('unauthorized')) {
+    return NextResponse.json({ error: message, code: 'UNAUTHORIZED' }, { status: 401 });
+  }
+  if (message === 'Email verification required') {
+    return NextResponse.json({ error: message, code: 'EMAIL_UNVERIFIED' }, { status: 403 });
+  }
+  if (message.includes('not found')) {
+    return NextResponse.json({ error: message, code: 'NOT_FOUND' }, { status: 404 });
+  }
+  if (message.includes('required')) {
+    return NextResponse.json({ error: message, code: 'INVALID_REQUEST' }, { status: 400 });
+  }
+  return NextResponse.json({ error: message, code: 'SERVER_ERROR' }, { status: 500 });
 }
 
 function toRecord(row: { usageType: string; budgetRange: string | null; customBudgetEur: number | null; sellingPlatforms: string[]; preferredCategories: string[]; monthlyGoal: string | null; priority: string | null; qualityVsPrice: string | null }): AgentProfileRecord {
@@ -76,7 +114,7 @@ export async function GET() {
     return NextResponse.json({ success: true, profile: row ? toRecord(row) : null });
   } catch (error) {
     logger.error('AI agent profile lookup failed', error instanceof Error ? error : String(error));
-    return errorResponse(error);
+    return profileErrorResponse(error);
   }
 }
 
@@ -122,6 +160,6 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ success: true, profile: toRecord(row) });
   } catch (error) {
     logger.error('AI agent profile save failed', error instanceof Error ? error : String(error));
-    return errorResponse(error);
+    return profileErrorResponse(error);
   }
 }

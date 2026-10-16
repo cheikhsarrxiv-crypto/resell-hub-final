@@ -73,3 +73,66 @@ describe('/api/ai/agent/profile route — auth and workspace isolation', () => {
     expect(routeSource).not.toMatch(/logger\.error\([^)]*,\s*error\s*\)/);
   });
 });
+
+/**
+ * Diagnostic fix (profile 403 vs agent-search 500 investigation) — a
+ * stable `code` field on every non-2xx body, so the frontend
+ * (interpretProfileResponse, agentConversation.ts) never has to guess the
+ * cause from the human-readable `error` string. Every status below is
+ * asserted to be UNCHANGED from before this fix — only `code` is new.
+ */
+describe('/api/ai/agent/profile route — stable error codes (statuses unchanged)', () => {
+  it('no workspaceId on the session -> 403 with code NO_WORKSPACE', () => {
+    const idx = routeSource.indexOf('if (!session.user.workspaceId)');
+    const block = routeSource.slice(idx, idx + 200);
+    expect(block).toContain("status: 403");
+    expect(block).toContain("code: 'NO_WORKSPACE'");
+  });
+
+  it('aiAssistant feature disabled -> 403 with code FEATURE_DISABLED', () => {
+    const idx = routeSource.indexOf('if (!hasAgentAccess)');
+    const block = routeSource.slice(idx, routeSource.indexOf('return workspaceId'));
+    expect(block).toContain("status: 403");
+    expect(block).toContain("code: 'FEATURE_DISABLED'");
+  });
+
+  it('no session at all -> 401 with code UNAUTHORIZED', () => {
+    const idx = routeSource.indexOf('if (!session?.user?.id)');
+    const block = routeSource.slice(idx, idx + 200);
+    expect(block).toContain('status: 401');
+    expect(block).toContain("code: 'UNAUTHORIZED'");
+  });
+
+  it('profileErrorResponse exists as its own local mapper, never routed through the shared errorResponse() (which has no `code` field and is used by many other routes)', () => {
+    expect(routeSource).toContain('function profileErrorResponse(error: unknown)');
+    expect(routeSource).not.toContain('errorResponse(error)');
+    expect(routeSource).not.toMatch(/import\s*\{[^}]*\berrorResponse\b[^}]*\}\s*from\s*'@\/lib\/security'/);
+  });
+
+  it('profileErrorResponse mirrors the shared errorResponse() precedence exactly (same branches, same order) — only `code` is added, no status ever changes', () => {
+    const fnStart = routeSource.indexOf('function profileErrorResponse');
+    const fnBody = routeSource.slice(fnStart, routeSource.indexOf('\n}', fnStart));
+
+    const unauthorizedIdx = fnBody.indexOf("message.includes('unauthorized')");
+    const emailIdx = fnBody.indexOf("message === 'Email verification required'");
+    const notFoundIdx = fnBody.indexOf("message.includes('not found')");
+    const requiredIdx = fnBody.indexOf("message.includes('required')");
+
+    expect(unauthorizedIdx).toBeGreaterThan(-1);
+    expect(emailIdx).toBeGreaterThan(unauthorizedIdx);
+    expect(notFoundIdx).toBeGreaterThan(emailIdx);
+    expect(requiredIdx).toBeGreaterThan(notFoundIdx);
+
+    expect(fnBody).toContain("code: 'EMAIL_UNVERIFIED'");
+    expect(fnBody).toContain("status: 403");
+    expect(fnBody).toContain("code: 'NOT_FOUND'");
+    expect(fnBody).toContain("status: 404");
+    expect(fnBody).toContain("code: 'SERVER_ERROR'");
+    expect(fnBody).toContain("status: 500");
+  });
+
+  it('both GET and PUT route their catch block through profileErrorResponse', () => {
+    const occurrences = [...routeSource.matchAll(/return profileErrorResponse\(error\)/g)];
+    expect(occurrences.length).toBe(2);
+  });
+});

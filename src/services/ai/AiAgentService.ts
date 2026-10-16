@@ -12,6 +12,27 @@ import { formatAgentProfileForPrompt } from '@/lib/ai/agentProfile';
 
 const logger = createLogger('ai-agent');
 
+/**
+ * Diagnostic fix (POST /api/ai/agent 500 investigation) — a coarse,
+ * stable category for sendMessage's catch-all error log, so Vercel/
+ * Sentry can be filtered/grouped by likely cause without reading each
+ * trace individually. Pure and directly testable on purpose; never
+ * itself thrown or returned to the client — only ever attached to the
+ * existing logger.error call below, same as `step`/`anthropicFields`.
+ *
+ * Deliberately coarse, not a guess at the exact root cause: 'database'
+ * covers every step that calls Prisma (persistMessage/resolveConversation
+ * and, during 'processing_tool_calls', AiUsageService.reserveUsage — the
+ * only sub-operation there NOT already caught locally by the per-tool
+ * try/catch, see that catch's own comment). A real tool-handler failure
+ * never reaches this far — it's swallowed into a tool_result instead.
+ */
+export function classifyAgentError(step: string, isAnthropicError: boolean): 'anthropic_api' | 'database' | 'unknown' {
+  if (isAnthropicError) return 'anthropic_api';
+  if (step.startsWith('persisting_') || step === 'processing_tool_calls') return 'database';
+  return 'unknown';
+}
+
 const AI_MODEL = 'claude-sonnet-5';
 const AI_MAX_TOKENS = 2048;
 // Tool-use orchestration needs real multi-step reasoning (plan a tool
@@ -411,6 +432,11 @@ export class AiAgentService {
     // revalidate).
     attachments?: Array<{ url: string; storagePath: string; mimeType: string }>
   ): Promise<AgentTurnResult> {
+    // Diagnostic fix — captured before any work starts so a failure's
+    // logged durationMs reflects the FULL turn (including
+    // resolveConversation/loadHistory below, not just the model-call
+    // loop), since those also call Prisma and are candidate causes.
+    const turnStartedAt = Date.now();
     const resolvedConversationId = await this.resolveConversation(workspaceId, userId, conversationId);
     const history = await this.loadHistory(resolvedConversationId);
 
@@ -472,9 +498,14 @@ export class AiAgentService {
     // below can log it. Never itself thrown/returned to the client —
     // read only by the catch's own logger.error call.
     let step = 'anthropic_messages_create';
+    // Diagnostic fix — hoisted outside the loop for the same reason as
+    // `step`: readable from the catch below to know how many tool-use
+    // round-trips already completed before the failure.
+    let lastIteration = 0;
 
     try {
       for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+        lastIteration = iteration;
         step = 'anthropic_messages_create';
         const response = await client.messages.create({
           model: AI_MODEL,
@@ -721,9 +752,23 @@ export class AiAgentService {
           }
         : {};
       const cause = error instanceof Error && (error as { cause?: unknown }).cause ? String((error as { cause?: unknown }).cause) : undefined;
+      // Diagnostic fix — durationMs/toolIterationCount/errorCategory are
+      // pure bookkeeping (a timestamp diff, a loop counter, a coarse
+      // classification of already-non-secret fields above); never a
+      // secret, token, prompt, or user-identifying value.
+      const durationMs = Date.now() - turnStartedAt;
+      const errorCategory = classifyAgentError(step, isAnthropicError);
 
       if (error instanceof Anthropic.RateLimitError) {
-        logger.warn('AI provider rate limited the agent request', { workspaceId, step, model: AI_MODEL, ...anthropicFields });
+        logger.warn('AI provider rate limited the agent request', {
+          workspaceId,
+          step,
+          model: AI_MODEL,
+          durationMs,
+          toolIterationCount: lastIteration,
+          errorCategory,
+          ...anthropicFields,
+        });
         throw new Error('The AI agent is receiving too many requests right now. Please try again shortly.');
       }
 
@@ -732,6 +777,9 @@ export class AiAgentService {
         step,
         model: AI_MODEL,
         cause,
+        durationMs,
+        toolIterationCount: lastIteration,
+        errorCategory,
         ...anthropicFields,
       });
       throw new Error('The AI agent is temporarily unavailable. Please try again shortly.');

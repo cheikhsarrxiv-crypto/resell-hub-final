@@ -102,4 +102,70 @@ describe('AgentPage', () => {
       expect(useSearchParamsMock).toHaveBeenCalled();
     });
   });
+
+  it('on first synchronous render (profile check not resolved yet), shows neither onboarding nor a profile error — only the normal welcome screen', () => {
+    const html = renderToStaticMarkup(<AgentPage />);
+
+    expect(html).not.toContain('Bienvenue dans ton Agent IA');
+    expect(html).toContain('propulsé par l&#x27;IA');
+  });
+});
+
+/**
+ * Diagnostic fix (profile 403 vs agent-search 500 investigation) —
+ * source-level checks, same convention as
+ * agent/profile/__tests__/route.test.ts: renderToStaticMarkup never runs
+ * useEffect (see this file's own header comment), so the actual
+ * fetch-resolves-to-an-error-state behavior can't be exercised by
+ * rendering — verified here against the real file content instead.
+ */
+describe('AgentPage source — profile load error handling (profile 403 vs agent-search 500 diagnostic fix)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const pageSource: string = fs.readFileSync(path.join(process.cwd(), 'src/app/dashboard/agent/page.tsx'), 'utf-8');
+
+  it('imports interpretProfileResponse — never re-implements the profile-response interpretation inline', () => {
+    expect(pageSource).toContain("interpretProfileResponse");
+    expect(pageSource).toContain("from '@/lib/ai/agentConversation'");
+  });
+
+  it('showOnboarding is gated on !profileLoadError — an access/server error can never also show onboarding', () => {
+    const idx = pageSource.indexOf('const showOnboarding =');
+    const line = pageSource.slice(idx, pageSource.indexOf('\n', idx));
+    expect(line).toContain('!profileLoadError');
+  });
+
+  it('applyProfileOutcome never sets hasProfile on a non-ok outcome — only the "ok" branch may ever flip it', () => {
+    const start = pageSource.indexOf('const applyProfileOutcome');
+    const end = pageSource.indexOf('}, []);', start);
+    const body = pageSource.slice(start, end);
+
+    const okBranchStart = body.indexOf("outcome.status === 'ok'");
+    const setHasProfileIdx = body.indexOf('setHasProfile(');
+    const elseIdx = body.indexOf('} else {');
+
+    expect(okBranchStart).toBeGreaterThan(-1);
+    expect(setHasProfileIdx).toBeGreaterThan(okBranchStart);
+    expect(setHasProfileIdx).toBeLessThan(elseIdx); // setHasProfile only appears before the else branch
+  });
+
+  it('a retry button exists, calls loadProfile, and only renders for server_error (never for access_denied, which a retry cannot fix)', () => {
+    const idx = pageSource.indexOf("profileLoadError.type === 'server_error'");
+    expect(idx).toBeGreaterThan(-1);
+    const block = pageSource.slice(idx, idx + 600);
+    expect(block).toContain('onClick={loadProfile}');
+    expect(block).toContain('Réessayer');
+  });
+
+  it('the profile-error banner reuses the existing AgentErrorBanner component, never a new/duplicate error UI', () => {
+    const idx = pageSource.indexOf('{profileLoadError ?');
+    const block = pageSource.slice(idx, idx + 400);
+    expect(block).toContain('<AgentErrorBanner message={profileLoadError.message} />');
+  });
+
+  it('a network-level failure (fetch itself rejects) is classified as server_error, never silently swallowed as "no profile"', () => {
+    const catchIdx = pageSource.lastIndexOf('.catch(() => {');
+    const block = pageSource.slice(catchIdx, catchIdx + 250);
+    expect(block).toContain("status: 'server_error'");
+  });
 });
