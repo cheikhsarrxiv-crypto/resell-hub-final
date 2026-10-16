@@ -186,7 +186,13 @@ export default function AgentPage() {
 
           {error && <AgentErrorBanner message={error} />}
 
-          <AgentComposer sending={sending} onSend={sendMessage} isEmpty={messages.length === 0} prefill={exampleToFill} />
+          <AgentComposer
+            sending={sending}
+            onSend={sendMessage}
+            isEmpty={messages.length === 0}
+            prefill={exampleToFill}
+            conversationId={conversationId}
+          />
         </>
       )}
     </div>

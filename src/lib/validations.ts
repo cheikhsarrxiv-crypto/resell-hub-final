@@ -198,9 +198,43 @@ export const aiChatMessageSchema = z.object({
 // its own conversation server-side (see AgentConversation/AgentMessage in
 // prisma/schema.prisma), so the client sends a conversationId to
 // continue one instead of resending full history.
+// AI-first "free listing creation" workflow — the shape POST
+// /api/ai/agent/photos itself already returned after uploading the real
+// file (see that route and StorageService.uploadConversationImage); never
+// raw file bytes in this JSON body. Mirrors AgentPhotoAttachment
+// (src/lib/ai/agentConversation.ts) exactly — kept as a literal duplicate
+// here rather than imported, same reason AgentComposer.tsx already
+// duplicates StorageService's ALLOWED_MIME_TYPES/MAX_FILE_SIZE instead of
+// importing StorageService itself: that module creates a real Supabase
+// client (service-role key) as a module-level side effect, which this
+// shared validation file must never pull in.
+//
+// SECURITY: `url` is only ever checked here for being *a* well-formed
+// URL — never that it points at this project's own Supabase bucket, and
+// it is never dereferenced server-side (see
+// StorageService.downloadConversationImageBytes's own comment: the real
+// SSRF guard is that only `storagePath` is used to fetch bytes, and only
+// after being re-verified there to sit inside this exact
+// workspace+conversation's own upload prefix). `mimeType` here is just a
+// recognized-format check for an early, honest rejection — it is never
+// trusted downstream either; the real mimeType is re-derived from
+// storagePath's own file extension before any bytes are read.
+const aiAgentAttachmentMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const;
+
+const aiAgentAttachmentSchema = z.object({
+  url: z.string().url('Attachment url must be a well-formed URL'),
+  storagePath: z.string().min(1, 'Attachment storagePath is required'),
+  mimeType: z.enum(aiAgentAttachmentMimeTypes),
+});
+
 export const aiAgentMessageSchema = z.object({
   message: z.string().min(1, 'Message is required').max(4000, 'Message is too long'),
   conversationId: z.string().min(1).optional(),
+  // Capped well above the UI's own current one-photo-per-turn limit
+  // (AgentComposer only ever sends a single-element array) — this is a
+  // server-side ceiling against any direct API call bypassing that UI,
+  // not an expected normal value.
+  attachments: z.array(aiAgentAttachmentSchema).max(5, 'Too many attachments').optional(),
 });
 
 export type SignUpInput = z.infer<typeof signUpSchema>;
