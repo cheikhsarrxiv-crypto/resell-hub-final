@@ -299,9 +299,14 @@ export function AgentComposer({ sending, onSend, isEmpty = false, prefill = null
   // mobile overlay's up-to-2-line wrap (see line-clamp-2 below) so it
   // never gets vertically clipped; sm:min-h-0 drops it back to the
   // content-driven height desktop already had.
+  // max-h-48 (not the previous max-h-32/128px) on an active conversation
+  // — now that the chat itself fills far more of the viewport (see
+  // AgentPage's own flex-1 comment), the composer can afford real room
+  // for a long message (~8-9 lines) before it starts scrolling inside
+  // itself, matching the "comfortable long message" ask.
   const fieldSizeClasses = isEmpty
     ? 'px-4 py-3.5 text-base sm:text-lg max-h-40 min-h-[76px] sm:min-h-0'
-    : 'px-3.5 py-2.5 text-sm max-h-32';
+    : 'px-3.5 py-2.5 text-sm max-h-48';
 
   return (
     <div className={`border-t border-white/[0.06] shrink-0 ${isEmpty ? 'p-5 sm:p-8 bg-[#14161A]/60' : 'p-3 sm:p-4'}`}>

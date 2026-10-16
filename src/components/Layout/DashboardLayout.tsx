@@ -7,6 +7,7 @@ import {
   Box,
   FileText,
   Home,
+  Plug,
   Settings,
   ShoppingCart,
   Sparkles,
@@ -87,6 +88,14 @@ export function DashboardLayout({
         { name: 'Fulfillment', href: `${baseUrl}/fulfillment`, icon: Zap },
         { name: 'Analytics', href: `${baseUrl}/analytics`, icon: BarChart3 },
         { name: 'Subscription', href: `${baseUrl}/subscription`, icon: Box },
+        // Marketplace OAuth connectors (eBay/Etsy today) — previously only
+        // reachable via a contextual link buried in /listings/new or a
+        // direct URL, with no entry point in the main navigation at all.
+        // Grouped here as its own always-visible item (same pattern as
+        // ChatGPT/Claude/Gemini's "Connectors" entry) rather than nested
+        // under Settings, since it's a distinct, frequently-needed action
+        // (connect/reconnect/disconnect), not a one-off preference.
+        { name: 'Connecteurs', href: `${baseUrl}/settings/integrations`, icon: Plug },
         { name: 'Settings', href: `${baseUrl}/settings`, icon: Settings },
       ];
 
@@ -130,7 +139,13 @@ export function DashboardLayout({
           room for DashboardHeader above; md:pb-0 drops it once the
           bottom nav itself is hidden at md: and up. */}
       <main className="flex-1 min-w-0 min-h-0 overflow-auto pt-14 pb-16 md:pt-0 md:pb-0">
-        <div className="p-4 sm:p-6 lg:p-8">{children}</div>
+        {/* min-h-full (not h-full): guarantees at least the full available
+            height so a page that opts in with its own flex-1 (e.g. the
+            Agent chat) can actually fill it, while a normal page's content
+            can still grow taller than the viewport and scroll via main's
+            own overflow-auto above — unaffected, since none of them set
+            flex-1 on their own root. */}
+        <div className="min-h-full flex flex-col p-4 sm:p-6 lg:p-8">{children}</div>
       </main>
 
       {/* Merchant-facing assistant only — not shown in the admin section,

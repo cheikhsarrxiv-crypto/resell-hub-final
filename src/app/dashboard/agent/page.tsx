@@ -137,7 +137,15 @@ export default function AgentPage() {
         // dashboard shell's own <main> is already overflow-auto) — no
         // fixed height, no overflow-hidden, so nothing gets clipped into
         // a hidden internal scrollbar.
-        messages.length === 0 ? '' : 'h-[70vh] max-h-[720px] overflow-hidden'
+        //
+        // flex-1 min-h-0 (not a fixed vh/px cap): fills the rest of the
+        // dashboard shell's available height instead of stopping at 720px
+        // on large screens — relies on DashboardLayout's content wrapper
+        // now being a flex column (min-h-full flex flex-col) so this is
+        // the only flexed child actually growing; min-h-0 overrides the
+        // flex item's default min-height:auto so it can still shrink
+        // below its content size instead of overflowing the shell.
+        messages.length === 0 ? '' : 'flex-1 min-h-0 overflow-hidden'
       }`}
     >
       <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/[0.06] shrink-0">

@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import { DashboardButton } from '@/components/dashboard/DashboardButton'
 import { Marketplace } from '@/types/marketplace'
 import { format } from 'date-fns'
+import { comingSoonMarketplaces } from '@/app/onboarding/steps/marketplaceAvailability'
 
 interface MarketplaceConnectionsCardProps {
   connections: any[]
@@ -190,6 +191,12 @@ export function MarketplaceConnectionsCard({
         </div>
       )}
 
+      {/* eBay + Etsy — grouped in a responsive grid (1 col on mobile, 2 on
+          larger screens) instead of two full-width stacked blocks, so
+          this reads as a connector hub rather than a long form. Purely an
+          outer layout change: nothing inside either card (status logic,
+          banners, buttons) is touched. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* eBay */}
       <div className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5 sm:p-6">
         <div className="flex items-start justify-between mb-6 flex-wrap gap-4">
@@ -380,6 +387,42 @@ export function MarketplaceConnectionsCard({
             <p className="text-sm text-red-300">{connectError.message}</p>
           </div>
         )}
+      </div>
+      </div>
+
+      {/* Bientôt disponible — jamais présenté comme une option connectable
+          (pas de bouton "Connecter"): ces marketplaces ont une vraie API
+          vendeur mais l'accès est encore conditionné à un partenariat/
+          allowlist qu'ADKSY n'a pas obtenu (voir marketplaceAvailability.ts,
+          déjà utilisé par l'onboarding — même source de vérité, jamais
+          dupliquée ici). Affiché pour que la page reste honnête sur ce qui
+          existe réellement, sans jamais simuler une connexion possible. */}
+      <div>
+        <h3 className="text-sm font-medium text-gray-400 mb-3">Bientôt disponible</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {comingSoonMarketplaces.map((marketplace) => (
+            <div
+              key={marketplace.id}
+              className="bg-white/[0.02] border border-white/[0.06] rounded-2xl p-5 sm:p-6 opacity-70"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-xl bg-white/[0.04] flex items-center justify-center flex-shrink-0">
+                  <span className="text-gray-400 text-xs font-bold tracking-tight">
+                    {marketplace.name.slice(0, 2).toUpperCase()}
+                  </span>
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-gray-300">{marketplace.name}</h2>
+                  <p className="text-gray-600 text-sm">{marketplace.description}</p>
+                </div>
+              </div>
+              <span className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+                En attente d&apos;un accès partenaire
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
