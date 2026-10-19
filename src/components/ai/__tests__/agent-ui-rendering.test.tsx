@@ -387,7 +387,10 @@ describe('AgentComposer', () => {
   it('Phase 11E: the textarea keeps a bounded max-height class, so a multi-line (Shift+Enter) message that grows the box never grows unbounded', () => {
     const html = renderToStaticMarkup(<AgentComposer sending={false} onSend={() => {}} />);
 
-    expect(html).toMatch(/<textarea[^>]*class="[^"]*max-h-32/);
+    // max-h-48 (raised from max-h-32 for the "bigger, more comfortable
+    // chat" redesign — see AgentComposer's own comment) — the bound
+    // itself, not its exact value, is what this test protects.
+    expect(html).toMatch(/<textarea[^>]*class="[^"]*max-h-48/);
   });
 
   it('Phase 11E: renders without crashing with the new textarea ref in place (the auto-grow effect itself needs a real DOM/scrollHeight, which renderToStaticMarkup does not provide — see this file\'s own header comment)', () => {

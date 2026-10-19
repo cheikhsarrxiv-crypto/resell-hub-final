@@ -398,13 +398,43 @@ export interface SyncLog {
 // ERROR MODELS
 // ============================================================================
 
-export interface NormalizedError {
+/**
+ * A real Error instance (so every `catch` across the sync services and
+ * cron routes that checks `error instanceof Error` sees a true positive
+ * and preserves `.message`), while still carrying the same structured
+ * fields every existing consumer already reads by plain property access
+ * (RetrySystem.isRetryable, MarketplaceOrderService, EbayAdapter's
+ * reconciliation check, ListingService's toSafeMarketplaceErrorMessage —
+ * none of them do `instanceof`/equality checks on the error shape itself,
+ * only `.type`/`.statusCode`/`.retryable`/`.retryAfter`/`.message` reads,
+ * so this is a drop-in replacement for the previous plain-object shape).
+ * `originalError` is intentionally never spread or JSON.stringify'd by
+ * any caller — callers that log must extract `type`/`message`/`statusCode`
+ * explicitly, never log this instance or `originalError` wholesale.
+ */
+export class NormalizedError extends Error {
   type: ErrorType;
-  message: string;
   statusCode: number;
   retryable: boolean;
   retryAfter?: number; // seconds
   originalError?: unknown;
+
+  constructor(params: {
+    type: ErrorType;
+    message: string;
+    statusCode: number;
+    retryable: boolean;
+    retryAfter?: number;
+    originalError?: unknown;
+  }) {
+    super(params.message);
+    this.name = 'NormalizedError';
+    this.type = params.type;
+    this.statusCode = params.statusCode;
+    this.retryable = params.retryable;
+    this.retryAfter = params.retryAfter;
+    this.originalError = params.originalError;
+  }
 }
 
 export interface MarketplaceError extends Error {

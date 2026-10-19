@@ -14,6 +14,7 @@ import {
   cancelAgentAction,
   shouldStickToBottom,
   resolveKnownConversationId,
+  interpretProfileResponse,
   MAX_AGENT_MESSAGE_LENGTH,
   AUTO_SCROLL_THRESHOLD_PX,
   type AgentUiMessage,
@@ -650,5 +651,79 @@ describe('resolveKnownConversationId (Image-search feature, Phase 1 — first-me
 
   it('never prefers the locally-resolved id over a real, different conversationId prop — the real conversation is always authoritative once it exists', () => {
     expect(resolveKnownConversationId('conv-from-server', 'conv-stale-local')).toBe('conv-from-server');
+  });
+});
+
+describe('interpretProfileResponse (GET /api/ai/agent/profile 403 vs 500 diagnostic fix)', () => {
+  describe('ok: true — the only path that may ever lead to onboarding', () => {
+    it('200 with a real profile -> status "ok", profile returned as-is', () => {
+      const profile = { usageType: 'resell' } as any;
+      expect(interpretProfileResponse(true, { profile })).toEqual({ status: 'ok', profile });
+    });
+
+    it('200 with profile: null (genuinely no profile yet) -> status "ok", profile: null — this is the ONLY outcome onboarding may ever key off', () => {
+      expect(interpretProfileResponse(true, { profile: null })).toEqual({ status: 'ok', profile: null });
+    });
+
+    it('200 with a missing profile field entirely -> still "ok", profile defaults to null (never treated as an error just because the field is absent)', () => {
+      expect(interpretProfileResponse(true, {})).toEqual({ status: 'ok', profile: null });
+    });
+  });
+
+  describe('ok: false with a recognized access-denied code — never "ok", never silently treated as no-profile', () => {
+    it.each(['NO_WORKSPACE', 'FEATURE_DISABLED', 'EMAIL_UNVERIFIED', 'UNAUTHORIZED'])(
+      'code "%s" -> status "access_denied" with a non-empty, human message',
+      (code) => {
+        const result = interpretProfileResponse(false, { code });
+        expect(result.status).toBe('access_denied');
+        expect((result as any).message.length).toBeGreaterThan(0);
+      }
+    );
+
+    it('EMAIL_UNVERIFIED gets its own distinct message, not the generic access-denied fallback', () => {
+      const result = interpretProfileResponse(false, { code: 'EMAIL_UNVERIFIED' });
+      expect((result as any).message).toMatch(/e-mail/i);
+    });
+
+    it('FEATURE_DISABLED gets its own distinct message, not the generic access-denied fallback', () => {
+      const result = interpretProfileResponse(false, { code: 'FEATURE_DISABLED' });
+      expect((result as any).message).toMatch(/disponible/i);
+    });
+
+    it('never echoes the raw backend `error` string, even when one is present', () => {
+      const result = interpretProfileResponse(false, { code: 'FEATURE_DISABLED' } as any);
+      expect((result as any).message).not.toContain('Contact support if you believe');
+    });
+  });
+
+  describe('ok: false with no recognized code — server_error, never guessed at', () => {
+    it('a real 500 with code: "SERVER_ERROR" -> status "server_error"', () => {
+      expect(interpretProfileResponse(false, { code: 'SERVER_ERROR' })).toEqual({
+        status: 'server_error',
+        message: "Impossible de charger ton profil Agent IA. Réessaie.",
+      });
+    });
+
+    it('an unrecognized/future code -> still "server_error", never crashes or invents an access message', () => {
+      const result = interpretProfileResponse(false, { code: 'SOME_FUTURE_CODE' } as any);
+      expect(result.status).toBe('server_error');
+    });
+
+    it('a malformed body (null) on a non-ok response -> "server_error", never throws', () => {
+      expect(() => interpretProfileResponse(false, null)).not.toThrow();
+      expect(interpretProfileResponse(false, null).status).toBe('server_error');
+    });
+
+    it('a non-ok response with no `code` field at all (e.g. an older/unexpected error shape) -> "server_error", never "ok"', () => {
+      const result = interpretProfileResponse(false, { error: 'Something went wrong' } as any);
+      expect(result.status).toBe('server_error');
+    });
+  });
+
+  describe('ok: true never produces an access_denied/server_error outcome, regardless of body shape', () => {
+    it('ok: true with a code field present (should never happen in practice) still resolves to "ok"', () => {
+      const result = interpretProfileResponse(true, { profile: null, code: 'FEATURE_DISABLED' } as any);
+      expect(result.status).toBe('ok');
+    });
   });
 });

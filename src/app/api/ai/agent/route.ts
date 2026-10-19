@@ -150,9 +150,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { message, conversationId } = result.data;
+    const { message, conversationId, attachments } = result.data;
 
-    const turn = await AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId);
+    const turn = await AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId, attachments);
 
     return NextResponse.json({ success: true, ...turn });
   } catch (error) {

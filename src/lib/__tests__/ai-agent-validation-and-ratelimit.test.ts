@@ -50,6 +50,77 @@ describe('aiAgentMessageSchema', () => {
     const result = aiAgentMessageSchema.safeParse({ message: 'a'.repeat(4001) });
     expect(result.success).toBe(false);
   });
+
+  // AI-first "free listing creation" workflow — the attachments field
+  // this route previously dropped silently. Mirrors exactly what POST
+  // /api/ai/agent/photos itself returns (see StorageService.
+  // uploadConversationImage): {url, storagePath, mimeType}.
+  const validAttachment = {
+    url: 'https://example.supabase.co/storage/v1/object/public/product-images/ws-1/_draft-uploads/conv-1/123-abc.jpg',
+    storagePath: 'ws-1/_draft-uploads/conv-1/123-abc.jpg',
+    mimeType: 'image/jpeg',
+  };
+
+  it('accepts a message with one well-formed attachment', () => {
+    const result = aiAgentMessageSchema.safeParse({ message: 'Voici la photo', attachments: [validAttachment] });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.attachments).toEqual([validAttachment]);
+  });
+
+  it('accepts a message with no attachments field at all (the common case)', () => {
+    const result = aiAgentMessageSchema.safeParse({ message: 'Just text' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.attachments).toBeUndefined();
+  });
+
+  it('rejects an attachment whose url is not a well-formed URL', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Voici la photo',
+      attachments: [{ ...validAttachment, url: 'not-a-url' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with an empty storagePath', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Voici la photo',
+      attachments: [{ ...validAttachment, storagePath: '' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with an unrecognized mimeType', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Voici la photo',
+      attachments: [{ ...validAttachment, mimeType: 'application/pdf' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment missing a required field entirely', () => {
+    const { url, ...withoutUrl } = validAttachment;
+    const result = aiAgentMessageSchema.safeParse({ message: 'Voici la photo', attachments: [withoutUrl] });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects more than 5 attachments on a single message (server-side ceiling, UI only ever sends one)', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Trop de photos',
+      attachments: Array.from({ length: 6 }, () => validAttachment),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('a client-supplied extra field inside an attachment is silently stripped, never forwarded', () => {
+    const result = aiAgentMessageSchema.safeParse({
+      message: 'Voici la photo',
+      attachments: [{ ...validAttachment, workspaceId: 'someone-elses-workspace-id' }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data.attachments?.[0] as Record<string, unknown> | undefined)?.workspaceId).toBeUndefined();
+    }
+  });
 });
 
 describe('RateLimiterService.checkAiAgent — reuses the existing rate limiter, no new system', () => {

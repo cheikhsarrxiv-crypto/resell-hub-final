@@ -168,6 +168,27 @@ export default function SettingsPage() {
         </DashboardCardContent>
       </DashboardCard>
 
+      {/* Marketplace connectors — second, logical access point to the
+          existing /settings/integrations page (also reachable from the
+          main "Connecteurs" nav entry, see DashboardLayout). Same card
+          pattern as "Préférences Agent IA" just below: a short
+          description + a single link out, no status/logic duplicated
+          here (MarketplaceConnectionsCard remains the only place that
+          reads/shows real connection state). */}
+      <DashboardCard>
+        <DashboardCardHeader>
+          <DashboardCardTitle>Marketplace Integrations</DashboardCardTitle>
+        </DashboardCardHeader>
+        <DashboardCardContent>
+          <p className="text-sm text-gray-400 mb-4">
+            Connectez et gérez vos comptes eBay et Etsy, et consultez l&apos;état de vos connexions.
+          </p>
+          <Link href="/dashboard/settings/integrations">
+            <DashboardButton variant="outline">Gérer les connecteurs</DashboardButton>
+          </Link>
+        </DashboardCardContent>
+      </DashboardCard>
+
       {/* AI Agent Personalization V1 — entry point only; the actual
           onboarding/edit UI lives on the Agent page itself
           (?editProfile=1 reopens it there, pre-filled), never duplicated

@@ -10,6 +10,8 @@
  * thin `useReducer` + `fetch` wrapper around exactly these functions.
  */
 
+import type { AgentProfileRecord } from './agentProfile';
+
 export type AgentActionStatus =
   | 'PENDING_CONFIRMATION'
   | 'CONFIRMED'
@@ -213,6 +215,51 @@ export function buildAgentRequestBody(
     body.attachments = attachments;
   }
   return body;
+}
+
+/**
+ * GET /api/ai/agent/profile diagnostic fix — pure, directly-testable
+ * interpretation of that route's response, replacing the old logic that
+ * treated "non-ok" and "no profile yet" identically (both silently
+ * resolved to the onboarding screen). Mirrors the route's own stable
+ * `code` field (added alongside this fix) rather than ever parsing the
+ * human-readable `error` string.
+ *
+ * 'ok' with `profile: null` is the ONLY outcome that should ever show
+ * onboarding — 'access_denied' (no workspace / feature disabled / email
+ * unverified / session expired) and 'server_error' (an unrecognized
+ * non-ok response, including one with no `code` at all) must each get
+ * their own distinct message instead.
+ */
+export type ProfileLoadOutcome =
+  | { status: 'ok'; profile: AgentProfileRecord | null }
+  | { status: 'access_denied'; message: string }
+  | { status: 'server_error'; message: string };
+
+const PROFILE_ACCESS_ERROR_CODES = new Set(['NO_WORKSPACE', 'FEATURE_DISABLED', 'EMAIL_UNVERIFIED', 'UNAUTHORIZED']);
+
+function describeProfileAccessError(code: string): string {
+  if (code === 'EMAIL_UNVERIFIED') return "Vérifie ton adresse e-mail pour accéder à l'Agent IA.";
+  if (code === 'FEATURE_DISABLED') return "L'Agent IA n'est pas disponible pour ce workspace. Contacte le support si tu penses que c'est une erreur.";
+  // NO_WORKSPACE / UNAUTHORIZED — both mean the session no longer carries
+  // a usable workspace; re-authenticating is the only real next step.
+  return 'Ta session a peut-être expiré. Reconnecte-toi.';
+}
+
+export function interpretProfileResponse(
+  ok: boolean,
+  data: { profile?: unknown; code?: unknown } | null
+): ProfileLoadOutcome {
+  if (ok) {
+    return { status: 'ok', profile: (data?.profile as AgentProfileRecord | null | undefined) ?? null };
+  }
+  if (typeof data?.code === 'string' && PROFILE_ACCESS_ERROR_CODES.has(data.code)) {
+    return { status: 'access_denied', message: describeProfileAccessError(data.code) };
+  }
+  // Covers a real 500, a malformed/unparseable body, and any future/
+  // unrecognized code alike — never guessed at, always this same honest
+  // generic message.
+  return { status: 'server_error', message: "Impossible de charger ton profil Agent IA. Réessaie." };
 }
 
 /**

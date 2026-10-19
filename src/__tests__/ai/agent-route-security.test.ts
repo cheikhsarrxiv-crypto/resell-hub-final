@@ -66,8 +66,17 @@ describe('/api/ai/agent route — auth, workspace isolation, and Business gating
     expect(agentCallIndex).toBeGreaterThan(rateLimitIndex);
   });
 
-  it('passes session.user.id (not a client-supplied value) as the agent conversation owner', () => {
-    expect(routeSource).toContain('AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId)');
+  it('passes session.user.id (not a client-supplied value) as the agent conversation owner, and threads validated attachments through as the 5th argument', () => {
+    expect(routeSource).toContain(
+      'AiAgentService.sendMessage(workspaceId, session.user.id, message, conversationId, attachments)'
+    );
+  });
+
+  it('destructures attachments from the schema-validated result, never from the raw request body', () => {
+    const destructureIndex = routeSource.indexOf('const { message, conversationId, attachments } = result.data;');
+    const validateIndex = routeSource.indexOf('aiAgentMessageSchema.safeParse(body)');
+    expect(destructureIndex).toBeGreaterThan(-1);
+    expect(destructureIndex).toBeGreaterThan(validateIndex);
   });
 
   it('never logs the raw error object at this layer', () => {

@@ -6,7 +6,7 @@
  * PRODUCTION: Will use Redis for distributed rate limiting
  */
 
-import { Marketplace, RateLimitConfig, RateLimitState } from "@/types/marketplace"
+import { ErrorType, Marketplace, NormalizedError, RateLimitConfig, RateLimitState } from "@/types/marketplace"
 
 interface TokenBucket {
   tokens: number
@@ -88,13 +88,13 @@ export class RateLimitManager {
     const resetAt = new Date(bucket.lastRefillAt + refillInterval)
     const waitSeconds = Math.ceil((resetAt.getTime() - now) / 1000)
 
-    throw {
-      type: "RATE_LIMIT_EXCEEDED",
+    throw new NormalizedError({
+      type: ErrorType.RATE_LIMIT_EXCEEDED,
       message: `Rate limit exceeded for ${marketplace}. Retry in ${waitSeconds}s.`,
       statusCode: 429,
       retryable: true,
       retryAfter: waitSeconds,
-    }
+    })
   }
 
   /**
