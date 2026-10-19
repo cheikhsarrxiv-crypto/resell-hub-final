@@ -43,13 +43,21 @@ import { GET as syncListingsGET } from '@/app/api/cron/sync-listings/route'
 import { OrdersSyncService } from '@/services/marketplace/OrdersSyncService'
 import { ListingsSyncService } from '@/services/marketplace/ListingsSyncService'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
+import { RateLimitManager } from '@/services/marketplace/RateLimitManager'
+import { ErrorNormalizer } from '@/services/marketplace/ErrorNormalizer'
 import { EbayAdapter } from '@/services/marketplace/adapters/EbayAdapter'
-import { Marketplace } from '@/types/marketplace'
+import { EtsyAdapter } from '@/services/marketplace/adapters/EtsyAdapter'
+import { Marketplace, NormalizedError, ErrorType } from '@/types/marketplace'
 import { verifyCronSecret } from '@/lib/cronAuth'
 
 process.env.EBAY_CLIENT_ID = process.env.EBAY_CLIENT_ID || 'test-client-id'
 process.env.EBAY_CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || 'test-client-secret'
 process.env.EBAY_REDIRECT_URI = process.env.EBAY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/ebay'
+// Needed for the new Etsy diagnostic-fix test below (AdapterFactory.createAdapter
+// constructs a real EtsyAdapter, which validates these are non-empty).
+process.env.ETSY_CLIENT_ID = process.env.ETSY_CLIENT_ID || 'test-etsy-client-id'
+process.env.ETSY_CLIENT_SECRET = process.env.ETSY_CLIENT_SECRET || 'test-etsy-client-secret'
+process.env.ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/etsy'
 // MarketplaceConnectionService's constructor builds a real TokenManager,
 // which requires this even though getAccessToken() itself is mocked below.
 process.env.TOKEN_ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY || crypto.randomBytes(32).toString('base64')
@@ -533,5 +541,161 @@ describe('ListingsSyncService - pagination', () => {
 
     expect(result).toEqual({ processed: 0, failed: 0 })
     expect(prisma.syncLog.create).toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// ADKSY — Correctif de diagnostic sync-listings/sync-orders
+//
+// Incident de référence : "[Cron sync-listings] Failed for workspace
+// cmtso811u0004kczvexv0en4g: Unknown error" (19 octobre). L'audit en
+// lecture seule avait montré que ErrorNormalizer.normalize() et
+// RateLimitManager.checkLimit() lançaient des objets littéraux au lieu
+// d'instances Error, ce qui faisait échouer silencieusement le test
+// `error instanceof Error` dans ListingsSyncService/OrdersSyncService et
+// les deux routes cron — remplaçant le vrai message par "Unknown error"
+// à la fois dans SyncLog.error et dans le console.error de la route.
+//
+// Ces tests exercent le chemin réel de bout en bout (adapter -> service
+// -> SyncLog -> route cron) pour chacune des causes identifiées par
+// l'audit, et vérifient qu'aucun secret ne fuite dans les logs.
+// ============================================================================
+
+describe('ADKSY — sync-listings/sync-orders diagnostic fix: real messages survive, not "Unknown error"', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    process.env.CRON_SECRET = CRON_SECRET
+    ;(prisma.syncLog.findFirst as any).mockResolvedValue(null)
+    ;(prisma.syncLog.create as any).mockResolvedValue({ id: 'synclog-diag-1' })
+    ;(prisma.syncLog.update as any).mockResolvedValue({})
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
+      { workspaceId: 'ws-diag', marketplaceId: Marketplace.EBAY },
+    ])
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('eBay normalized error (e.g. a real 401 from getListings): the real message reaches SyncLog.error and the cron console.error, never "Unknown error"', async () => {
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
+    vi.spyOn(EbayAdapter.prototype, 'getListings').mockRejectedValue(
+      ErrorNormalizer.normalize({ status: 401 }, 'ebay')
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(body).toEqual({ workspacesTotal: 1, succeeded: 0, failed: 1, skipped: 0 })
+    expect(prisma.syncLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed', error: 'eBay token expired. Please reconnect.' }) })
+    )
+    const loggedArgs = errorSpy.mock.calls.flat()
+    expect(loggedArgs).toContain('eBay token expired. Please reconnect.')
+    expect(loggedArgs).not.toContain('Unknown error')
+  })
+
+  it('Etsy normalized error (e.g. a real 403 from getListings): the real message reaches SyncLog.error and the cron console.error, never "Unknown error"', async () => {
+    ;(prisma.marketplaceConnection.findMany as any).mockResolvedValue([
+      { workspaceId: 'ws-diag-etsy', marketplaceId: Marketplace.ETSY },
+    ])
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
+    vi.spyOn(EtsyAdapter.prototype, 'getListings').mockRejectedValue(
+      ErrorNormalizer.normalize({ status: 403 }, 'etsy')
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(body).toEqual({ workspacesTotal: 1, succeeded: 0, failed: 1, skipped: 0 })
+    expect(prisma.syncLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed', error: 'Etsy permission denied.' }) })
+    )
+    const loggedArgs = errorSpy.mock.calls.flat()
+    expect(loggedArgs).toContain('Etsy permission denied.')
+    expect(loggedArgs).not.toContain('Unknown error')
+  })
+
+  it('rate limit exceeded (RateLimitManager.checkLimit, reached before any adapter call): the real message reaches SyncLog.error and the cron console.error, never "Unknown error"', async () => {
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
+    vi.spyOn(RateLimitManager.prototype, 'checkLimit').mockRejectedValue(
+      new NormalizedError({
+        type: ErrorType.RATE_LIMIT_EXCEEDED,
+        message: 'Rate limit exceeded for ebay. Retry in 30s.',
+        statusCode: 429,
+        retryable: true,
+        retryAfter: 30,
+      })
+    )
+    const getListingsSpy = vi.spyOn(EbayAdapter.prototype, 'getListings')
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(getListingsSpy).not.toHaveBeenCalled() // the rate limit guard fires before the page fetch
+    expect(body).toEqual({ workspacesTotal: 1, succeeded: 0, failed: 1, skipped: 0 })
+    expect(prisma.syncLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed', error: 'Rate limit exceeded for ebay. Retry in 30s.' }) })
+    )
+    const loggedArgs = errorSpy.mock.calls.flat()
+    expect(loggedArgs).toContain('Rate limit exceeded for ebay. Retry in 30s.')
+    expect(loggedArgs).not.toContain('Unknown error')
+  })
+
+  it('token refresh failure (getAccessToken rejecting with a normalized adapter error): the real message reaches SyncLog.error and the cron console.error, never "Unknown error"', async () => {
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockRejectedValue(
+      ErrorNormalizer.normalize({ status: 400, error_description: 'The refresh token is invalid or has been revoked.' }, 'ebay')
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await syncOrdersGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(body).toEqual({ workspacesTotal: 1, succeeded: 0, failed: 1, skipped: 0 })
+    expect(prisma.syncLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed' }) })
+    )
+    const syncLogErrorValue = (prisma.syncLog.update as any).mock.calls.at(-1)?.[0]?.data?.error
+    expect(syncLogErrorValue).not.toBe('Unknown error')
+    expect(typeof syncLogErrorValue).toBe('string')
+    expect(syncLogErrorValue.length).toBeGreaterThan(0)
+    const loggedArgs = errorSpy.mock.calls.flat()
+    expect(loggedArgs).not.toContain('Unknown error')
+  })
+
+  it('a genuinely unexpected thrown value (not an Error, not a NormalizedError) still falls back to "Unknown error" — the fix never fabricates a message for a real unknown case', async () => {
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
+    // eslint-disable-next-line @typescript-eslint/no-throw-literal
+    vi.spyOn(EbayAdapter.prototype, 'getListings').mockRejectedValue('a bare string, not an Error')
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const res = await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+    const body = await res.json()
+
+    expect(body).toEqual({ workspacesTotal: 1, succeeded: 0, failed: 1, skipped: 0 })
+    expect(prisma.syncLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'failed', error: 'Unknown error' }) })
+    )
+    const loggedArgs = errorSpy.mock.calls.flat()
+    expect(loggedArgs).toContain('Unknown error')
+  })
+
+  it('never logs the raw originalError / a secret-looking token, in SyncLog.error or in the cron console.error, across any of the above failures', async () => {
+    const secretLookingToken = 'oauth-access-token-should-never-leak-xyz123'
+    vi.spyOn(MarketplaceConnectionService.prototype, 'getAccessToken').mockResolvedValue('fake-access-token')
+    vi.spyOn(EbayAdapter.prototype, 'getListings').mockRejectedValue(
+      ErrorNormalizer.normalize({ status: 401, headers: { authorization: `Bearer ${secretLookingToken}` } }, 'ebay')
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await syncListingsGET(makeRequest({ authorization: `Bearer ${CRON_SECRET}` }))
+
+    const syncLogErrorValue = (prisma.syncLog.update as any).mock.calls.at(-1)?.[0]?.data?.error
+    expect(syncLogErrorValue).not.toContain(secretLookingToken)
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(secretLookingToken)
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(CRON_SECRET)
   })
 })
