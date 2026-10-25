@@ -17,10 +17,16 @@
  * the seller OAuth token used elsewhere in this app. This provider never
  * touches MarketplaceConnection, TokenManager, or any workspace's stored
  * eBay credentials.
+ *
+ * Environment: the search host follows getEbayEnvironment() — Sandbox
+ * (api.sandbox.ebay.com) unless EBAY_SANDBOX_MODE === 'false'. The
+ * environment is resolved once per search and passed to both the token
+ * request and the search request, so they can never diverge.
  */
 
 import { createLogger } from '@/lib/logger';
 import { EbayApplicationTokenManager, EbayApplicationTokenAuthError, EbayApplicationTokenTimeoutError } from './EbayApplicationTokenManager';
+import { EbayEnvironment, getEbayApiHost, getEbayEnvironment } from './ebayEnvironment';
 import {
   NormalizedSearchQuery,
   NormalizedSourcingResult,
@@ -32,7 +38,7 @@ import {
 
 const logger = createLogger('sourcing-ebay-browse');
 
-const SEARCH_ENDPOINT = 'https://api.ebay.com/buy/browse/v1/item_summary/search';
+const SEARCH_PATH = '/buy/browse/v1/item_summary/search';
 const REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -344,10 +350,11 @@ export class EbayBrowseSourcingProvider implements SourcingProvider {
 
   private async searchOneMarketplace(
     query: NormalizedSearchQuery,
-    marketplace: string
+    marketplace: string,
+    environment: EbayEnvironment
   ): Promise<{ results: NormalizedSourcingResult[]; error?: SourcingProviderErrorInfo }> {
     try {
-      const accessToken = await EbayApplicationTokenManager.getAccessToken();
+      const accessToken = await EbayApplicationTokenManager.getAccessToken(environment);
 
       // Phase 3: model/size/color are free text, folded into the keyword
       // search exactly like brand — eBay's Browse API has no confirmed,
@@ -375,7 +382,7 @@ export class EbayBrowseSourcingProvider implements SourcingProvider {
         params.set('filter', filter);
       }
 
-      const response = await fetch(`${SEARCH_ENDPOINT}?${params.toString()}`, {
+      const response = await fetch(`${getEbayApiHost(environment)}${SEARCH_PATH}?${params.toString()}`, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'X-EBAY-C-MARKETPLACE-ID': marketplace,
@@ -439,8 +446,9 @@ export class EbayBrowseSourcingProvider implements SourcingProvider {
       };
     }
 
+    const environment = getEbayEnvironment();
     const perMarketplace = await Promise.all(
-      requestedMarketplaces.map((marketplace) => this.searchOneMarketplace(query, marketplace))
+      requestedMarketplaces.map((marketplace) => this.searchOneMarketplace(query, marketplace, environment))
     );
 
     const results = perMarketplace.flatMap((r) => r.results);

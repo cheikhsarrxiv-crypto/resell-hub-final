@@ -24,9 +24,18 @@
  * only; see the correction prepared for EbayAdapter.ts in the OAuth
  * audit — unrelated to this file, since this manager never uses that
  * grant type at all).
+ *
+ * Environment: the token host follows getEbayEnvironment() (Sandbox unless
+ * EBAY_SANDBOX_MODE === 'false'), so Sandbox mints against
+ * api.sandbox.ebay.com and Production against api.ebay.com. The SCOPE
+ * URI is identical in both environments — eBay uses the same
+ * `https://api.ebay.com/oauth/...` scope identifiers for Sandbox; it is an
+ * identifier, not a host that gets called.
  */
 
-const TOKEN_ENDPOINT = 'https://api.ebay.com/identity/v1/oauth2/token';
+import { EbayEnvironment, getEbayApiHost, getEbayEnvironment } from './ebayEnvironment';
+
+const TOKEN_PATH = '/identity/v1/oauth2/token';
 const SCOPE = 'https://api.ebay.com/oauth/api_scope';
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -49,17 +58,25 @@ export class EbayApplicationTokenManager {
   // this is a known, accepted limitation (the same one already
   // documented for the in-memory rate limiter in src/lib/ratelimit.ts),
   // not something this class works around.
-  private static cached: CachedToken | null = null;
+  //
+  // Keyed by environment: a token minted by Sandbox is never returned for
+  // a Production request, and vice versa.
+  private static cached: Partial<Record<EbayEnvironment, CachedToken>> = {};
 
   static clearCache(): void {
-    this.cached = null;
+    this.cached = {};
   }
 
   static isConfigured(): boolean {
     return Boolean(process.env.EBAY_BUY_API_CLIENT_ID && process.env.EBAY_BUY_API_CLIENT_SECRET);
   }
 
-  static async getAccessToken(): Promise<string> {
+  /**
+   * Callers that also make the follow-up API request should resolve the
+   * environment once and pass it here, so the token and the request it
+   * authorizes always target the same eBay environment.
+   */
+  static async getAccessToken(environment: EbayEnvironment = getEbayEnvironment()): Promise<string> {
     const clientId = process.env.EBAY_BUY_API_CLIENT_ID;
     const clientSecret = process.env.EBAY_BUY_API_CLIENT_SECRET;
 
@@ -69,15 +86,16 @@ export class EbayApplicationTokenManager {
       );
     }
 
-    if (this.cached && this.cached.expiresAt > Date.now()) {
-      return this.cached.accessToken;
+    const cached = this.cached[environment];
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.accessToken;
     }
 
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
     let response: Response;
     try {
-      response = await fetch(TOKEN_ENDPOINT, {
+      response = await fetch(`${getEbayApiHost(environment)}${TOKEN_PATH}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -106,12 +124,13 @@ export class EbayApplicationTokenManager {
     const data = await response.json();
     const expiresInSeconds: number = data.expires_in ?? 0;
 
-    this.cached = {
+    const token: CachedToken = {
       accessToken: data.access_token,
       expiresAt: Date.now() + Math.max(0, expiresInSeconds - EXPIRY_SAFETY_MARGIN_SECONDS) * 1000,
     };
+    this.cached[environment] = token;
 
-    return this.cached.accessToken;
+    return token.accessToken;
   }
 }
 

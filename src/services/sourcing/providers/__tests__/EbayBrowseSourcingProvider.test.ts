@@ -4,7 +4,7 @@
  * both mocked. Proves the provider only ever returns what a mocked
  * response actually contained — no fabricated result, no invented field.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/services/sourcing/providers/EbayApplicationTokenManager', () => ({
   EbayApplicationTokenManager: {
@@ -648,5 +648,81 @@ describe('EbayBrowseSourcingProvider — shipping cost extraction (Étape 4)', (
 
     expect(result.shippingCost).toBe(15);
     expect(result.shippingCostCurrency).toBe('EUR');
+  });
+});
+
+describe('EbayBrowseSourcingProvider — Sandbox/Production host selection', () => {
+  const SANDBOX_SEARCH_URL = 'https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search?';
+  const PRODUCTION_SEARCH_URL = 'https://api.ebay.com/buy/browse/v1/item_summary/search?';
+  // vitest.config.ts loads local .env files into process.env, so the
+  // developer's own EBAY_SANDBOX_MODE must never leak into these tests.
+  const originalSandboxMode = process.env.EBAY_SANDBOX_MODE;
+  let provider: EbayBrowseSourcingProvider;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.EBAY_SANDBOX_MODE;
+    provider = new EbayBrowseSourcingProvider();
+    (EbayApplicationTokenManager.getAccessToken as any).mockResolvedValue('app-token-abc');
+  });
+
+  afterEach(() => {
+    if (originalSandboxMode === undefined) {
+      delete process.env.EBAY_SANDBOX_MODE;
+    } else {
+      process.env.EBAY_SANDBOX_MODE = originalSandboxMode;
+    }
+  });
+
+  it('defaults to the Sandbox search host and requests a Sandbox token when EBAY_SANDBOX_MODE is absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provider.searchProducts({ query: 'x' });
+
+    expect(fetchMock.mock.calls[0][0].startsWith(SANDBOX_SEARCH_URL)).toBe(true);
+    expect(EbayApplicationTokenManager.getAccessToken).toHaveBeenCalledWith('sandbox');
+  });
+
+  it.each(['', 'true', 'FALSE', 'False', '0', 'no', ' false', 'false '])(
+    'never calls the Production host when EBAY_SANDBOX_MODE=%j',
+    async (value) => {
+      process.env.EBAY_SANDBOX_MODE = value;
+      const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await provider.searchProducts({ query: 'x' });
+
+      expect(fetchMock.mock.calls[0][0].startsWith(SANDBOX_SEARCH_URL)).toBe(true);
+      expect(EbayApplicationTokenManager.getAccessToken).toHaveBeenCalledWith('sandbox');
+      expect(EbayApplicationTokenManager.getAccessToken).not.toHaveBeenCalledWith('production');
+    }
+  );
+
+  it('uses the Production search host and a Production token only when EBAY_SANDBOX_MODE is exactly "false"', async () => {
+    process.env.EBAY_SANDBOX_MODE = 'false';
+    const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provider.searchProducts({ query: 'x' });
+
+    expect(fetchMock.mock.calls[0][0].startsWith(PRODUCTION_SEARCH_URL)).toBe(true);
+    expect(EbayApplicationTokenManager.getAccessToken).toHaveBeenCalledWith('production');
+  });
+
+  it('worldwide search: every marketplace request and every token request target the same (Sandbox) environment', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(searchResponse([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await provider.searchProducts({ query: 'x', worldwide: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    for (const [url] of fetchMock.mock.calls) {
+      expect(url.startsWith(SANDBOX_SEARCH_URL)).toBe(true);
+    }
+    expect(EbayApplicationTokenManager.getAccessToken).toHaveBeenCalledTimes(6);
+    for (const args of (EbayApplicationTokenManager.getAccessToken as any).mock.calls) {
+      expect(args).toEqual(['sandbox']);
+    }
   });
 });
