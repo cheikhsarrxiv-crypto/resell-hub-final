@@ -219,7 +219,7 @@ export function MarketplaceConnectionsCard({
                 </span>
                 {lastSync ? (
                   <span className="text-xs text-gray-500 mt-1">
-                    Last sync: {format(new Date(lastSync.createdAt), 'MMM dd, HH:mm')}
+                    Last sync: {format(new Date(lastSync.startedAt), 'MMM dd, HH:mm')}
                   </span>
                 ) : ebayConnection?.createdAt ? (
                   <span className="text-xs text-gray-500 mt-1">
@@ -315,7 +315,7 @@ export function MarketplaceConnectionsCard({
                 </span>
                 {etsyLastSync ? (
                   <span className="text-xs text-gray-500 mt-1">
-                    Last sync: {format(new Date(etsyLastSync.createdAt), 'MMM dd, HH:mm')}
+                    Last sync: {format(new Date(etsyLastSync.startedAt), 'MMM dd, HH:mm')}
                   </span>
                 ) : etsyConnection?.createdAt ? (
                   <span className="text-xs text-gray-500 mt-1">

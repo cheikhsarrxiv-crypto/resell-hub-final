@@ -7,6 +7,7 @@ import { auth } from '@/auth'
 import { redirect } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
 import { MarketplaceConnectionsCard } from '@/components/marketplace/MarketplaceConnectionsCard'
+import { marketplaceConnectionPublicSelect } from '@/lib/marketplaceConnectionPublicSelect'
 
 export default async function IntegrationsPage() {
   const session = await auth()
@@ -17,14 +18,18 @@ export default async function IntegrationsPage() {
 
   const workspaceId = session.user.workspaceId || 'default'
 
-  // Get marketplace connections
+  // Get marketplace connections. These rows are passed as props to a
+  // client component, so Next.js serializes them into the page payload:
+  // only the public allowlist may be selected — never apiKey, apiSecret or
+  // the encrypted OAuth tokens.
   const connections = await prisma.marketplaceConnection.findMany({
     where: { workspaceId },
-    include: {
-      marketplace: true,
+    select: {
+      ...marketplaceConnectionPublicSelect,
       syncLogs: {
         orderBy: { startedAt: 'desc' },
         take: 1,
+        select: { startedAt: true },
       },
     },
   })

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import { prisma } from '@/lib/prisma';
+import { marketplaceConnectionPublicSelect } from '@/lib/marketplaceConnectionPublicSelect';
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -17,9 +18,11 @@ export async function GET(request: NextRequest) {
   try {
     const workspaceId = await getVerifiedWorkspaceId(request);
 
+    // Explicit allowlist: never return whole rows (they carry apiKey,
+    // apiSecret and the encrypted OAuth tokens) to the browser.
     const connections = await prisma.marketplaceConnection.findMany({
       where: { workspaceId },
-      include: { marketplace: true },
+      select: marketplaceConnectionPublicSelect,
     });
 
     return NextResponse.json({
