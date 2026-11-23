@@ -80,41 +80,46 @@ describe('callback/route.ts — OAuth state is bound to a cookie and verified be
     expect(callbackSource).toContain("req.cookies.get(stateCookieName)?.value");
   });
 
-  it('rejects when the cookie is missing (expectedState falsy), not just on state.length', () => {
-    const stateCheckStart = callbackSource.indexOf('const expectedState = req.cookies.get(stateCookieName)');
-    expect(stateCheckStart).toBeGreaterThan(-1);
-    const stateCheckBlock = callbackSource.slice(stateCheckStart, callbackSource.indexOf('consumedState = true'));
-    expect(stateCheckBlock).toContain('!expectedState');
-    expect(stateCheckBlock).toContain('state.length !== 64');
+  it('rejects when the cookie is missing: the verdict is computed from the cookie value and a rejection returns 400', () => {
+    const start = callbackSource.indexOf('const expectedState = req.cookies.get(stateCookieName)');
+    expect(start).toBeGreaterThan(-1);
+    const block = callbackSource.slice(start, callbackSource.indexOf('consumedState = true'));
+    expect(block).toContain('verifyBoundState(expectedState, state');
+    expect(block).toContain('state.length === 64');
+    expect(block).toContain('if (!verdict.ok)');
+    expect(block).toContain("{ error: 'Invalid OAuth state' }, { status: 400 }");
   });
 
-  it('uses TokenManager.verifyOAuthState() for the actual comparison, not a length check alone', () => {
-    expect(callbackSource).toContain('new TokenManager().verifyOAuthState(state, expectedState)');
+  it('B.11.1: binds the verdict to the CURRENT verified workspace and user (never a query value)', () => {
+    const start = callbackSource.indexOf('verifyBoundState(expectedState, state');
+    const block = callbackSource.slice(start, callbackSource.indexOf('if (!verdict.ok)'));
+    expect(block).toContain('workspaceId,');
+    expect(block).toContain('userId: session.user.id');
+    expect(block).not.toContain('searchParams');
+    expect(block).not.toContain('req.url');
   });
 
   it('validates state BEFORE calling handleOAuthCallback()', () => {
-    const verifyIndex = callbackSource.indexOf('new TokenManager().verifyOAuthState(');
+    const verifyIndex = callbackSource.indexOf('verifyBoundState(expectedState');
     const handleCallbackIndex = callbackSource.indexOf('service.handleOAuthCallback(');
     expect(verifyIndex).toBeGreaterThan(-1);
     expect(handleCallbackIndex).toBeGreaterThan(-1);
     expect(verifyIndex).toBeLessThan(handleCallbackIndex);
   });
 
-  it('deletes the state cookie after successful validation, on both the success and a later error path (one-time-use)', () => {
+  it('deletes the state cookie once consumed (success, limit-reached, later error) and on a rejected flow whose cookie was ours', () => {
     const consumedIndex = callbackSource.indexOf('consumedState = true');
     expect(consumedIndex).toBeGreaterThan(-1);
 
-    // Every response.cookies.delete(stateCookieName) call must appear
-    // after the point where the state was confirmed genuine.
-    const deleteCalls = [...callbackSource.matchAll(/cookies\.delete\(stateCookieName\)/g)];
+    // the only delete before consumption is the conditional one of a rejected-but-ours cookie
+    expect(callbackSource).toContain('if (verdict.consume) rejection.cookies.delete(stateCookieName)');
+
+    const deleteCalls = [...callbackSource.matchAll(/response\.cookies\.delete\(stateCookieName\)/g)];
     expect(deleteCalls.length).toBeGreaterThanOrEqual(2); // success path + limit-reached path
     for (const match of deleteCalls) {
       expect(match.index!).toBeGreaterThan(consumedIndex);
     }
 
-    // The catch block only deletes it when consumedState is true — never
-    // unconditionally, so an invalid/pre-validation failure can't be
-    // mistaken for a consumed one.
     const catchBlock = callbackSource.slice(callbackSource.lastIndexOf('} catch (error) {'));
     expect(catchBlock).toContain('if (consumedState) {');
   });

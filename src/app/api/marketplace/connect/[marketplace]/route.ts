@@ -8,6 +8,8 @@ import { MarketplaceConnectionService } from '@/services/marketplace/Marketplace
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyWorkspaceAccess, errorResponse } from '@/lib/security'
+import { getMarketplaceConnectionConfig, MarketplaceConfigError } from '@/lib/marketplaceOAuthConfig'
+import { createBoundStateCookieValue } from '@/lib/oauthStateBinding'
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -17,25 +19,6 @@ export const dynamic = 'force-dynamic';
 const SUPPORTED_MARKETPLACES: Record<string, Marketplace> = {
   EBAY: Marketplace.EBAY,
   ETSY: Marketplace.ETSY,
-}
-
-function getConnectionConfig(marketplace: Marketplace) {
-  if (marketplace === Marketplace.EBAY) {
-    return {
-      clientId: process.env.EBAY_CLIENT_ID || '',
-      clientSecret: process.env.EBAY_CLIENT_SECRET || '',
-      redirectUri: process.env.EBAY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/ebay',
-      sandboxMode: process.env.EBAY_SANDBOX_MODE !== 'false',
-    }
-  }
-  // Etsy has no sandbox environment — sandboxMode is accepted for config
-  // shape consistency but unused by EtsyAdapter (see adapter comments).
-  return {
-    clientId: process.env.ETSY_CLIENT_ID || '',
-    clientSecret: process.env.ETSY_CLIENT_SECRET || '',
-    redirectUri: process.env.ETSY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/etsy',
-    sandboxMode: false,
-  }
 }
 
 export async function GET(
@@ -74,7 +57,23 @@ export async function GET(
       )
     }
 
-    const service = new MarketplaceConnectionService(getConnectionConfig(marketplace))
+    // B.11.1: fail-closed configuration check (Sandbox/Production, credentials, callback) BEFORE any
+    // OAuth URL is built. Only a reason code is logged, never a value or a secret.
+    let connectionConfig
+    try {
+      connectionConfig = getMarketplaceConnectionConfig(marketplace === Marketplace.EBAY ? 'ebay' : 'etsy')
+    } catch (configError) {
+      if (configError instanceof MarketplaceConfigError) {
+        console.error(`[Marketplace Connect] refused: configuration (${configError.reason})`)
+        return NextResponse.json(
+          { error: 'Marketplace connection is not available: configuration refused', code: 'MARKETPLACE_CONFIG_INVALID' },
+          { status: 503 }
+        )
+      }
+      throw configError
+    }
+
+    const service = new MarketplaceConnectionService(connectionConfig)
 
     const { authUrl, state, codeVerifier } = await service.initiateConnection(workspaceId, marketplace)
 
@@ -91,7 +90,14 @@ export async function GET(
     // compares the state it receives from the marketplace against this
     // cookie (TokenManager.verifyOAuthState) before doing anything else,
     // and deletes it immediately after — one-time-use, 10-minute TTL.
-    response.cookies.set(`oauth_state_${marketplaceParam.toLowerCase()}`, state, {
+    // B.11.1: the cookie value is the state BOUND (HMAC) to the verified workspace and user that start
+    // the flow; the callback rejects any other workspace/user. Not the bare state anymore.
+    const boundState = createBoundStateCookieValue(state, {
+      marketplace: marketplaceParam.toLowerCase(),
+      workspaceId,
+      userId: session.user.id,
+    })
+    response.cookies.set(`oauth_state_${marketplaceParam.toLowerCase()}`, boundState, {
       httpOnly: true,
       secure: isProduction,
       sameSite: 'lax',

@@ -17,7 +17,9 @@
 import { auth } from '@/auth'
 import { MarketplaceConnectionService } from '@/services/marketplace/MarketplaceConnectionService'
 import { SubscriptionService } from '@/services/SubscriptionService'
-import { TokenManager } from '@/services/marketplace/TokenManager'
+import { verifyBoundState } from '@/lib/oauthStateBinding'
+import { consumeOAuthState } from '@/lib/oauthStateConsumption'
+import { getMarketplaceConnectionConfig, MarketplaceConfigError } from '@/lib/marketplaceOAuthConfig'
 import { Marketplace } from '@/types/marketplace'
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyWorkspaceAccess } from '@/lib/security'
@@ -30,23 +32,6 @@ export const dynamic = 'force-dynamic';
 const SUPPORTED_MARKETPLACES: Record<string, Marketplace> = {
   EBAY: Marketplace.EBAY,
   ETSY: Marketplace.ETSY,
-}
-
-function getConnectionConfig(marketplace: Marketplace) {
-  if (marketplace === Marketplace.EBAY) {
-    return {
-      clientId: process.env.EBAY_CLIENT_ID || '',
-      clientSecret: process.env.EBAY_CLIENT_SECRET || '',
-      redirectUri: process.env.EBAY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/ebay',
-      sandboxMode: process.env.EBAY_SANDBOX_MODE !== 'false',
-    }
-  }
-  return {
-    clientId: process.env.ETSY_CLIENT_ID || '',
-    clientSecret: process.env.ETSY_CLIENT_SECRET || '',
-    redirectUri: process.env.ETSY_REDIRECT_URI || 'http://localhost:3000/api/marketplace/callback/etsy',
-    sandboxMode: false,
-  }
 }
 
 export async function GET(
@@ -125,18 +110,41 @@ export async function GET(
     // request wasn't triggered by a flow this browser actually started.
     const expectedState = req.cookies.get(stateCookieName)?.value
 
-    if (
-      state.length !== 64 ||
-      !expectedState ||
-      !new TokenManager().verifyOAuthState(state, expectedState)
-    ) {
-      return NextResponse.json(
-        { error: 'Invalid OAuth state' },
-        { status: 400 }
-      )
+    // B.11.1: the cookie is the state BOUND to the workspace + user that started the flow. The CURRENT
+    // verified session (workspaceId above, session.user.id) must be that workspace + user: a session or
+    // workspace change between connect and callback is rejected, never re-attributed. A rejected flow whose
+    // cookie was ours (expired / other workspace) is consumed so it can never be replayed.
+    const verdict =
+      state.length === 64
+        ? verifyBoundState(expectedState, state, {
+            marketplace: marketplaceParam.toLowerCase(),
+            workspaceId,
+            userId: session.user.id,
+          })
+        : ({ ok: false, reason: 'malformed_state', consume: false } as const)
+
+    if (!verdict.ok) {
+      const rejection = NextResponse.json({ error: 'Invalid OAuth state' }, { status: 400 })
+      if (verdict.consume) rejection.cookies.delete(stateCookieName)
+      return rejection
     }
 
-    // State confirmed genuine — consume it now so it can never be
+    // B.11.1-R: SERVER-SIDE single use. Deleting the browser cookie is not a guarantee (a copy of the cookie
+    // stays valid), so the first request records the state in a durable ledger with an atomic unique insert
+    // BEFORE any code exchange; every other request with the same state (replay, parallel, other instance) gets
+    // 'replay'. If the ledger cannot be written, this throws and nothing is exchanged (fail closed).
+    const consumption = await consumeOAuthState({
+      workspaceId,
+      marketplace: marketplaceParam.toLowerCase(),
+      state,
+    })
+    if (consumption === 'replay') {
+      const replayed = NextResponse.json({ error: 'Invalid OAuth state' }, { status: 400 })
+      replayed.cookies.delete(stateCookieName)
+      return replayed
+    }
+
+    // State confirmed genuine, bound to this workspace and now consumed durably — it can never be
     // replayed, regardless of whether the token exchange below succeeds.
     consumedState = true
 
@@ -145,7 +153,9 @@ export async function GET(
     const pkceCookieName = `pkce_verifier_${marketplaceParam.toLowerCase()}`
     const codeVerifier = req.cookies.get(pkceCookieName)?.value
 
-    const service = new MarketplaceConnectionService(getConnectionConfig(marketplace))
+    const service = new MarketplaceConnectionService(
+      getMarketplaceConnectionConfig(marketplace === Marketplace.EBAY ? 'ebay' : 'etsy')
+    )
 
     // Enforce the plan's marketplace-connection limit — but only for a
     // brand new connection. handleOAuthCallback() below upserts, so
@@ -184,9 +194,19 @@ export async function GET(
   } catch (error) {
     // Log only a generic message; never log the raw error object, which
     // could contain OAuth codes or partial token data from upstream.
+    // Only a reason code for a refused configuration (never a value or a secret).
+    if (error instanceof MarketplaceConfigError) {
+      console.error(`[Marketplace Callback] refused: configuration (${error.reason})`)
+    }
     console.error('[Marketplace Callback] OAuth callback failed for workspace-scoped connection attempt')
 
-    const errorMsg = error instanceof Error ? error.message : 'Connection failed'
+    // SECURITY (R3-C.9): the redirect URL ends up in browser history, proxies and logs, so an
+    // upstream error message (which can carry provider details or token fragments) is never put
+    // in it. Only a message this route itself understands is shown; everything else is generic.
+    const rawMessage = error instanceof Error ? error.message : ''
+    const errorMsg = /^Failed to validate [A-Za-z]+ connection$/.test(rawMessage)
+      ? rawMessage
+      : 'Connection failed. Please try again.'
     const response = NextResponse.redirect(
       new URL(
         `/dashboard/settings/integrations?status=error&error=${encodeURIComponent(errorMsg)}`,
