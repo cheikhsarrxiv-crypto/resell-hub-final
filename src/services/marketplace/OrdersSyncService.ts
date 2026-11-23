@@ -13,6 +13,8 @@ import { RateLimitManager } from './RateLimitManager'
 import { StatusMapper } from './StatusMapper'
 import { Marketplace } from '@/types/marketplace'
 import { ProductService } from '@/services/ProductService'
+import { normalizeCurrencyCode, roundMoney } from '@/lib/financial'
+import { BLOCKING_ORDER_ISSUES, type OrderFinancialIssue } from './orderFinancials'
 
 const PAGE_SIZE = 100
 // Safety cap: never page indefinitely (max 5000 orders processed per run).
@@ -89,6 +91,24 @@ export class OrdersSyncService {
 
         for (const order of orders) {
           try {
+            // S8: an order whose total, item prices or quantities are unusable (or whose items are in a
+            // different currency than the order) is NOT recorded: the adapter used to turn such data into
+            // a fake 0 and the sync stored it. It is counted as failed and logged (order id only, no
+            // buyer data) so it can be investigated; the next sync retries it.
+            const blockingIssues = (order.financialIssues ?? []).filter((issue) =>
+              BLOCKING_ORDER_ISSUES.includes(issue as OrderFinancialIssue)
+            )
+            if (blockingIssues.length > 0) {
+              console.error(
+                `[OrdersSyncService] Order ${order.externalOrderId} not recorded: invalid financial data (${blockingIssues.join(', ')})`
+              )
+              failed++
+              continue
+            }
+            // Currency as reported by the marketplace (normalized ISO code), or null: never defaulted.
+            const orderCurrency = normalizeCurrencyCode(order.currency)
+            const money = (amount: number) => (orderCurrency ? roundMoney(amount, orderCurrency) : amount)
+
             // Map status
             const mappedStatus = StatusMapper.mapToResellHub(marketplace, order.status)
 
@@ -123,12 +143,22 @@ export class OrdersSyncService {
               })
 
               if (existing) {
+                // S8: a recorded currency is never silently changed, and an amount is never overwritten by
+                // an amount in ANOTHER currency (that would mix currencies in one row). A NULL currency
+                // (row imported before S8) is completed the first time the marketplace reports one.
+                const currencyConflict = Boolean(existing.currency && orderCurrency && existing.currency !== orderCurrency)
+                if (currencyConflict) {
+                  console.error(
+                    `[OrdersSyncService] Order ${order.externalOrderId}: marketplace now reports another currency than the recorded one - amounts left unchanged`
+                  )
+                }
                 const updated = await tx.order.update({
                   where: { id: existing.id },
                   data: {
                     status: mappedStatus,
                     customerEmail: order.buyerEmail || '',
-                    totalPrice: order.totalPrice,
+                    ...(currencyConflict ? {} : { totalPrice: money(order.totalPrice) }),
+                    ...(!existing.currency && orderCurrency ? { currency: orderCurrency } : {}),
                     updatedAt: new Date(),
                   },
                 })
@@ -184,7 +214,11 @@ export class OrdersSyncService {
                   customerId: order.buyerId,
                   customerName: order.buyerName,
                   customerEmail: order.buyerEmail || '',
-                  totalPrice: order.totalPrice,
+                  totalPrice: money(order.totalPrice),
+                  currency: orderCurrency,
+                  // Not computed for a synced order: the purchase cost, marketplace fees, shipping and
+                  // refunds are not imported. 0 here means "unknown", never "no profit": analytics
+                  // classify every synced order as profit-unknown (src/lib/financial.ts isProfitKnown).
                   estimatedProfit: 0,
                   marketplace,
                   listingId: resolvedListingId,
@@ -251,7 +285,7 @@ export class OrdersSyncService {
                     productId: product.id,
                     title: item.title,
                     quantity: item.quantity,
-                    price: item.price,
+                    price: money(item.price),
                     // Historical cost snapshot — see OrderItem.purchasePrice
                     // in the schema. Never re-read from Product afterwards.
                     purchasePrice: product.purchasePrice,

@@ -303,6 +303,16 @@ export interface MarketplaceOrder {
   buyerEmail?: string;
   items: MarketplaceOrderItem[];
   totalPrice: number;
+  /**
+   * S8 - ISO 4217 code of `totalPrice` and of the item prices, as the marketplace reported it (normalized,
+   * upper-case). Undefined when the marketplace gave none or an invalid one: never defaulted.
+   */
+  currency?: string;
+  /**
+   * S8 - problems found while parsing the financial data (see orderFinancials.ts). The sync refuses to
+   * record an order whose total, item prices or quantities are unusable instead of storing a fake 0.
+   */
+  financialIssues?: string[];
   status: string; // Marketplace-specific
   shippingAddress?: Address;
   createdAt?: Date;

@@ -74,7 +74,9 @@ export interface ListingData {
 // Orders
 export interface OrderData {
   id: string;
-  externalOrderId?: string;
+  externalOrderId?: string | null;
+  /** ISO 4217 code of the amounts, as recorded (S8); null/undefined = not recorded. */
+  currency?: string | null;
   customerName: string;
   customerEmail: string;
   totalPrice: number;
@@ -142,6 +144,8 @@ export interface TrackingEventData {
 }
 
 // Analytics
+import type { CurrencyMetrics } from '@/lib/financial';
+
 export interface DashboardMetrics {
   revenue: number;
   orders: number;
@@ -157,6 +161,26 @@ export interface DashboardMetrics {
   fulfillmentCost: number;
   grossProfit: number;
   netRevenue: number;
+  /**
+   * S8 - every figure above is in `currency` (the currency of most orders), cancelled orders excluded.
+   * Orders in other currencies are NOT added to them: they are listed, separately, in `byCurrency`.
+   */
+  currency: string;
+  mixedCurrencies: boolean;
+  byCurrency: CurrencyMetrics[];
+  cancelledOrders: number;
+  /** Orders of `currency` whose profit is unknown (marketplace-synced: cost/fees/shipping/refunds not imported). */
+  ordersWithUnknownProfit: number;
+  /** false when `margin` has no basis (no order with a known profit): the UI must not show it as 0 %. */
+  marginAvailable: boolean;
+}
+
+/** Basic analytics: activity counters only, no amounts. Available on every plan. */
+export interface BasicDashboardMetrics {
+  orders: number;
+  productsCount: number;
+  activeListings: number;
+  pendingOrders: number;
 }
 
 export interface AdminMetrics {

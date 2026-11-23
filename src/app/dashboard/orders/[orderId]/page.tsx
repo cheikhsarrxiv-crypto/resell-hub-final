@@ -8,7 +8,8 @@ import { Button } from '@/components/UI/Button';
 import { Badge } from '@/components/UI/Button';
 import { ArrowLeft, Truck, Check } from 'lucide-react';
 import Link from 'next/link';
-import { formatCurrency, getStatusLabel, getStatusColor, formatDateTime } from '@/lib/utils';
+import { getStatusLabel, getStatusColor, formatDateTime } from '@/lib/utils';
+import { formatOrderAmount, formatOrderProfit, isProfitKnown } from '@/lib/financial';
 import { getWorkspaceReadiness } from '@/lib/dashboardListPageState';
 
 export default function OrderDetailPage() {
@@ -187,7 +188,7 @@ export default function OrderDetailPage() {
                       )}
                     </div>
                     <div className="text-right">
-                      <p className="font-medium">{formatCurrency(item.price)}</p>
+                      <p className="font-medium">{formatOrderAmount(order, item.price)}</p>
                       <p className="text-sm text-gray-600">x{item.quantity}</p>
                     </div>
                   </div>
@@ -199,16 +200,16 @@ export default function OrderDetailPage() {
             <div>
               <div className="flex justify-between mb-2">
                 <span className="text-gray-600">Subtotal</span>
-                <span className="font-medium">{formatCurrency(order.totalPrice)}</span>
+                <span className="font-medium">{formatOrderAmount(order, order.totalPrice)}</span>
               </div>
               <div className="flex justify-between mb-3 pb-3 border-b">
                 <span className="text-gray-600">Marketplace Fees</span>
-                <span className="font-medium">-{formatCurrency(order.marketplaceFees)}</span>
+                <span className="font-medium">{isProfitKnown(order) ? `-${formatOrderAmount(order, order.marketplaceFees)}` : '— (frais non importés)'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="font-semibold text-gray-900">Estimated Profit</span>
                 <span className="text-lg font-bold text-green-600">
-                  {formatCurrency(order.estimatedProfit)}
+                  {formatOrderProfit(order)}
                 </span>
               </div>
             </div>
@@ -292,11 +293,11 @@ export default function OrderDetailPage() {
                 <div className="pt-4 space-y-2 border-t">
                   <p className="text-xs text-gray-600">Fulfillment Cost</p>
                   <p className="font-semibold">
-                    {formatCurrency(order.fulfillmentOrder.totalCost)}
+                    {formatOrderAmount(order, order.fulfillmentOrder.totalCost)}
                   </p>
                   <p className="text-xs text-gray-600">Profit</p>
                   <p className="text-lg font-bold text-green-600">
-                    {formatCurrency(order.fulfillmentOrder.profit)}
+                    {isProfitKnown(order) ? formatOrderAmount(order, order.fulfillmentOrder.profit) : '—'}
                   </p>
                 </div>
 

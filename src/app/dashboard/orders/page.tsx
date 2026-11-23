@@ -9,7 +9,8 @@ import { PageHeader } from '@/components/dashboard/PageHeader';
 import { DashboardLoadingState, DashboardErrorState, DashboardEmptyState } from '@/components/dashboard/DashboardStates';
 import { getWorkspaceReadiness, parseApiListResponse, getListPageState } from '@/lib/dashboardListPageState';
 import { ShoppingCart, Eye } from 'lucide-react';
-import { formatCurrency, getStatusLabel, formatDateTime } from '@/lib/utils';
+import { getStatusLabel, formatDateTime } from '@/lib/utils';
+import { formatOrderAmount, formatOrderProfit } from '@/lib/financial';
 import Link from 'next/link';
 
 export default function OrdersPage() {
@@ -144,10 +145,10 @@ export default function OrdersPage() {
                         </div>
                       </td>
                       <td className="py-4 px-4 text-right font-semibold text-white">
-                        {formatCurrency(order.totalPrice)}
+                        {formatOrderAmount(order, order.totalPrice)}
                       </td>
                       <td className="py-4 px-4 text-right text-emerald-400 font-semibold">
-                        {formatCurrency(order.estimatedProfit)}
+                        {formatOrderProfit(order)}
                       </td>
                       <td className="py-4 px-4">
                         <StatusBadge status={order.status} />

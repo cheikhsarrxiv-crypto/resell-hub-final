@@ -24,6 +24,7 @@
  */
 
 import MarketplaceAdapter from '@/services/marketplace/MarketplaceAdapter'
+import { parseEtsyOrderFinancials } from '../orderFinancials'
 import {
   Address,
   Marketplace,
@@ -604,6 +605,8 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
   }
 
   private mapOrder(receipt: any): MarketplaceOrder {
+    // S8: strict amounts + the order's currency (see orderFinancials.ts)
+    const fin = parseEtsyOrderFinancials(receipt)
     return {
       id: receipt.receipt_id?.toString(),
       externalOrderId: receipt.receipt_id?.toString(),
@@ -618,20 +621,18 @@ export class EtsyAdapter extends MarketplaceAdapter implements OAuthConnectable 
       // a behavior change downstream, only a more honest "field not
       // provided" value here.
       buyerEmail: receipt.buyer_email || undefined,
-      totalPrice: receipt.grandtotal?.amount && receipt.grandtotal?.divisor
-        ? receipt.grandtotal.amount / receipt.grandtotal.divisor
-        : 0,
+      totalPrice: fin.totalPrice,
+      currency: fin.currency,
+      financialIssues: fin.issues,
       status: receipt.status || 'pending',
       createdAt: receipt.created_timestamp
         ? new Date(receipt.created_timestamp * 1000)
         : undefined,
-      items: (receipt.transactions || []).map((t: any) => ({
+      items: (receipt.transactions || []).map((t: any, index: number) => ({
         listingId: t.listing_id?.toString() || '',
         title: t.title || '',
         quantity: t.quantity || 1,
-        price: t.price?.amount && t.price?.divisor
-          ? t.price.amount / t.price.divisor
-          : 0,
+        price: fin.itemPrices[index] ?? 0,
         // Etsy's Transaction object (returned inline on every receipt, see
         // getOrders above) has its own top-level `sku` field, distinct from
         // `listing_id` — nullable when the listing has no SKU set. When

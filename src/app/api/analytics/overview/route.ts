@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AnalyticsService } from '@/services/AnalyticsService';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
+import { parseAnalyticsDays } from '@/lib/analyticsRange';
+import { ADVANCED_ANALYTICS_REQUIRED_CODE, ADVANCED_ANALYTICS_REQUIRED_MESSAGE } from '@/lib/analyticsAccess';
 import { SubscriptionService } from '@/services/SubscriptionService';
 
 // This route reads the authenticated session (via headers()/cookies()
@@ -19,24 +21,20 @@ export async function GET(request: NextRequest) {
     const hasAccess = await SubscriptionService.hasFeature(workspaceId, 'advancedAnalytics');
     if (!hasAccess) {
       return NextResponse.json(
-        { error: 'Advanced analytics is not included in your current plan. Upgrade to unlock it.' },
+        { error: ADVANCED_ANALYTICS_REQUIRED_MESSAGE, code: ADVANCED_ANALYTICS_REQUIRED_CODE },
         { status: 403 }
       );
     }
 
-    const days = parseInt(request.nextUrl.searchParams.get('days') || '30');
+    const days = parseAnalyticsDays(request.nextUrl.searchParams.get('days'));
 
-    const [revenueTrend, productsPerformance, marketplacePerformance] = await Promise.all([
-      AnalyticsService.getRevenueTrend(workspaceId, days),
-      AnalyticsService.getProductsPerformance(workspaceId),
-      AnalyticsService.getMarketplacePerformance(workspaceId, days),
-    ]);
+    // S8: one currency per response (`currency`); orders in other currencies are only counted in
+    // `otherCurrencies`, never added in.
+    const overview = await AnalyticsService.getOverview(workspaceId, days);
 
     return NextResponse.json({
       success: true,
-      revenueTrend,
-      productsPerformance,
-      marketplacePerformance,
+      ...overview,
     });
   } catch (error) {
     console.error('Analytics overview error:', error);

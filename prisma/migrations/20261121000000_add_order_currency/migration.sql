@@ -1,0 +1,13 @@
+-- S8: record the currency of an Order.
+--
+-- Additive and nullable: no default, no backfill, no NOT NULL. Existing rows keep NULL, which means
+-- "never recorded" (see the comment on Order.currency in schema.prisma): the application accounts an
+-- ADKSY-native order with NULL as EUR (app-wide convention) and a marketplace-synced order with NULL
+-- as UNKNOWN. Nothing is guessed or rewritten.
+--
+-- ROLL-OUT ORDER MATTERS: apply this migration (`prisma migrate deploy`) BEFORE deploying the application
+-- code that reads/writes Order.currency. Code deployed first would fail on every Order query because the
+-- column would not exist. Rolling back the code is safe at any time (the extra nullable column is ignored).
+--
+-- Not applied to any shared, staging or production database by the change that added this file.
+ALTER TABLE "Order" ADD COLUMN "currency" TEXT;

@@ -79,6 +79,36 @@ export function DashboardUpgradeState({
   );
 }
 
+interface DashboardLockedCardProps {
+  title: string;
+  description?: string;
+}
+
+/**
+ * One Advanced-only section, shown locked INSIDE a page that is otherwise usable (Basic analytics).
+ * No data is ever passed to it: the server did not send any. Unlike DashboardUpgradeState it does
+ * not replace the page.
+ */
+export function DashboardLockedCard({ title, description = 'Included in plans with Advanced analytics.' }: DashboardLockedCardProps) {
+  return (
+    <div
+      className="flex items-start gap-3 rounded-2xl border border-[#FF5A1F]/20 bg-[#FF5A1F]/[0.04] p-5"
+      data-testid="advanced-locked-card"
+    >
+      <Lock className="w-5 h-5 text-[#FF5A1F] mt-0.5 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <p className="text-white font-medium">{title}</p>
+        <p className="text-gray-400 text-sm mt-1">{description}</p>
+        <Link href="/dashboard/subscription" className="inline-block mt-3">
+          <DashboardButton variant="primary" size="sm">
+            View plans
+          </DashboardButton>
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 interface DashboardEmptyStateProps {
   title?: string;
   description?: string;

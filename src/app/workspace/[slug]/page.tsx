@@ -8,12 +8,20 @@ import { LoadingState, ErrorState, UpgradeState } from '@/components/StateCompon
 import { formatCurrency, formatNumber } from '@/lib/utils';
 import { TrendingUp, ShoppingCart, Package, Zap } from 'lucide-react';
 import { getWorkspaceId } from '@/lib/workspace-client';
-import { classifyMetricsResponse, type MetricsFetchOutcome } from '@/lib/dashboardMetricsState';
+import {
+  classifyMetricsResponse,
+  classifyBasicResponse,
+  composeAccessView,
+  metricsOutcomeToAdvanced,
+  type AccessView,
+  type BasicOutcome,
+} from '@/lib/dashboardMetricsState';
+import type { DashboardMetrics } from '@/types';
 
 export default function DashboardPage() {
   const params = useParams();
   const slug = params.slug as string;
-  const [state, setState] = useState<MetricsFetchOutcome | { kind: 'loading' }>({ kind: 'loading' });
+  const [state, setState] = useState<AccessView<DashboardMetrics> | { kind: 'loading' }>({ kind: 'loading' });
   const [workspaceId, setWorkspaceId] = useState<string>('');
 
   useEffect(() => {
@@ -39,11 +47,19 @@ export default function DashboardPage() {
   const fetchMetrics = async () => {
     setState({ kind: 'loading' });
     try {
-      const response = await fetch(
-        `/api/analytics/dashboard?workspaceId=${workspaceId}&days=30`
-      );
+      // Basic (every plan) and Advanced (plan feature) are separate requests: an Advanced refusal
+      // never takes the Basic figures down with it.
+      const [response, basicResponse] = await Promise.all([
+        fetch(`/api/analytics/dashboard?workspaceId=${workspaceId}&days=30`),
+        fetch(`/api/analytics/basic?workspaceId=${workspaceId}&days=30`).catch(() => null),
+      ]);
       const data = await response.json().catch(() => null);
-      setState(classifyMetricsResponse(response.status, data, 'Failed to load metrics.'));
+      const advanced = metricsOutcomeToAdvanced(classifyMetricsResponse(response.status, data, 'Failed to load metrics.'));
+      let basic: BasicOutcome = { kind: 'error', message: 'Failed to load metrics.' };
+      if (basicResponse) {
+        basic = classifyBasicResponse(basicResponse.status, await basicResponse.json().catch(() => null), 'Failed to load metrics.');
+      }
+      setState(composeAccessView(basic, advanced));
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
       setState({ kind: 'error', message: 'A network error occurred while loading your dashboard.' });
@@ -52,10 +68,6 @@ export default function DashboardPage() {
 
   if (state.kind === 'loading') {
     return <LoadingState message="Loading dashboard..." />;
-  }
-
-  if (state.kind === 'plan_upgrade_required') {
-    return <UpgradeState message={state.message} />;
   }
 
   if (state.kind === 'unauthorized') {
@@ -76,7 +88,26 @@ export default function DashboardPage() {
     return <ErrorState message="Failed to load metrics" details={state.message} onRetry={fetchMetrics} />;
   }
 
-  const metrics = state.metrics;
+  if (state.access === 'basic') {
+    const basic = state.basic;
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-gray-600 mt-1">Welcome back! Here's your business overview.</p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <StatCard label="Orders (30 days)" value={formatNumber(basic.orders)} icon={<ShoppingCart className="w-8 h-8" />} />
+          <StatCard label="Products" value={formatNumber(basic.productsCount)} icon={<Package className="w-8 h-8" />} />
+          <StatCard label="Active listings" value={formatNumber(basic.activeListings)} icon={<Zap className="w-8 h-8" />} />
+          <StatCard label="Pending orders" value={formatNumber(basic.pendingOrders)} icon={<ShoppingCart className="w-8 h-8" />} />
+        </div>
+        <UpgradeState message={state.lockedMessage} />
+      </div>
+    );
+  }
+
+  const metrics = state.advanced;
 
   return (
     <div className="space-y-8">
@@ -90,7 +121,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard
           label="Revenue"
-          value={formatCurrency(metrics.revenue)}
+          value={formatCurrency(metrics.revenue, metrics.currency)}
           icon={<TrendingUp className="w-8 h-8" />}
         />
         <StatCard
@@ -100,12 +131,12 @@ export default function DashboardPage() {
         />
         <StatCard
           label="Profit"
-          value={formatCurrency(metrics.profit)}
+          value={metrics.marginAvailable ? formatCurrency(metrics.profit, metrics.currency) : '—'}
           icon={<TrendingUp className="w-8 h-8" />}
         />
         <StatCard
           label="Margin"
-          value={`${metrics.margin.toFixed(1)}%`}
+          value={metrics.marginAvailable ? `${metrics.margin.toFixed(1)}%` : '—'}
           icon={<Package className="w-8 h-8" />}
         />
       </div>
@@ -157,13 +188,13 @@ export default function DashboardPage() {
               <div className="flex justify-between items-center pb-2 border-b">
                 <span className="text-gray-600">Fulfillment Revenue</span>
                 <span className="text-2xl font-bold text-gray-900">
-                  {formatCurrency(metrics.fulfillmentRevenue)}
+                  {formatCurrency(metrics.fulfillmentRevenue, metrics.currency)}
                 </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-gray-600">Fulfillment Costs</span>
                 <span className="text-lg font-semibold text-gray-900">
-                  {formatCurrency(metrics.fulfillmentCost)}
+                  {formatCurrency(metrics.fulfillmentCost, metrics.currency)}
                 </span>
               </div>
             </div>
@@ -208,25 +239,25 @@ export default function DashboardPage() {
             <div>
               <p className="text-sm text-gray-600">Subscription Revenue</p>
               <p className="text-xl font-bold text-gray-900 mt-1">
-                {formatCurrency(metrics.revenue)}
+                {formatCurrency(metrics.revenue, metrics.currency)}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Fulfillment Revenue</p>
               <p className="text-xl font-bold text-gray-900 mt-1">
-                {formatCurrency(metrics.fulfillmentRevenue)}
+                {formatCurrency(metrics.fulfillmentRevenue, metrics.currency)}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Gross Profit</p>
               <p className="text-xl font-bold text-green-600 mt-1">
-                {formatCurrency(metrics.grossProfit)}
+                {formatCurrency(metrics.grossProfit, metrics.currency)}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Net Revenue</p>
               <p className="text-xl font-bold text-gray-900 mt-1">
-                {formatCurrency(metrics.netRevenue)}
+                {formatCurrency(metrics.netRevenue, metrics.currency)}
               </p>
             </div>
           </div>

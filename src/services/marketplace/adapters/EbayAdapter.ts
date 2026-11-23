@@ -8,6 +8,7 @@
  */
 
 import MarketplaceAdapter from '@/services/marketplace/MarketplaceAdapter'
+import { parseEbayOrderFinancials } from '../orderFinancials'
 import {
   Address,
   Marketplace,
@@ -587,26 +588,29 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
         this.accessToken
       )
 
-      return (response.orders || []).map((order: any) => ({
-
-        id: order.orderId,
-        externalOrderId: order.orderId,
-        buyerId: order.buyer?.username || '',
-        buyerName: order.buyer?.username || '',
-        buyerEmail: order.buyer?.email || '',
-        totalPrice: order.pricingSummary?.total?.value
-          ? parseFloat(order.pricingSummary.total.value)
-          : 0,
-        status: order.orderStatus || 'pending',
-        createdAt: new Date(order.creationDate),
-        items: (order.lineItems || []).map((item: any) => ({
-          title: item.title,
-          quantity: item.quantity,
-          price: item.lineItemPrice?.value ? parseFloat(item.lineItemPrice.value) : 0,
-          sku: item.sku,
-        })),
-        shippingAddress: this.mapShipToAddress(this.findShipToInstruction(order.fulfillmentStartInstructions)?.shippingStep?.shipTo),
-      }))
+      return (response.orders || []).map((order: any) => {
+        // S8: strict amounts + the order's currency (see orderFinancials.ts)
+        const fin = parseEbayOrderFinancials(order)
+        return {
+          id: order.orderId,
+          externalOrderId: order.orderId,
+          buyerId: order.buyer?.username || '',
+          buyerName: order.buyer?.username || '',
+          buyerEmail: order.buyer?.email || '',
+          totalPrice: fin.totalPrice,
+          currency: fin.currency,
+          financialIssues: fin.issues,
+          status: order.orderStatus || 'pending',
+          createdAt: new Date(order.creationDate),
+          items: (order.lineItems || []).map((item: any, index: number) => ({
+            title: item.title,
+            quantity: item.quantity,
+            price: fin.itemPrices[index] ?? 0,
+            sku: item.sku,
+          })),
+          shippingAddress: this.mapShipToAddress(this.findShipToInstruction(order.fulfillmentStartInstructions)?.shippingStep?.shipTo),
+        }
+      })
     } catch (error) {
       throw ErrorNormalizer.normalize(error, 'ebay')
     }
@@ -627,21 +631,22 @@ export class EbayAdapter extends MarketplaceAdapter implements OAuthConnectable 
         this.accessToken
       )
 
+      const fin = parseEbayOrderFinancials(response)
       return {
         id: response.orderId,
         externalOrderId: response.orderId,
         buyerId: response.buyer?.username || '',
         buyerName: response.buyer?.username || '',
         buyerEmail: response.buyer?.email || '',
-        totalPrice: response.pricingSummary?.total?.value
-          ? parseFloat(response.pricingSummary.total.value)
-          : 0,
+        totalPrice: fin.totalPrice,
+        currency: fin.currency,
+        financialIssues: fin.issues,
         status: response.orderStatus || 'pending',
         createdAt: new Date(response.creationDate),
-        items: (response.lineItems || []).map((item: any) => ({
+        items: (response.lineItems || []).map((item: any, index: number) => ({
           title: item.title,
           quantity: item.quantity,
-          price: item.lineItemPrice?.value ? parseFloat(item.lineItemPrice.value) : 0,
+          price: fin.itemPrices[index] ?? 0,
         })),
         shippingAddress: this.mapShipToAddress(this.findShipToInstruction(response.fulfillmentStartInstructions)?.shippingStep?.shipTo),
       }

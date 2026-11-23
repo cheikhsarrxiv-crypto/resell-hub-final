@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { choosePrimaryCurrency, fromMinor, orderCurrency, toMinor } from '@/lib/financial';
 import { prisma } from '@/lib/prisma';
 import { ResellHubOrderStatus } from '@/services/marketplace/StatusMapper';
 import { AgentToolDefinition } from './types';
@@ -81,7 +82,7 @@ export const getSalesSummaryTool: AgentToolDefinition<GetSalesSummaryInput> = {
     // happens in memory below, the same "findMany + calcul mémoire"
     // pattern AnalyticsService.getDashboardMetrics already uses for this
     // exact shape of question.
-    const orders = await prisma.order.findMany({
+    const allOrders = await prisma.order.findMany({
       where: {
         workspaceId,
         createdAt: { gte: from, lte: to },
@@ -90,11 +91,28 @@ export const getSalesSummaryTool: AgentToolDefinition<GetSalesSummaryInput> = {
       select: {
         totalPrice: true,
         marketplace: true,
+        currency: true,
+        externalOrderId: true,
         items: { select: { quantity: true } },
       },
     });
 
     const period = { days, from: from.toISOString(), to: to.toISOString() };
+
+    // S8: amounts of different currencies are never added. The figures below are those of ONE currency (the
+    // one with most orders); orders in another currency are only counted in `otherCurrencies`.
+    const countByCurrency = new Map<string, number>();
+    for (const order of allOrders) {
+      const c = orderCurrency(order as any);
+      countByCurrency.set(c, (countByCurrency.get(c) ?? 0) + 1);
+    }
+    const currency = choosePrimaryCurrency(
+      [...countByCurrency.entries()].map(([c, n]) => ({ currency: c, orders: n })).sort((a, b) => b.orders - a.orders)
+    );
+    const orders = allOrders.filter((order) => orderCurrency(order as any) === currency);
+    const otherCurrencies = [...countByCurrency.entries()]
+      .filter(([c]) => c !== currency)
+      .map(([c, n]) => ({ currency: c, ordersCount: n }));
 
     if (orders.length === 0) {
       return {
@@ -105,16 +123,17 @@ export const getSalesSummaryTool: AgentToolDefinition<GetSalesSummaryInput> = {
       };
     }
 
-    let grossRevenue = 0;
+    let grossRevenueMinor = 0;
     let itemsSold = 0;
     // Order.marketplace is nullable — grouped under the real value (null
     // included) rather than fabricating an "Unknown" label for it.
     const byMarketplaceMap = new Map<string | null, MarketplaceBucket>();
+    const bucketMinor = new Map<string | null, number>();
 
     for (const order of orders) {
       const orderItemsSold = order.items.reduce((sum, item) => sum + item.quantity, 0);
 
-      grossRevenue += order.totalPrice;
+      grossRevenueMinor += toMinor(order.totalPrice, currency);
       itemsSold += orderItemsSold;
 
       const key = order.marketplace ?? null;
@@ -125,12 +144,14 @@ export const getSalesSummaryTool: AgentToolDefinition<GetSalesSummaryInput> = {
         itemsSold: 0,
       };
       bucket.ordersCount += 1;
-      bucket.grossRevenue += order.totalPrice;
+      bucketMinor.set(key, (bucketMinor.get(key) ?? 0) + toMinor(order.totalPrice, currency));
       bucket.itemsSold += orderItemsSold;
       byMarketplaceMap.set(key, bucket);
     }
 
     const ordersCount = orders.length;
+    const grossRevenue = fromMinor(grossRevenueMinor, currency);
+    for (const [key, bucket] of byMarketplaceMap) bucket.grossRevenue = fromMinor(bucketMinor.get(key) ?? 0, currency);
 
     return {
       found: true,
@@ -142,6 +163,8 @@ export const getSalesSummaryTool: AgentToolDefinition<GetSalesSummaryInput> = {
         averageOrderValue: ordersCount > 0 ? grossRevenue / ordersCount : 0,
       },
       byMarketplace: Array.from(byMarketplaceMap.values()),
+      currency,
+      otherCurrencies,
     };
   },
 };

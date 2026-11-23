@@ -42,11 +42,11 @@ describe('classifyMetricsResponse', () => {
     });
   });
 
-  it('403 -> plan_upgrade_required, never "Failed to load metrics" — this is expected tiering, not a failure', () => {
+  it('403 + ADVANCED_ANALYTICS_REQUIRED code -> plan_upgrade_required, never "Failed to load metrics" — this is expected tiering, not a failure', () => {
     expect(
       classifyMetricsResponse(
         403,
-        { error: 'Advanced analytics is not included in your current plan. Upgrade to unlock it.' },
+        { error: 'Advanced analytics is not included in your current plan. Upgrade to unlock it.', code: 'ADVANCED_ANALYTICS_REQUIRED' },
         'fallback'
       )
     ).toEqual({
@@ -55,11 +55,19 @@ describe('classifyMetricsResponse', () => {
     });
   });
 
-  it('403 with no error body text still gets a sensible default upgrade message, never a blank screen', () => {
-    expect(classifyMetricsResponse(403, {}, 'fallback')).toEqual({
+  it('403 with the Advanced code but no error body text still gets a sensible default upgrade message, never a blank screen', () => {
+    expect(classifyMetricsResponse(403, { code: 'ADVANCED_ANALYTICS_REQUIRED' }, 'fallback')).toEqual({
       kind: 'plan_upgrade_required',
       message: 'Advanced analytics is not included in your current plan. Upgrade to unlock it.',
     });
+  });
+
+  it('a 403 WITHOUT the Advanced code (e.g. unverified e-mail) is a real error, never an "upgrade" lock (Basic/Advanced split)', () => {
+    expect(classifyMetricsResponse(403, { error: 'Email verification required' }, 'fallback')).toEqual({
+      kind: 'error',
+      message: 'Email verification required',
+    });
+    expect(classifyMetricsResponse(403, {}, 'fallback')).toEqual({ kind: 'error', message: 'fallback' });
   });
 
   it('401 -> unauthorized, with the real server message', () => {
