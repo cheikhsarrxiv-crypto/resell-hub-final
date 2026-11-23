@@ -251,3 +251,33 @@ export type AiChatMessageInput = z.infer<typeof aiChatMessageSchema>;
 export type AiAgentMessageInput = z.infer<typeof aiAgentMessageSchema>;
 export type ResetPasswordWithTokenInput = z.infer<typeof resetPasswordWithTokenSchema>;
 export type ConnectManualCredentialsInput = z.infer<typeof connectManualCredentialsSchema>;
+
+/** R6 - PUT /api/workspaces/[id]: only these fields, with the type and size the columns expect. */
+export const workspaceUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    country: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z]{2}$/, 'country must be a 2-letter code')
+      .transform((c) => c.toUpperCase())
+      .optional(),
+  })
+  .strip();
+
+/** R6 - POST /api/onboarding body. `step` must be a whole number 1..7; free text is bounded. */
+export const onboardingStepSchema = z
+  .object({
+    step: z.number().int().min(1).max(7),
+    businessName: z.string().trim().max(200).optional(),
+    businessType: z.string().trim().max(100).optional(),
+    marketplaces: z.array(z.string().trim().min(1).max(50)).max(10).optional(),
+    productVolume: z.string().trim().max(100).optional(),
+    shippingMode: z.string().trim().max(100).optional(),
+    shippingPartner: z.string().trim().max(100).optional(),
+    importMethod: z.string().trim().max(100).optional(),
+    connectionsSetup: z.boolean().optional(),
+  })
+  .strip();
+

@@ -7,6 +7,13 @@ import { SubscriptionService } from './SubscriptionService';
 import { Marketplace, ErrorType } from '@/types/marketplace';
 import MarketplaceAdapter from './marketplace/MarketplaceAdapter';
 import { buildEtsyListingRequirements } from './marketplace/EtsyListingMapper';
+import {
+  listingConnectionPublicInclude,
+  listingListResponseSelect,
+  listingDetailResponseSelect,
+  listingMutationResponseSelect,
+} from '@/lib/publicResponseSelects';
+import { marketplaceConnectionRefSelect } from '@/lib/marketplaceConnectionPublicSelect';
 
 interface MarketplaceOAuthConfig {
   clientId: string;
@@ -210,9 +217,9 @@ export class ListingService {
             marketplaceConnectionId: connection.id,
             deletedAt: null,
           },
-          include: {
-            connection: { include: { marketplace: true } },
-          },
+          // Pushed into createdListings (returned to the browser):
+          // public connection only.
+          include: listingConnectionPublicInclude,
         });
 
         if (existingListing && existingListing.syncStatus !== 'failed') {
@@ -260,7 +267,7 @@ export class ListingService {
             // return whatever exists now, never publish a duplicate.
             const raceWinner = await prisma.listing.findFirst({
               where: { productId: product.id, marketplaceConnectionId: connection.id, deletedAt: null },
-              include: { connection: { include: { marketplace: true } } },
+              include: listingConnectionPublicInclude,
             });
             if (raceWinner) {
               createdListings.push(raceWinner);
@@ -313,11 +320,7 @@ export class ListingService {
               externalId: listingResponse.externalId,
               syncStatus: 'synced',
             },
-            include: {
-              connection: {
-                include: { marketplace: true },
-              },
-            },
+            include: listingConnectionPublicInclude,
           });
 
           createdListings.push(listing);
@@ -373,15 +376,47 @@ export class ListingService {
         id: listingId,
         workspaceId,
       },
+      // Internal callers (AI listing/update tools) read the full product.
+      // The connection is still narrowed to the public reference — the
+      // credentials are never needed by any caller of this method.
       include: {
-        product: {
-          include: { images: true },
-        },
-        connection: {
-          include: { marketplace: true },
-        },
-        orders: true,
+        product: { include: { images: true } },
+        connection: { select: marketplaceConnectionRefSelect },
       },
+    });
+  }
+
+  /**
+   * Same lookup as getListing, shaped for an API response
+   * (GET /api/listings/[id]): only the columns the detail page reads,
+   * trimmed product, public connection, no orders.
+   */
+  static async getListingForResponse(listingId: string, workspaceId: string) {
+    return prisma.listing.findFirst({
+      where: {
+        id: listingId,
+        workspaceId,
+      },
+      select: listingDetailResponseSelect,
+    });
+  }
+
+  /**
+   * Minimal response rows for POST / PATCH /api/listings. createListing /
+   * updateListing (and their idempotent / race / failed paths) are
+   * untouched; the route re-reads the affected rows through this
+   * workspace-scoped select and keeps the order of `ids`.
+   */
+  static async getListingsForMutationResponse(ids: string[], workspaceId: string) {
+    if (ids.length === 0) return [];
+    const rows = await prisma.listing.findMany({
+      where: { id: { in: ids }, workspaceId },
+      select: listingMutationResponseSelect,
+    });
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    return ids.flatMap((id) => {
+      const row = byId.get(id);
+      return row ? [row] : [];
     });
   }
 
@@ -403,11 +438,8 @@ export class ListingService {
           ...(status ? { status } : {}),
           ...(marketplaceId ? { connection: { marketplaceId } } : {}),
         },
-        include: {
-          product: true,
-          connection: { include: { marketplace: true } },
-          orders: true,
-        },
+        // Response shape: only the columns the listings list page reads.
+        select: listingListResponseSelect,
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
@@ -472,9 +504,8 @@ export class ListingService {
         price: data.price || listing.price,
         quantity: data.quantity || listing.quantity,
       },
-      include: {
-        connection: { include: { marketplace: true } },
-      },
+      // Returned by PATCH /api/listings/[id]: public connection only.
+      include: listingConnectionPublicInclude,
     });
   }
 

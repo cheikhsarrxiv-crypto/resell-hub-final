@@ -74,7 +74,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const listing = await ListingService.createListing(workspaceId, result.data);
+    const created = await ListingService.createListing(workspaceId, result.data);
+    // Same array shape as before, limited to the minimal response columns.
+    const listing = await ListingService.getListingsForMutationResponse(
+      created.map((row: { id: string }) => row.id),
+      workspaceId
+    );
 
     return NextResponse.json(
       {

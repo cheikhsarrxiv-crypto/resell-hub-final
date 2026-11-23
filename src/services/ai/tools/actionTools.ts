@@ -17,6 +17,7 @@ import { findToolResultsByName } from './conversationToolResults';
 import { isNormalizedSourcingResult } from '@/lib/ai/sourcingResults';
 import { StorageService, ALLOWED_MIME_TYPES, MAX_FILE_SIZE } from '@/services/StorageService';
 import { createLogger } from '@/lib/logger';
+import { fetchPublicUrl, readBodyWithLimit } from '@/lib/security/ssrfGuard';
 
 const logger = createLogger('action-tools');
 
@@ -45,7 +46,8 @@ const CONTENT_TYPE_EXTENSION: Record<string, string> = {
  * best-effort and never lets one failed download fail the whole publish.
  */
 async function downloadImageForEtsyUpload(url: string): Promise<{ data: Buffer; contentType: string }> {
-  const response = await fetch(url);
+  // R6: draft image URLs originate from external sourcing results — validated, redirect-checked, time-bounded.
+  const response = await fetchPublicUrl(url);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
   }
@@ -55,8 +57,8 @@ async function downloadImageForEtsyUpload(url: string): Promise<{ data: Buffer; 
     throw new Error(`Image content-type not allowed for Etsy upload: ${contentType || 'unknown'}`);
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > MAX_FILE_SIZE) {
+  const buffer = await readBodyWithLimit(response, MAX_FILE_SIZE);
+  if (!buffer) {
     throw new Error('Image too large for Etsy upload');
   }
 

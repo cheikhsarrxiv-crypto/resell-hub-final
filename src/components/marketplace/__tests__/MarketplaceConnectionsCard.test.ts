@@ -23,10 +23,12 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect } from 'vitest';
 
-const componentSource = fs.readFileSync(
-  path.join(process.cwd(), 'src/components/marketplace/MarketplaceConnectionsCard.tsx'),
-  'utf-8'
-);
+// Cross-platform: this checkout may use CRLF line endings (Windows, core.autocrlf=true) while the
+// patterns below are written with LF. Source is normalized to LF in memory only; the file itself is
+// never modified, and every assertion still runs against the real component source.
+const componentSource = fs
+  .readFileSync(path.join(process.cwd(), 'src/components/marketplace/MarketplaceConnectionsCard.tsx'), 'utf-8')
+  .replace(/\r\n/g, '\n');
 
 /**
  * Connector Hub audit (B1) finding: this card used to treat any status

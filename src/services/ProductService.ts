@@ -4,6 +4,34 @@ import { prisma } from '@/lib/prisma';
 import { SubscriptionService } from './SubscriptionService';
 import { ListingService } from './ListingService';
 
+/**
+ * R3-C.6 — the ONLY Product columns a caller-supplied update may write.
+ *
+ * `PATCH /api/products/[id]` used to hand the raw request body to
+ * `prisma.product.update({ data })`, so a client could also send
+ * `workspaceId` (moving its own product into another tenant's workspace),
+ * `id`, `deletedAt`, `createdAt`, ... — mass assignment. Everything that is
+ * not in this list is dropped before the write, for every caller (route and
+ * AI tools alike). The list is exactly the fields of createProductSchema;
+ * ownership and lifecycle columns are intentionally absent.
+ */
+export const PRODUCT_UPDATABLE_FIELDS = [
+  'sku', 'title', 'description', 'brand', 'category', 'size', 'color', 'model', 'condition',
+  'purchasePrice', 'sellingPrice', 'fulfillmentCost', 'quantity', 'location',
+  'sourceMarketplace', 'sourceId', 'sourceUrl', 'etsyTaxonomyId', 'etsyWhenMade',
+] as const;
+
+export function pickProductUpdateFields(data: unknown): Partial<UpdateProductInput> {
+  const source = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+  const picked: Record<string, unknown> = {};
+  for (const key of PRODUCT_UPDATABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+      picked[key] = source[key];
+    }
+  }
+  return picked as Partial<UpdateProductInput>;
+}
+
 /** Thrown by ProductService.createProduct on a (workspaceId, sku) conflict — see that method's own comment. Matched by message in /api/products' own route.ts, the same idiom already used for the "already has an active subscription" -> 409 case in /api/stripe/checkout/route.ts. */
 export const PRODUCT_SKU_CONFLICT_MESSAGE = 'A product with this SKU already exists in this workspace';
 
@@ -181,16 +209,19 @@ export class ProductService {
       throw new Error('Product not found');
     }
 
+    // Only allowlisted columns are written (see PRODUCT_UPDATABLE_FIELDS): never workspaceId, id, deletedAt, ...
+    const safeData = pickProductUpdateFields(data);
+
     const product = await prisma.product.update({
       where: { id: productId },
-      data,
+      data: safeData,
       include: {
         images: { orderBy: { order: 'asc' } },
       },
     });
 
     // Update inventory if quantity changed
-    if (data.quantity !== undefined) {
+    if (safeData.quantity !== undefined) {
       await prisma.inventory.update({
         where: {
           productId_workspaceId: {
@@ -199,8 +230,8 @@ export class ProductService {
           },
         },
         data: {
-          quantity: data.quantity,
-          available: data.quantity,
+          quantity: safeData.quantity,
+          available: safeData.quantity,
         },
       });
     }

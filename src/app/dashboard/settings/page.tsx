@@ -68,7 +68,7 @@ export default function SettingsPage() {
     setSuccess(false);
 
     try {
-      const response = await fetch(`/api/workspaces/${workspace.id}`, {
+      const response = await fetch(`/api/workspaces/${workspace.id}?workspaceId=${workspace.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

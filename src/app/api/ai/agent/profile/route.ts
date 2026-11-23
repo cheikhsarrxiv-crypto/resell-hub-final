@@ -19,7 +19,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
-import { verifyWorkspaceAccess } from '@/lib/security';
+import { verifyWorkspaceAccess, isDatabaseError } from '@/lib/security';
 import { SubscriptionService } from '@/services/SubscriptionService';
 import { prisma } from '@/lib/prisma';
 import { agentProfileInputSchema, type AgentProfileRecord } from '@/lib/ai/agentProfile';
@@ -73,6 +73,9 @@ async function resolveWorkspaceId(): Promise<string | NextResponse> {
  * maps to.
  */
 function profileErrorResponse(error: unknown): NextResponse {
+  if (isDatabaseError(error)) {
+    return NextResponse.json({ error: 'Internal server error', code: 'SERVER_ERROR' }, { status: 500 });
+  }
   const message = error instanceof Error ? error.message : 'Internal server error';
 
   if (message === 'Unauthorized' || message.includes('unauthorized')) {

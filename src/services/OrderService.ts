@@ -2,6 +2,11 @@ import { CreateOrderInput } from '@/lib/validations';
 import { prisma } from '@/lib/prisma';
 import { ProductService } from './ProductService';
 import { SubscriptionService } from './SubscriptionService';
+import {
+  orderDetailPublicInclude,
+  orderListResponseSelect,
+  orderDetailResponseSelect,
+} from '@/lib/publicResponseSelects';
 
 export class OrderService {
   static async createOrder(workspaceId: string, data: CreateOrderInput) {
@@ -70,14 +75,9 @@ export class OrderService {
             ],
           },
         },
-        include: {
-          items: {
-            include: { product: true },
-          },
-          listing: {
-            include: { connection: { include: { marketplace: true } } },
-          },
-        },
+        // Returned to the browser by POST /api/orders: public relations only
+        // (the internal listing query above keeps its full include).
+        include: orderDetailPublicInclude,
       });
 
       return order;
@@ -92,21 +92,38 @@ export class OrderService {
         id: orderId,
         workspaceId,
       },
-      include: {
-        items: { include: { product: true } },
-        listing: {
-          include: { connection: { include: { marketplace: true } } },
-        },
-        fulfillmentOrder: {
-          include: {
-            partner: true,
-            shipment: {
-              include: { trackingEvents: { orderBy: { timestamp: 'desc' } } },
-            },
-          },
-        },
-      },
+      include: orderDetailPublicInclude,
     });
+  }
+
+  /**
+   * Order shaped for an API response (GET /api/orders/[id], POST
+   * /api/orders): only what the order detail page reads. getOrder() below
+   * stays the richer, internal lookup (AI tools read tracking URL, ETA,
+   * externalOrderId, customerId, ...).
+   */
+  static async getOrderForResponse(orderId: string, workspaceId: string) {
+    const order = await prisma.order.findFirst({
+      where: {
+        id: orderId,
+        workspaceId,
+      },
+      select: orderDetailResponseSelect,
+    });
+    if (!order) return order;
+    // S8: derived flag only (R3-B.5.6 keeps externalOrderId out of responses): was this order imported from a
+    // marketplace (profit never computed) or created in ADKSY?
+    const synced = await prisma.order.count({ where: { id: orderId, workspaceId, externalOrderId: { not: null } } });
+    return { ...order, profitKnown: (synced ?? 0) === 0 };
+  }
+
+  /**
+   * Same write path as createOrder (unchanged business behavior), then the
+   * minimal response shape, re-read inside the same workspace.
+   */
+  static async createOrderForResponse(workspaceId: string, data: CreateOrderInput) {
+    const created = await this.createOrder(workspaceId, data);
+    return this.getOrderForResponse(created.id, workspaceId);
   }
 
   static async getOrders(workspaceId: string, limit = 50, offset = 0, status?: string) {
@@ -116,15 +133,8 @@ export class OrderService {
           workspaceId,
           ...(status ? { status } : {}),
         },
-        include: {
-          items: { include: { product: true } },
-          listing: {
-            include: { connection: { include: { marketplace: true } } },
-          },
-          fulfillmentOrder: {
-            include: { partner: true },
-          },
-        },
+        // Response shape: only the columns the orders list page reads.
+        select: orderListResponseSelect,
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
@@ -137,7 +147,17 @@ export class OrderService {
       }),
     ]);
 
-    return { orders, total };
+    // S8: derived flag (see getOrderForResponse) from an id-only query scoped to the same workspace.
+    const ids = orders.map((o: { id: string }) => o.id);
+    const synced = ids.length
+      ? await prisma.order.findMany({
+          where: { workspaceId, id: { in: ids }, externalOrderId: { not: null } },
+          select: { id: true },
+        })
+      : [];
+    const syncedIds = new Set((synced ?? []).map((o: { id: string }) => o.id));
+
+    return { orders: orders.map((o: { id: string }) => ({ ...o, profitKnown: !syncedIds.has(o.id) })), total };
   }
 
   static async updateOrderStatus(orderId: string, workspaceId: string, status: string) {

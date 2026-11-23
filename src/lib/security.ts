@@ -50,7 +50,36 @@ export async function getVerifiedWorkspaceId(request: NextRequest): Promise<stri
 /**
  * Error response helper
  */
+/**
+ * R6 — Prisma (and driver) errors carry the failed invocation: model, arguments, ids, column names.
+ * They must never reach a client. Business errors thrown by our own services keep their message.
+ */
+export function isDatabaseError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const e = error as { name?: unknown; message?: unknown; clientVersion?: unknown };
+  const name = typeof e.name === 'string' ? e.name : '';
+  const message = typeof e.message === 'string' ? e.message : '';
+  return (
+    name.startsWith('PrismaClient') ||
+    typeof e.clientVersion === 'string' ||
+    /Invalid `prisma\./.test(message) ||
+    /\bprisma\.\w+\.\w+\(\)/.test(message) ||
+    /Unique constraint failed|Foreign key constraint|Can't reach database|Raw query failed/.test(message)
+  );
+}
+
 export function errorResponse(error: unknown, statusCode: number = 500): NextResponse {
+  if (isDatabaseError(error)) {
+    const code = (error as { code?: unknown }).code;
+    if (code === 'P2002') return NextResponse.json({ error: 'Resource already exists' }, { status: 409 });
+    if (code === 'P2025') return NextResponse.json({ error: 'Resource not found' }, { status: 404 });
+    if (code === 'P2003') return NextResponse.json({ error: 'Operation conflicts with related data' }, { status: 409 });
+    const validation = (error as { name?: unknown }).name === 'PrismaClientValidationError';
+    return NextResponse.json(
+      { error: validation ? 'Invalid request data' : 'Internal server error' },
+      { status: validation ? 400 : statusCode }
+    );
+  }
   const message = error instanceof Error ? error.message : 'Internal server error';
 
   if (message === 'Unauthorized' || message.includes('unauthorized')) {

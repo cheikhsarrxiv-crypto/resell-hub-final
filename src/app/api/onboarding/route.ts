@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import { OnboardingService } from '@/services/OnboardingService';
+import { onboardingStepSchema } from '@/lib/validations';
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -33,15 +34,17 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const workspaceId = await getVerifiedWorkspaceId(request);
-    const data = await request.json();
+    const body = await request.json().catch(() => null);
 
-    // Validate step
-    if (!data.step || data.step < 1 || data.step > 7) {
+    // Validate step and every field (R6): whole step 1..7, bounded strings, typed flags
+    const parsed = onboardingStepSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: 'Invalid step. Must be between 1 and 7' },
+        { error: 'Invalid step data. Step must be a whole number between 1 and 7' },
         { status: 400 }
       );
     }
+    const data = parsed.data;
 
     const onboarding = await OnboardingService.updateStep(workspaceId, data);
 

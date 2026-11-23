@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const order = await OrderService.createOrder(workspaceId, result.data);
+    const order = await OrderService.createOrderForResponse(workspaceId, result.data);
 
     return NextResponse.json(
       {

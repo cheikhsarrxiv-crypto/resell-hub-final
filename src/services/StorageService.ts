@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import prisma from '@/lib/prisma';
+import { fetchPublicUrl, readBodyWithLimit } from '@/lib/security/ssrfGuard';
 
 // Initialize Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -148,7 +149,8 @@ export class StorageService {
       throw new Error('Storage service not configured. Please configure Supabase.');
     }
 
-    const response = await fetch(data.sourceUrl);
+    // R6: the URL can come from a third party (AI provider output, sourcing result) — never a raw fetch().
+    const response = await fetchPublicUrl(data.sourceUrl);
     if (!response.ok) {
       throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
     }
@@ -159,8 +161,8 @@ export class StorageService {
       throw new Error(`File type not allowed: ${normalizedContentType}`);
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > MAX_FILE_SIZE) {
+    const buffer = await readBodyWithLimit(response, MAX_FILE_SIZE);
+    if (!buffer) {
       throw new Error('File too large. Maximum size: 10MB');
     }
 
@@ -404,10 +406,36 @@ export class StorageService {
         throw new Error('Product not found or access denied');
       }
 
-      // Update all images in transaction
+      // SECURITY: every image id must belong to THIS product (and so to this
+      // workspace). The product check above only proves the product is ours;
+      // without this, a caller could pass image ids of another workspace (or
+      // of another product) and have their order / isMain rewritten. The
+      // check runs before any write, and a foreign, unknown or other-product
+      // id gets the same error as an inaccessible product so the response
+      // never reveals whether an image id exists elsewhere.
+      const imageIds = [...new Set(imageOrder.map((item) => item.id))];
+      if (imageIds.length > 0) {
+        const ownedImages = await prisma.productImage.findMany({
+          where: {
+            id: { in: imageIds },
+            productId,
+            product: { workspaceId },
+          },
+          select: { id: true },
+        });
+
+        if (ownedImages.length !== imageIds.length) {
+          throw new Error('Product not found or access denied');
+        }
+      }
+
+      // Update all images in transaction. Defense in depth: each write is
+      // also filtered by productId, so an id that stopped belonging to this
+      // product after the check still cannot be modified (the update then
+      // throws and the whole transaction rolls back).
       const updates = imageOrder.map((item) =>
         prisma.productImage.update({
-          where: { id: item.id },
+          where: { id: item.id, productId },
           data: {
             order: item.order,
             isMain: item.isMain || false,

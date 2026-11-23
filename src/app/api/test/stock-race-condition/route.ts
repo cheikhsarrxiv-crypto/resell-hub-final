@@ -8,17 +8,32 @@ import prisma from '@/lib/prisma';
  * 
  * Creates a test product and simulates concurrent orders
  */
+/** True only for the workspace of the throw-away user that this route's own `setup` action creates. */
+async function isSyntheticStockWorkspace(workspaceId: unknown): Promise<boolean> {
+  if (typeof workspaceId !== 'string' || workspaceId.length === 0) return false;
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { user: { select: { email: true } } },
+  });
+  const email = workspace?.user?.email ?? '';
+  return email.startsWith('test-stock-') && email.endsWith('@example.com');
+}
+
 export async function POST(request: NextRequest) {
   try {
-    // Security: Only allow in development
-    if (process.env.NODE_ENV === 'production') {
+    // Security (R3-C.9): only the local development server. Any other NODE_ENV (production,
+    // test, staging, unset...) is refused, so this unauthenticated helper can never run in a
+    // deployed environment.
+    if (process.env.NODE_ENV !== 'development') {
       return NextResponse.json(
-        { error: 'Test endpoint not available in production' },
+        { error: 'Test endpoint only available in development' },
         { status: 403 }
       );
     }
 
-    const { action } = await request.json();
+    // The body can be read only once.
+    const body = await request.json();
+    const { action } = body;
 
     if (action === 'setup') {
       // Create test user and workspace
@@ -60,7 +75,11 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'simulate') {
-      const { productId, workspaceId, attempts = 2 } = await request.json();
+      const { productId, workspaceId, attempts = 2 } = body;
+
+      if (!(await isSyntheticStockWorkspace(workspaceId))) {
+        return NextResponse.json({ error: 'Not a stock-test workspace' }, { status: 403 });
+      }
 
       // Simulate concurrent reservation attempts
       const reservations = Array(attempts)
@@ -94,7 +113,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'cleanup') {
-      const { workspaceId } = await request.json();
+      const { workspaceId } = body;
+
+      // This helper only ever removes the synthetic workspaces its own `setup` action created.
+      if (!(await isSyntheticStockWorkspace(workspaceId))) {
+        return NextResponse.json({ error: 'Not a stock-test workspace' }, { status: 403 });
+      }
 
       // Delete test data
       await prisma.product.deleteMany({

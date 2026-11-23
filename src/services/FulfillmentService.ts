@@ -3,6 +3,13 @@ import { prisma } from '@/lib/prisma';
 import { SubscriptionService } from './SubscriptionService';
 import { NotificationService } from './NotificationService';
 import { getFulfillmentProvider } from './fulfillment/registry';
+import {
+  fulfillmentPartnerPublicSelect,
+  fulfillmentOrderPublicInclude,
+  fulfillmentOrderListResponseSelect,
+  fulfillmentOrderSendResponseSelect,
+  fulfillmentOrderDetailPublicInclude,
+} from '@/lib/publicResponseSelects';
 import type { CreateFulfillmentOrderInput } from './fulfillment/FulfillmentProvider';
 
 type OrderWithItemsForFulfillment = Prisma.OrderGetPayload<{
@@ -73,9 +80,10 @@ export class FulfillmentService {
         profit,
         externalOrderId: `FUL-${Date.now()}`,
       },
-      include: {
-        partner: true,
-      },
+      // Returned by POST /api/fulfillment/send: public partner only. The
+      // full partner row used for dispatch (providerId, costs) is the
+      // separate, internal `partner` lookup above.
+      include: fulfillmentOrderPublicInclude,
     });
 
     // Update order status
@@ -142,7 +150,7 @@ export class FulfillmentService {
       return prisma.fulfillmentOrder.update({
         where: { id: fulfillmentOrder.id },
         data: { externalOrderId: providerStatus.externalOrderId, status: providerStatus.status },
-        include: { partner: true },
+        include: fulfillmentOrderPublicInclude,
       });
     } catch (error) {
       // Best-effort cleanup writes — each wrapped so a logging/notification
@@ -461,23 +469,24 @@ export class FulfillmentService {
   }
 
   /**
+   * Minimal fulfillment order for POST /api/fulfillment/send's response
+   * (the dashboard only checks response.ok). sendToFulfillment itself stays
+   * untouched; this re-reads the created row inside the workspace.
+   */
+  static async getFulfillmentOrderForSendResponse(fulfillmentOrderId: string, workspaceId: string) {
+    return prisma.fulfillmentOrder.findFirst({
+      where: { id: fulfillmentOrderId, workspaceId },
+      select: fulfillmentOrderSendResponseSelect,
+    });
+  }
+
+  /**
    * Get fulfillment order with all details
    */
   static async getFulfillmentOrder(fulfillmentOrderId: string, workspaceId: string) {
     return prisma.fulfillmentOrder.findFirst({
       where: { id: fulfillmentOrderId, workspaceId },
-      include: {
-        order: {
-          include: {
-            items: { include: { product: true } },
-            listing: { include: { connection: { include: { marketplace: true } } } },
-          },
-        },
-        partner: true,
-        shipment: {
-          include: { trackingEvents: { orderBy: { timestamp: 'desc' } } },
-        },
-      },
+      include: fulfillmentOrderDetailPublicInclude,
     });
   }
 
@@ -496,18 +505,8 @@ export class FulfillmentService {
           workspaceId,
           ...(status ? { status } : {}),
         },
-        include: {
-          order: {
-            include: {
-              items: true,
-              listing: { include: { connection: { include: { marketplace: true } } } },
-            },
-          },
-          partner: true,
-          shipment: {
-            include: { trackingEvents: { orderBy: { timestamp: 'desc' }, take: 1 } },
-          },
-        },
+        // Response shape: only the columns the fulfillment dashboard reads.
+        select: fulfillmentOrderListResponseSelect,
         orderBy: { createdAt: 'desc' },
         take: limit,
         skip: offset,
@@ -558,8 +557,11 @@ export class FulfillmentService {
    * Get available fulfillment partners
    */
   static async getAvailablePartners() {
+    // Partners are global rows carrying apiKey / apiUrl / webhookUrl:
+    // only the public allowlist may ever reach an API response.
     return prisma.fulfillmentPartner.findMany({
       where: { status: 'active' },
+      select: fulfillmentPartnerPublicSelect,
     });
   }
 

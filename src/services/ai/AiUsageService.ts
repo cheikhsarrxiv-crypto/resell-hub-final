@@ -77,9 +77,12 @@ import { getToolUsageUnits, getDefaultMonthlyUnitsForPlan } from './aiUsageConfi
  * every other conditional update in this codebase relies on, never
  * `$transaction`/`Serializable`. This is the same class of escape hatch
  * already used elsewhere in this codebase (`StockService.reserveStock`
- * calls a Postgres function via `$queryRaw` for the same reason) — this
- * file deliberately uses a plain inline `UPDATE`, not a stored function,
- * to keep the whole guarantee visible and self-contained in one migration.
+ * calls a Postgres function via `$queryRaw`; C1 NOTE: that function is not
+ * created by any migration in this repository, so that precedent is not
+ * proven — the proven one is ProductService.reserveInventory's conditional
+ * `updateMany`) — this file deliberately uses a plain inline `UPDATE`, not
+ * a stored function, to keep the whole guarantee visible and self-contained
+ * in one migration.
  *
  * Idempotence (unchanged in spirit from V1): the (workspaceId,
  * idempotencyKey) UNIQUE constraint on AiUsageEvent is attempted FIRST,

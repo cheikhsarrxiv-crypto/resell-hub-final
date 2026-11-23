@@ -14,7 +14,7 @@ export async function GET(
   try {
     const workspaceId = await getVerifiedWorkspaceId(request);
 
-    const order = await OrderService.getOrder(params.orderId, workspaceId);
+    const order = await OrderService.getOrderForResponse(params.orderId, workspaceId);
 
     if (!order) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });

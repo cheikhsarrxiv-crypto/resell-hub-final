@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getVerifiedWorkspaceId, errorResponse } from '@/lib/security';
 import prisma from '@/lib/prisma';
+import { workspaceUpdateSchema } from '@/lib/validations';
 
 // This route reads the authenticated session (via headers()/cookies()
 // under the hood), so it must never be statically rendered or cached —
@@ -66,17 +67,23 @@ export async function PUT(
       );
     }
 
-    const data = await request.json();
+    const data = await request.json().catch(() => null);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
 
-    // Only allow these fields to be updated
-    const allowedFields = ['name', 'description', 'country'];
-    const updateData: any = {};
-
-    allowedFields.forEach((field) => {
-      if (data[field] !== undefined) {
-        updateData[field] = data[field];
-      }
-    });
+    // Only allow these fields to be updated, with the type and size each column expects (R6)
+    const parsed = workspaceUpdateSchema.safeParse(data);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'Invalid input', details: parsed.error.errors.map((e) => ({ path: e.path, message: e.message })) },
+        { status: 400 }
+      );
+    }
+    const updateData: Record<string, string | null> = {};
+    for (const [field, value] of Object.entries(parsed.data)) {
+      if (value !== undefined) updateData[field] = value;
+    }
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json(

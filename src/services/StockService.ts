@@ -12,6 +12,19 @@ export interface StockReservationResult {
 /**
  * Stock Service - Atomic operations
  * Uses PostgreSQL transactions and functions to prevent race conditions
+ *
+ * C1 NOTE (accuracy only - no behaviour changed): `reserveStock` below calls a SQL function
+ * `reserve_product_stock(productId, quantity)` that NO migration in prisma/migrations creates
+ * (a database built from the 18 committed migrations has no such function), and no tracked
+ * commit ever contained the "stock_race_fix" migration that older documents mention. On such a
+ * database `reserveStock` therefore catches the "function does not exist" error and returns
+ * { success: false }. Its only caller is the development-only test route
+ * /api/test/stock-race-condition. Real sales do NOT use this class: they go through
+ * ProductService.reserveInventory (one conditional UPDATE on Inventory.available, which is the
+ * source of truth for stock). `releaseStock` / `getStockLevel` / `isStockAvailable` act on
+ * Product.quantity, which is NOT the live stock figure. Whether a real database has the function
+ * is unverified from this repository. Keep, rewrite or delete this class only through a
+ * deliberate, separately authorised decision.
  */
 export class StockService {
   /**

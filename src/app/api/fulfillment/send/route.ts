@@ -15,11 +15,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const fulfillmentOrder = await FulfillmentService.sendToFulfillment(
+    const sent = await FulfillmentService.sendToFulfillment(
       orderId,
       workspaceId,
       partnerId
     );
+    // Minimal response (id, status, costs, public partner): the dashboard
+    // only checks response.ok.
+    const fulfillmentOrder =
+      (await FulfillmentService.getFulfillmentOrderForSendResponse(sent.id, workspaceId)) ?? {
+        id: sent.id,
+        status: sent.status,
+      };
 
     return NextResponse.json({
       success: true,

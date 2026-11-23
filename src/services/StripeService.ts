@@ -219,6 +219,17 @@ export class StripeService {
       });
 
       if (existingStripeSubscription) {
+        // SECURITY (R3-C.9): the subscription row is identified by its Stripe id. If it is
+        // already linked to a different workspace than the one this event names, refuse:
+        // never rewrite one tenant's subscription on behalf of another.
+        const owner = await prisma.workspace.findFirst({
+          where: { subscriptionId: existingStripeSubscription.id },
+          select: { id: true },
+        });
+        if (owner && owner.id !== workspaceId) {
+          throw new Error('Subscription already belongs to another workspace');
+        }
+
         // Already processed - update if needed
         await prisma.subscription.update({
           where: { id: existingStripeSubscription.id },

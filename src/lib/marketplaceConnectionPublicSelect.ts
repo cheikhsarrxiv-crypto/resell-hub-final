@@ -32,3 +32,24 @@ export const marketplaceConnectionPublicSelect = {
 export type MarketplaceConnectionPublic = Prisma.MarketplaceConnectionGetPayload<{
   select: typeof marketplaceConnectionPublicSelect
 }>
+
+/**
+ * Narrower allowlist for a `connection` relation nested inside another
+ * API response (Order.listing.connection, Listing.connection, ...). The
+ * dashboard only ever reads connection.marketplace.displayName there; id,
+ * marketplaceId and marketplace.name identify the connection without
+ * carrying status, sync times or any credential.
+ *
+ * Use marketplaceConnectionPublicSelect (above) for the Integrations
+ * page, which does need status and timestamps.
+ */
+export const marketplaceConnectionRefSelect = {
+  id: true,
+  marketplaceId: true,
+  marketplace: {
+    select: {
+      name: true,
+      displayName: true,
+    },
+  },
+} satisfies Prisma.MarketplaceConnectionSelect

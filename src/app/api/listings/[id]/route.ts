@@ -21,7 +21,7 @@ export async function GET(
     // Then fetch with the full relations the detail page needs
     // (product + images, marketplace connection) — same helper already
     // used elsewhere in this service, not duplicated logic.
-    const listing = await ListingService.getListing(params.id, workspaceId);
+    const listing = await ListingService.getListingForResponse(params.id, workspaceId);
 
     return NextResponse.json({
       success: true,
@@ -45,7 +45,8 @@ export async function PATCH(
 
     const data = await request.json();
 
-    const listing = await ListingService.updateListing(params.id, workspaceId, data);
+    const updated = await ListingService.updateListing(params.id, workspaceId, data);
+    const [listing] = await ListingService.getListingsForMutationResponse([updated.id], workspaceId);
 
     return NextResponse.json({
       success: true,
