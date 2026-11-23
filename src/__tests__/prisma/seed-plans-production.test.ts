@@ -193,12 +193,12 @@ describe('seed-plans-production.js — scope discipline (static source checks)',
   });
 });
 
-describe('prisma/seed.js — unchanged by this task', () => {
-  it('still contains its original demo-data responsibilities (proves it was not trimmed or altered)', () => {
+describe('prisma/seed.js — still the demo seed (repaired and secured in R4/R5; behaviour covered by seed-safety.test.ts)', () => {
+  it('still contains its original demo-data responsibilities (proves it was not trimmed)', () => {
     const seedJsPath = path.resolve(__dirname, '../../../prisma/seed.js');
     const source = fs.readFileSync(seedJsPath, 'utf8');
-    expect(source).toContain("prisma.workspace.create");
-    expect(source).toContain("demo@reselling.local");
-    expect(source).toContain('prisma.plan.upsert');
+    expect(source).toContain('workspace.create');
+    expect(source).toContain('demo@reselling.local');
+    expect(source).toContain('plan.upsert');
   });
 });

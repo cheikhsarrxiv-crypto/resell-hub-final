@@ -37,6 +37,17 @@
  * summary below and exits — the same behavior as passing --dry-run,
  * which always skips writes regardless of ALLOW_PRODUCTION_PLAN_SEED.
  *
+ * Target confirmation (R4/R5): before ANY write the script prints the database
+ * host / port / name (never the user, the password or URL parameters) and
+ * requires the operator to name the WHOLE target explicitly:
+ * PLAN_SEED_EXPECTED_DB_HOST, PLAN_SEED_EXPECTED_DB_PORT and
+ * PLAN_SEED_EXPECTED_DB_NAME must equal host, port and database name of
+ * DATABASE_URL. It also refuses ambiguous URLs (host=/port=/dbname=/options=
+ * parameters, several hosts), a DIRECT_URL for another target, any .env file
+ * that defines another target, and any internal failure of the check.
+ * Refusal = exit code 2 and no client is even created. Dry runs and read-only
+ * summaries are unaffected. The plans are written in ONE transaction.
+ *
  * Uses the project's normal Prisma configuration (the same
  * `datasource db { url = env("DATABASE_URL") }` from prisma/schema.prisma
  * that every other part of this app uses) — no separate connection
@@ -46,8 +57,10 @@
  * itself, and importing/requiring it from a test never calls main()):
  *   Dry run (always read-only, any environment):
  *     node prisma/seed-plans-production.js --dry-run
- *   Real run (writes only once explicitly opted in):
- *     ALLOW_PRODUCTION_PLAN_SEED=true node prisma/seed-plans-production.js
+ *   Real run (writes only once explicitly opted in AND the target host is named):
+ *     ALLOW_PRODUCTION_PLAN_SEED=true PLAN_SEED_EXPECTED_DB_HOST=<host> \
+ *       PLAN_SEED_EXPECTED_DB_PORT=<port> PLAN_SEED_EXPECTED_DB_NAME=<name> \
+ *       node prisma/seed-plans-production.js   (the three values: as shown by the dry run)
  */
 
 const { PrismaClient } = require('@prisma/client');
@@ -193,6 +206,156 @@ function getStripeEnvPresence(env = process.env) {
   return presence;
 }
 
+/**
+ * Non-sensitive description of the database this script would use: host, port and database name only —
+ * never the user, the password or any URL parameter. Returns null when DATABASE_URL is missing/malformed.
+ */
+function describeDatabaseTarget(env = process.env) {
+  try {
+    const url = new URL(env.DATABASE_URL);
+    return {
+      host: url.hostname.toLowerCase(),
+      port: url.port || '(default)',
+      database: decodeURIComponent(url.pathname.replace(/^\//, '')),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ---- Full target confirmation (R4/R5 follow-up) --------------------------------------------------
+ * Hostname alone is not enough (several databases can live on one server). Before ANY write the
+ * operator must name the WHOLE target, in three variables whose values are never hardcoded here:
+ *   PLAN_SEED_EXPECTED_DB_HOST   PLAN_SEED_EXPECTED_DB_PORT   PLAN_SEED_EXPECTED_DB_NAME
+ * and host + port + database name of DATABASE_URL must each equal them exactly. Also refused:
+ *   - any ambiguous / alternative connection parameter in the URL (host=, port=, dbname=, options=...);
+ *   - several hosts in one URL, a unix-socket URL, a non-postgres scheme;
+ *   - DIRECT_URL set but describing another target (or itself ambiguous);
+ *   - any env file that Prisma/dotenv may read (.env, prisma/.env, ...) defining DATABASE_URL / DIRECT_URL
+ *     for another target (or ambiguously);
+ *   - any internal failure of this check (fail-closed).
+ * Refusal reasons are fixed codes: they never contain a URL, user, password or parameter value.
+ */
+const EXPECTED_TARGET_VARS = Object.freeze({
+  host: 'PLAN_SEED_EXPECTED_DB_HOST',
+  port: 'PLAN_SEED_EXPECTED_DB_PORT',
+  database: 'PLAN_SEED_EXPECTED_DB_NAME',
+});
+
+const AMBIGUOUS_URL_PARAMS = Object.freeze([
+  'host', 'hostaddr', 'port', 'dbname', 'database', 'user', 'password', 'service', 'servicefile',
+  'passfile', 'options', 'target_session_attrs', 'load_balance_hosts',
+]);
+
+const ENV_FILE_CANDIDATES = Object.freeze([
+  '.env', '.env.local', '.env.development', '.env.development.local', '.env.test', '.env.test.local',
+  '.env.production', '.env.production.local', 'prisma/.env',
+]);
+
+/** Parses one postgres URL into { host, port, database } or returns a fixed reason code. Pure; never throws. */
+function parseDatabaseUrl(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return { reason: 'URL_MISSING' };
+  let url;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return { reason: 'URL_MALFORMED' };
+  }
+  if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') return { reason: 'URL_NOT_POSTGRES' };
+  // several hosts (host1:5432,host2:5432) make the effective target ambiguous
+  const authority = raw.trim().replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0];
+  const hostPart = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority;
+  if (hostPart.includes(',')) return { reason: 'URL_MULTIPLE_HOSTS' };
+  const host = decodeURIComponent(url.hostname).toLowerCase();
+  if (!host) return { reason: 'URL_NO_HOST' };
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  if (!database || database.includes('/')) return { reason: 'URL_NO_DATABASE' };
+  for (const key of url.searchParams.keys()) {
+    if (AMBIGUOUS_URL_PARAMS.includes(key.toLowerCase())) return { reason: 'URL_AMBIGUOUS_PARAMETER' };
+  }
+  return { target: { host, port: url.port || '5432', database } };
+}
+
+/** Reads the three expected values from the environment; returns { expected } or a reason code. */
+function readExpectedTarget(env) {
+  const host = (env[EXPECTED_TARGET_VARS.host] || '').trim().toLowerCase();
+  const port = (env[EXPECTED_TARGET_VARS.port] || '').trim();
+  const database = (env[EXPECTED_TARGET_VARS.database] || '').trim();
+  if (!host || !port || !database) return { reason: 'EXPECTED_TARGET_INCOMPLETE' };
+  if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) return { reason: 'EXPECTED_PORT_INVALID' };
+  return { expected: { host, port: String(Number(port)), database } };
+}
+
+function sameTarget(a, b) {
+  return a.host === b.host && a.port === b.port && a.database === b.database;
+}
+
+/** DATABASE_URL / DIRECT_URL assignments of a dotenv text (later assignment wins, like dotenv). Pure. */
+function findDbVarsInEnvText(text) {
+  const found = {};
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?(DATABASE_URL|DIRECT_URL)\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let value = m[2].trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.includes(quote, 1)) value = value.slice(1, value.indexOf(quote, 1));
+    else value = value.replace(/\s+#.*$/, '').trim();
+    if (value.length > 0) found[m[1]] = value;
+  }
+  return found;
+}
+
+/**
+ * Fail-closed confirmation, required before any write. `io` is injectable for tests:
+ *   { root, exists(path) -> boolean, read(path) -> string }
+ * Returns { ok: true, target } or { ok: false, reason } where reason is a fixed, non-sensitive sentence.
+ */
+function checkExpectedTarget(env = process.env, io) {
+  try {
+    const exp = readExpectedTarget(env);
+    if (exp.reason) {
+      return {
+        ok: false,
+        reason:
+          exp.reason === 'EXPECTED_PORT_INVALID'
+            ? `${EXPECTED_TARGET_VARS.port} is not a valid port: nothing was written`
+            : `the full expected target is not set: define ${Object.values(EXPECTED_TARGET_VARS).join(', ')} ` +
+              '(host, port and database name shown by the dry run): nothing was written',
+      };
+    }
+    const main = parseDatabaseUrl(env.DATABASE_URL);
+    if (main.reason) return { ok: false, reason: `DATABASE_URL cannot be used as a write target (${main.reason}): nothing was written` };
+    if (!sameTarget(main.target, exp.expected)) {
+      const which = ['host', 'port', 'database'].filter((k) => main.target[k] !== exp.expected[k]);
+      return { ok: false, reason: `DATABASE_URL does not match the expected target (differs on: ${which.join(', ')}): nothing was written` };
+    }
+    if (env.DIRECT_URL !== undefined && String(env.DIRECT_URL).trim() !== '') {
+      const direct = parseDatabaseUrl(env.DIRECT_URL);
+      if (direct.reason) return { ok: false, reason: `DIRECT_URL cannot be used as a write target (${direct.reason}): nothing was written` };
+      if (!sameTarget(direct.target, exp.expected)) {
+        return { ok: false, reason: 'DIRECT_URL describes another target than the expected one: nothing was written' };
+      }
+    }
+    if (io) {
+      for (const rel of ENV_FILE_CANDIDATES) {
+        const abs = `${io.root}/${rel}`;
+        if (!io.exists(abs)) continue;
+        const vars = findDbVarsInEnvText(io.read(abs));
+        for (const [name, raw] of Object.entries(vars)) {
+          const parsed = parseDatabaseUrl(raw);
+          if (parsed.reason || !sameTarget(parsed.target, exp.expected)) {
+            return { ok: false, reason: `env file ${rel} defines ${name} for another or ambiguous target: nothing was written` };
+          }
+        }
+      }
+    }
+    return { ok: true, target: main.target };
+  } catch {
+    return { ok: false, reason: 'the target check failed internally (fail-closed): nothing was written' };
+  }
+}
+
 function printSummary({ existingPlans, plans, stripeEnvPresence }) {
   const existingNames = existingPlans.map((p) => p.name).sort();
   const missingNames = getMissingPlanNames(existingPlans, plans).sort();
@@ -212,39 +375,73 @@ function printSummary({ existingPlans, plans, stripeEnvPresence }) {
   console.log('--------------------------------------');
 }
 
-async function main() {
-  const dryRun = process.argv.includes('--dry-run');
-  const allowFlag = process.env.ALLOW_PRODUCTION_PLAN_SEED;
+/**
+ * Returns the process exit code (0 ok, 2 refused). Every dependency is injectable so the refusal paths
+ * can be tested without any database: `createClient` is called only AFTER the target check passed for a
+ * write run, so a refused run never even builds a client.
+ */
+async function main({
+  env = process.env,
+  argv = process.argv,
+  createClient = () => new PrismaClient(),
+  io = {
+    root: require('path').resolve(__dirname, '..'),
+    exists: (p) => require('fs').existsSync(p),
+    read: (p) => require('fs').readFileSync(p, 'utf8'),
+  },
+  log = console.log,
+  logError = console.error,
+} = {}) {
+  const dryRun = argv.includes('--dry-run');
+  const allowFlag = env.ALLOW_PRODUCTION_PLAN_SEED;
+  const writeRequested = isWriteAllowed({ dryRun, allowFlag });
 
-  const prisma = new PrismaClient();
+  const target = describeDatabaseTarget(env);
+  log(
+    'Database target (host / port / name only):',
+    target ? `${target.host} / ${target.port} / ${target.database}` : '(DATABASE_URL missing or malformed)'
+  );
+
+  if (writeRequested) {
+    const confirmation = checkExpectedTarget(env, io);
+    if (!confirmation.ok) {
+      logError(`REFUSED: ${confirmation.reason}`);
+      return 2;
+    }
+  }
+
+  const prisma = createClient();
   try {
-    const plans = buildPlans(process.env);
-    const stripeEnvPresence = getStripeEnvPresence(process.env);
+    const plans = buildPlans(env);
+    const stripeEnvPresence = getStripeEnvPresence(env);
 
-    // Read-only — the only table touched by this script, in either mode.
+    // Read-only: which plans already exist.
     const existingPlans = await prisma.plan.findMany({ select: { name: true } });
 
     printSummary({ existingPlans, plans, stripeEnvPresence });
 
-    if (!isWriteAllowed({ dryRun, allowFlag })) {
-      console.log(
+    if (!writeRequested) {
+      log(
         dryRun
           ? 'Dry run: no write performed.'
           : 'ALLOW_PRODUCTION_PLAN_SEED is not set to "true": no write performed. ' +
               'Set ALLOW_PRODUCTION_PLAN_SEED=true explicitly to actually create the missing plans.'
       );
-      return;
+      return 0;
     }
 
-    console.log('ALLOW_PRODUCTION_PLAN_SEED=true — creating missing plans now (existing plans are never modified)...');
-    for (const plan of plans) {
-      await prisma.plan.upsert({
-        where: { name: plan.name },
-        update: {},
-        create: plan,
-      });
-    }
-    console.log('Done.');
+    log('ALLOW_PRODUCTION_PLAN_SEED=true and the full target is confirmed — creating missing plans now in one transaction (existing plans are never modified)...');
+    await prisma.$transaction(
+      plans.map((plan) =>
+        prisma.plan.upsert({
+          where: { name: plan.name },
+          update: {},
+          create: plan,
+        })
+      )
+    );
+    log('Done.');
+    return 0;
   } finally {
     await prisma.$disconnect();
   }
@@ -256,6 +453,14 @@ module.exports = {
   getMissingPlanNames,
   isWriteAllowed,
   getStripeEnvPresence,
+  describeDatabaseTarget,
+  checkExpectedTarget,
+  parseDatabaseUrl,
+  readExpectedTarget,
+  findDbVarsInEnvText,
+  EXPECTED_TARGET_VARS,
+  ENV_FILE_CANDIDATES,
+  main,
   printSummary,
 };
 
@@ -263,8 +468,13 @@ module.exports = {
 // — requiring this file from a test imports the pure helpers above
 // without ever opening a Prisma connection or writing anything.
 if (require.main === module) {
-  main().catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
+  main()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((e) => {
+      // never print the raw error: a Prisma error can embed connection details
+      console.error(`Plan seed failed (${(e && e.code) || (e && e.name) || 'error'}).`);
+      process.exit(1);
+    });
 }

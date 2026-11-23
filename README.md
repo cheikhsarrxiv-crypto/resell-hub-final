@@ -25,7 +25,7 @@ Toutes les intégrations ont une architecture propre prête à connecter les vra
 ## 🚀 Installation
 
 ### Prérequis
-- Node.js 18+
+- Node.js 22.20+ (declared in package.json "engines" and .nvmrc)
 - PostgreSQL 13+
 - npm ou yarn
 
@@ -90,8 +90,7 @@ L'application est maintenant disponible à `http://localhost:3000`
 ### Parcours Utilisateur Complet (Créé dans la DB de démonstration)
 
 **Accès à la démo:**
-- Email: `demo@reselling.local`
-- Password: `demo1234`
+Le compte de démonstration `demo@reselling.local` est créé **sans mot de passe** par défaut. Pour un compte protégé, définissez `ADKSY_DEMO_USER_PASSWORD` (12 caractères minimum) avant `npm run db:seed -- --confirm-local-test-db`. La seed et les scripts `db:*` ne ciblent que la base locale de test dédiée (voir `docs/DB-SAFETY.md`) ; aucun identifiant n'est publié dans le dépôt.
 
 **Scénario Complet à Tester:**
 

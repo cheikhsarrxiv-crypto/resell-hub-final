@@ -1,5 +1,8 @@
 # Build stage
-FROM node:18-alpine AS builder
+# S7: Node 22+ is required by locked dependencies (@supabase/supabase-js needs >=22.0.0) and the
+# repository declares engines.node >=22.20.0. "22-alpine" floats on the 22.x line: pin an exact
+# 22.20+ tag once it is confirmed against the registry.
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -19,7 +22,7 @@ RUN npx prisma generate
 RUN npm run build
 
 # Production stage
-FROM node:18-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 

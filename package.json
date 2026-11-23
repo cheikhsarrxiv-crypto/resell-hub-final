@@ -2,6 +2,9 @@
   "name": "reselling-saas",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.20.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,10 +13,13 @@
     "postinstall": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:push": "prisma db push",
-    "db:studio": "prisma studio",
-    "db:seed": "node prisma/seed.js",
-    "db:reset": "prisma migrate reset --force"
+    "db:push": "node scripts/db/guarded-prisma.mjs push",
+    "db:studio": "node scripts/db/guarded-prisma.mjs studio",
+    "db:seed": "node scripts/db/guarded-prisma.mjs seed",
+    "db:reset": "node scripts/db/guarded-prisma.mjs reset",
+    "db:check": "node scripts/db/guarded-prisma.mjs check",
+    "db:migrate:status": "node scripts/db/guarded-prisma.mjs status",
+    "db:migrate:deploy": "node scripts/db/guarded-prisma.mjs deploy"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

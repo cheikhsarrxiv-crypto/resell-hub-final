@@ -13,6 +13,11 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // R3-C.2.1: fail-closed DB safety guard, run before EVERY test file (so
+    // before any module-level `new PrismaClient()` of the live DB tests). If
+    // DATABASE_URL / DIRECT_URL is set to anything but the dedicated local
+    // R3-C database, the run aborts; with no DB variable nothing can connect.
+    setupFiles: ['./src/lib/testing/vitestDbGuard.setup.ts', './src/lib/testing/vitestNoDns.setup.ts'],
   },
   resolve: {
     alias: {

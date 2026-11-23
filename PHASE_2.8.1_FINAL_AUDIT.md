@@ -1,3 +1,13 @@
+> **C1 CORRECTION (2026-11-20) — read before trusting this document.**
+> This file claims that a PostgreSQL function `reserve_product_stock()`, a
+> `quantity >= 0` CHECK constraint and/or a migration `prisma/migrations/stock_race_fix/`
+> exist. **No commit reachable from any branch of this repository ever contained that migration,
+> and none of the 18 migrations in `prisma/migrations` creates the function or the CHECK**
+> (a database built from them has neither). The ticks below describe what was *written*,
+> not what exists. Whether any real database has them is unverified from this repository.
+> The sale path actually used by the application is `ProductService.reserveInventory`
+> (one conditional `UPDATE` on `Inventory.available`). Decision and evidence: `docs/ROADMAP-STATUS.md` section 10.
+
 # 📋 PHASE 2.8.1 — FINAL PRODUCTION AUDIT
 
 **Date**: 12 August 2026  

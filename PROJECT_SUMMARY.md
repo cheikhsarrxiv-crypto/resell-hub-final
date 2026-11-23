@@ -290,8 +290,9 @@ npm run dev
 ### Accès
 ```
 URL: http://localhost:3000
-Email: demo@reselling.local
-Password: demo1234
+Compte de démo: demo@reselling.local — sans mot de passe par défaut ;
+définir ADKSY_DEMO_USER_PASSWORD (12 caractères min.) avant `npm run db:seed -- --confirm-local-test-db`.
+La seed ne cible que la base locale de test dédiée (docs/DB-SAFETY.md).
 ```
 
 ### Test du Flux Complet
